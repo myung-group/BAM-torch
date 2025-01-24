@@ -23,7 +23,7 @@ $ pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv
 ```
 And then,
 ```
-$ pip install pandas mendeleev pytorch_warmup
+$ pip install pytorch_warmup
 ```
 Finally, install BAM-torch
 ```
