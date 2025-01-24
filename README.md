@@ -1,9 +1,9 @@
-" This is a version under development. "
+## This is a version under development. 
 
-" Please check the file below for the next steps. "
+## Please check the file below for the next steps. 
 ```bam_torch/training/mve_trainer.py```
 
-" Installation "
+## Installation 
 
 ```
 $ conda create --name bam_torch python=3.11
