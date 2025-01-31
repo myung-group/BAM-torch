@@ -34,7 +34,7 @@ class BaseTrainer:
         ...
         """
         self.json_data = json_data
-        date1 = date()
+        self.date1 = date()
 
         ## 1) Reproducibility
         self.set_random_seed()
@@ -46,8 +46,8 @@ class BaseTrainer:
         self.configure_model()
         self.model.to(self.device)
         # Check the number of parameters
-        n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f'\nnumber of parameters:\n -- model {n_params}\033[0m\n')
+        self.n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f'\nnumber of parameters:\n -- model {self.n_params}\033[0m\n')
 
         ## 4) Configure optimizer
         self.configure_optimizer()
@@ -74,44 +74,7 @@ class BaseTrainer:
         self.loss_fn = self.load_loss()
 
         ## 8) Configure logger
-        self.log_config = json_data.get("log_config")
-        if self.log_config == None:
-            if json_data["regress_forces"]:
-                self.log_config = {
-                    'step': ['date', 'epoch'],
-                    'train': ['loss', 'loss_e', 'loss_f'],
-                    'valid': ['loss', 'loss_e', 'loss_f'],
-                    'lr': ['lr'],
-                    }  # loss_l2
-            else:
-                self.log_config = {
-                    'step': ['date', 'epoch'],
-                    'train': ['loss', 'loss_e'],
-                    'valid': ['loss', 'loss_e'],
-                    'lr': ['lr'],
-                    }
-        self.log_length = json_data.get("log_length")
-        if self.log_length == None:
-            self.log_length = 'simple'
-        self.log_interval = json_data.get("log_interval")
-        if self.log_interval == None:
-            self.log_interval == 2
-
-        train_config = json_data.get('train') 
-        fname = train_config.get('fname_log') 
-        if fname == None:
-            fname = "loss_train.out"
-        self.fout = open(fname, 'w')
-        self.logger = Logger(self.log_config, self.loss_config, self.log_length)
-        self.separator = self.logger.print_logger_head(self.fout)
-        atexit.register(lambda: on_exit(
-                                    self.fout, 
-                                    self.separator, 
-                                    n_params, 
-                                    json_data,
-                                    date1
-                                )
-                        )
+        self.configure_logger()
 
         ## 9) Test train
         epoch_loss_test = self.train_one_epoch(mode='test')
@@ -195,7 +158,7 @@ class BaseTrainer:
             preds = self.model(deepcopy(data), backprop)
             loss_dict = self.compute_loss(preds, data)
             for l in loss_log_config:
-                epoch_loss_dict[l].append(loss_dict[l])
+                epoch_loss_dict[l].append(loss_dict.get(l, torch.nan))
             
             loss = loss_dict['loss']
             if backprop:
@@ -206,6 +169,50 @@ class BaseTrainer:
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
                            for key, value in epoch_loss_dict.items()}      
         return epoch_loss_dict
+    
+    def configure_logger_head(self):
+        self.log_config = self.json_data.get("log_config")
+        if self.log_config == None:
+            if self.json_data["regress_forces"]:
+                self.log_config = {
+                    'step': ['date', 'epoch'],
+                    'train': ['loss', 'loss_e', 'loss_f'],
+                    'valid': ['loss', 'loss_e', 'loss_f'],
+                    'lr': ['lr'],
+                    }  # loss_l2
+            else:
+                self.log_config = {
+                    'step': ['date', 'epoch'],
+                    'train': ['loss', 'loss_e'],
+                    'valid': ['loss', 'loss_e'],
+                    'lr': ['lr'],
+                    }
+    
+    def configure_logger(self):
+        self.configure_logger_head()
+
+        self.log_length = self.json_data.get("log_length")
+        if self.log_length == None:
+            self.log_length = 'simple'
+        self.log_interval = self.json_data.get("log_interval")
+        if self.log_interval == None:
+            self.log_interval == 2
+
+        train_config = self.json_data.get('train') 
+        fname = train_config.get('fname_log') 
+        if fname == None:
+            fname = "loss_train.out"
+        self.fout = open(fname, 'w')
+        self.logger = Logger(self.log_config, self.loss_config, self.log_length)
+        self.separator = self.logger.print_logger_head(self.fout)
+        atexit.register(lambda: on_exit(
+                                    self.fout, 
+                                    self.separator, 
+                                    self.n_params, 
+                                    self.json_data,
+                                    self.date1
+                                )
+                        )
 
     def load_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
@@ -354,10 +361,10 @@ class BaseTrainer:
         
     def configure_optimizer(self):
         optim_config = self.json_data["NN"]
-        lr = optim_config['learning_rate']
+        lr = optim_config.get('learning_rate')
         if lr == None:
             lr = 0.001
-        weight_decay = optim_config['weight_decay']  
+        weight_decay = optim_config.get('weight_decay')
         if weight_decay == None:
             weight_decay = 1e-12
         amsgrad = optim_config.get('amsgrad')  
@@ -368,5 +375,5 @@ class BaseTrainer:
                                           lr=lr, 
                                           weight_decay=weight_decay,
                                           amsgrad=amsgrad)
-
-
+        
+    

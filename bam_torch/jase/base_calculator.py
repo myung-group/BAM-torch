@@ -1,13 +1,16 @@
 import torch
-import pickle
 import numpy as np
+from copy import deepcopy
 from ase.calculators.calculator import Calculator, all_changes
 
 from bam_torch.training.base_trainer import BaseTrainer
+from bam_torch.utils.utils import get_graphset_to_predict
 
 
 class BaseCalculator(Calculator, BaseTrainer):
-    def __init__(self, json_data, model):
+    implemented_properties = ['energy', 'forces']
+
+    def __init__(self, json_data, model=None):
         """ Model is a trained-model's pckl file
         """
         Calculator.__init__(self)
@@ -26,22 +29,29 @@ class BaseCalculator(Calculator, BaseTrainer):
 
         ## 4) Load trained-model
         #self.model_ckpt = torch.load(json_data["predict"]["model"])
-        self.model_ckpt = model
+        if model == None:
+            self.model_ckpt = torch.load(json_data["predict"]["model"])
         self.model.load_state_dict(self.model_ckpt['params'])
         # Check the number of parameters
         self.n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print(f'\nnumber of parameters:\n -- model {self.n_params}\033[0m\n')
         self.model.eval()
     
-    def calculate(self, atoms, properties=['energy', 'forces'], system_changes=all_changes):
+    def calculate(self, atoms, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
+        data = get_graphset_to_predict(
+                    [atoms],
+                    self.json_data['cutoff'],
+                    self.model_ckpt,
+                    self.json_data['regress_forces']
+                )[0]
 
-        uniq_element = model_ckpt['uniq_element']
-        enr_avg_per_element = model_ckpt['enr_avg_per_element']
-
+        uniq_element = self.model_ckpt['uniq_element']
+        enr_avg_per_element = self.model_ckpt['enr_avg_per_element']
         species = np.array([uniq_element[iz] for iz in atoms.numbers])
         node_enr_avg = torch.tensor([enr_avg_per_element[int(iz)] for iz in species]).sum()
-        preds = self.model(deepcopy(atoms), backprop=False)
+
+        preds = self.model(deepcopy(data), backprop=False)
         energy = preds["energy"]
         energy += node_enr_avg
 

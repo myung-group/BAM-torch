@@ -31,7 +31,8 @@ class LRScheduler:
             #def scheduler_lambda_fn(x):
             #    return warmup_lr_lambda(x, self.optim_config)
 
-            self.optim_config["lr_lambda"] = scheduler_lambda_fn
+            #self.optim_config["lr_lambda"] = scheduler_lambda_fn
+            self.optim_config["lr_lambda"] = self.optim_config["decay_factor"]
 
         if (
             self.scheduler_type != "Null"
@@ -40,6 +41,26 @@ class LRScheduler:
             self.scheduler = getattr(lr_scheduler, self.scheduler_type)
             scheduler_args = self.filter_kwargs(self.optim_config)
             self.scheduler = self.scheduler(optimizer, **scheduler_args)
+            if self.scheduler_type == "ReduceLROnPlateau":
+                if self.optim_config.get("decay_factor") == None:
+                    self.optim_config["decay_factor"] = 0.9
+                if self.optim_config.get("patience") == None:
+                    self.optim_config["patience"] = 50
+                if self.optim_config.get("threshold") == None:
+                    self.optim_config["threshold"] = 1e-5
+                if self.optim_config.get("cooldown") == None:
+                    self.optim_config["cooldown"] = 0
+
+
+                self.scheduler = lr_scheduler.ReduceLROnPlateau(
+                                                optimizer, 
+                                                factor=self.optim_config["decay_factor"], 
+                                                patience=self.optim_config["patience"],
+                                                threshold=self.optim_config["threshold"],
+                                                cooldown=self.optim_config["cooldown"]
+
+                                        )
+                
         elif self.scheduler_type == "LinearWarmupCosineAnnealingLR":
             T_max = self.optim_config.get("fidelity_max_steps")
             if T_max is None:

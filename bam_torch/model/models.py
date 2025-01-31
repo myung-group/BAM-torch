@@ -569,19 +569,6 @@ class RACE(torch.nn.Module):
                 dim_size=num_graphs,
             ) 
 
-        if self.regress_forces == 'direct' or self.regress_forces:
-            forces, virials, stress, hessian = get_outputs(
-                energy=node_energy,
-                positions=R,
-                displacement=displacement,
-                cell=data.cell,
-                training=backprop,
-                compute_force=True,
-                compute_virials=False,
-                compute_stress=False,
-                compute_hessian=False
-            )
-
         if node_logvar != []:
             node_logvar = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
             node_logvar = node_logvar.mean(dim=-1) # [nbatch*num_nodes]
@@ -600,8 +587,21 @@ class RACE(torch.nn.Module):
 
         preds = {}
         preds["energy"] = node_energy
-        preds["forces"] = forces
         preds["energy_var"] = energy_var
+
+        if self.regress_forces == 'direct' or self.regress_forces:
+            forces, virials, stress, hessian = get_outputs(
+                energy=node_energy,
+                positions=R,
+                displacement=displacement,
+                cell=data.cell,
+                training=backprop,
+                compute_force=True,
+                compute_virials=False,
+                compute_stress=False,
+                compute_hessian=False
+            )
+            preds["forces"] = forces
 
         return preds
 

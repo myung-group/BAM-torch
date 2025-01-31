@@ -12,7 +12,7 @@ class Evaluator(BaseTrainer):
     def __init__(self, json_data):
         #super().__init__(json_data)
         self.json_data = json_data
-        date1 = date()
+        self.date1 = date()
 
         ## 1) Configure device
         self.configure_device()
@@ -25,14 +25,11 @@ class Evaluator(BaseTrainer):
         model_ckpt = torch.load(json_data["predict"]["model"])
         self.model.load_state_dict(model_ckpt['params'])
         # Check the number of parameters
-        n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f'\nnumber of parameters:\n -- model {n_params}\033[0m\n')
+        self.n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f'\nnumber of parameters:\n -- model {self.n_params}\033[0m\n')
         self.model.eval()
 
-        ## 4) Configure data_loader
-        regress_forces=json_data["regress_forces"]
-        if regress_forces:
-            regress_forces = 'direct'
+        ## 5) Configure data_loader
         self.data_loader, self.uniq_element, self.enr_avg_per_element = \
                                                 get_dataloader_to_predict(
                                                     json_data["predict"]['fname_traj'],
@@ -40,46 +37,14 @@ class Evaluator(BaseTrainer):
                                                     1,  # nbatch
                                                     json_data['cutoff'],
                                                     model_ckpt,
-                                                    regress_forces
+                                                    json_data['regress_forces']
                                                 )
 
-        ## 5) Configure loss function
+        ## 6) Configure loss function
         self.loss_fn = self.load_loss()
 
-        ## 6) Configure logger
-        self.log_config = json_data.get("plog_config")
-        if self.log_config == None:
-            if json_data["regress_forces"]:
-                self.log_config = {
-                    'step': ['date', 'data'],
-                    'predict': ['energy', 'loss_e', 'loss_f'],
-                    'exact': ['energy']
-                    }  # loss_l2
-            else:
-                self.log_config = {
-                    'step': ['date', 'data'],
-                    'predict': ['energy', 'loss_e'],
-                    'exact': ['energy']
-                    }
-        self.log_length = json_data.get("plog_length") 
-        if self.log_length == None:
-            self.log_length = 'precise'
-
-        predict_config = json_data.get('predict') 
-        fname = predict_config.get('fname_plog')
-        if fname == None:
-            fname = "predict.out"
-        self.fout = open(fname, 'w')
-        self.logger = Logger(self.log_config, self.loss_config, self.log_length)
-        self.separator = self.logger.print_logger_head(self.fout)
-        atexit.register(lambda: on_exit(
-                                    self.fout, 
-                                    self.separator, 
-                                    n_params, 
-                                    json_data,
-                                    date1
-                                )
-                        )
+        ## 7) Configure logger
+        self.configure_logger()
     
     def evaluate(self):
         target = {}
@@ -101,7 +66,7 @@ class Evaluator(BaseTrainer):
             preds['energy'] = energy
             loss_dict = self.compute_loss(preds, data)
             for l in total_loss_dict.keys(): # predict part
-                total_loss_dict[l].append(loss_dict[l])
+                total_loss_dict[l].append(loss_dict.get(l, torch.nan))
             loss_dict['energy'] = float(preds['energy'][0])
             del loss_dict['loss']
 
@@ -126,4 +91,41 @@ class Evaluator(BaseTrainer):
         print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
 
+    def configure_logger_head(self):
+        self.log_config = self.json_data.get("plog_config")
+        if self.log_config == None:
+            if self.json_data["regress_forces"]:
+                self.log_config = {
+                    'step': ['date', 'data'],
+                    'predict': ['energy', 'loss_e', 'loss_f'],
+                    'exact': ['energy']
+                    }  # loss_l2
+            else:
+                self.log_config = {
+                    'step': ['date', 'data'],
+                    'predict': ['energy', 'loss_e'],
+                    'exact': ['energy']
+                    }
+    
+    def configure_logger(self):
+        self.configure_logger_head()
 
+        self.log_length = self.json_data.get("plog_length") 
+        if self.log_length == None:
+            self.log_length = 'precise'
+
+        predict_config = self.json_data.get('predict') 
+        fname = predict_config.get('fname_plog')
+        if fname == None:
+            fname = "predict.out"
+        self.fout = open(fname, 'w')
+        self.logger = Logger(self.log_config, self.loss_config, self.log_length)
+        self.separator = self.logger.print_logger_head(self.fout)
+        atexit.register(lambda: on_exit(
+                                    self.fout, 
+                                    self.separator, 
+                                    self.n_params, 
+                                    self.json_data,
+                                    self.date1
+                                )
+                        )
