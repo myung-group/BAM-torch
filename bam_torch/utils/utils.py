@@ -216,13 +216,18 @@ def get_edge_relative_vectors(data):
 def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
     graph_list = []
     for atoms in data:
-        enr = atoms.get_potential_energy()
+        if atoms.calc:
+            enr = atoms.get_potential_energy()
+        else:
+            enr = 0.0
         crds = atoms.get_positions()
 
-        if regress_forces or regress_forces == 'direct':
+        if (regress_forces or regress_forces == 'direct') and atoms.calc:
             frc = atoms.get_forces()
             volume = atoms.get_volume()
             stress = np.zeros(6)
+            if 'stress' in atoms._calc.results.keys():
+                stress = atoms.get_stress()
         else:
             frc = np.zeros((len(atoms), 3))
 
@@ -231,9 +236,6 @@ def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
             cell = np.diag([30., 30., 30.])
             atoms.set_cell(cell)
         
-        if 'stress' in atoms._calc.results.keys():
-            stress = atoms.get_stress()
-    
         iatoms, jatoms, Sij = neighbour_list(quantities='ijS',
                                              atoms=atoms,
                                              cutoff=cutoff)

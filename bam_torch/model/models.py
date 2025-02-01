@@ -45,9 +45,9 @@ class MACE(torch.nn.Module):
     """Base model of E(3) Equivariant Graph Neural Network, based on e3nn 
     """
     def __init__(
-            self, 
-            interaction_cls: Optional[Type[InteractionBlock]] = RealAgnosticInteractionBlock,
+            self,
             interaction_cls_first: Optional[Type[InteractionBlock]] = RealAgnosticInteractionBlock,
+            interaction_cls: Optional[Type[InteractionBlock]] = RealAgnosticInteractionBlock,
             cutoff: float = 6.0, 
             avg_num_neighbors: int = 40, 
             num_species: int = 1, 
@@ -152,8 +152,8 @@ class MACE(torch.nn.Module):
         self.readouts = torch.nn.ModuleList()
         self.readouts.append(
             LinearReadoutBlock(
-                hidden_irreps, o3.Irreps(f"{len(heads)}x0e"), cueq_config
-            )
+                hidden_irreps, output_irreps, cueq_config
+            ) # hidden_irreps, o3.Irreps(f"{len(heads)}x0e"), cueq_config
         )  # if heads == ['default'].
            # o3.Irreps(f"{len(heads)}x0e") == e3nn.Irreps("1x0e") 
            # default of output_irreps in BAM-jax
@@ -193,7 +193,7 @@ class MACE(torch.nn.Module):
                         hidden_irreps_out,
                         (len(heads) * MLP_irreps).simplify(),
                         gate,
-                        o3.Irreps(f"{len(heads)}x0e"),
+                        output_irreps, # o3.Irreps(f"{len(heads)}x0e")
                         len(heads),
                         cueq_config,
                     )
@@ -201,8 +201,8 @@ class MACE(torch.nn.Module):
             else:
                 self.readouts.append(
                     LinearReadoutBlock(
-                        hidden_irreps, o3.Irreps(f"{len(heads)}x0e"), cueq_config
-                    )
+                        hidden_irreps, output_irreps, cueq_config
+                    ) # hidden_irreps, o3.Irreps(f"{len(heads)}x0e"), cueq_config
                 )  # [n_nodes, 1]
         self.scale_shift = ScaleShiftBlock(
             scale=atomic_inter_scale, shift=atomic_inter_shift
@@ -222,9 +222,8 @@ class MACE(torch.nn.Module):
             if "head" in data
             else torch.zeros_like(data["batch"])
         )
-        data.positions.requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1  # nbatch
-        num_atoms_arange = torch.arange(data.positions.shape[0])
+        # num_atoms_arange = torch.arange(data.positions.shape[0])
         displacement = torch.zeros(
             (num_graphs, 3, 3),
             dtype=data.positions.dtype,
@@ -249,6 +248,7 @@ class MACE(torch.nn.Module):
                                            data.edge_index,
                                            species)
         outputs = []
+        node_logvar = []
         node_feats_list = []
         for interaction, product, readout in zip(
             self.interactions, self.products, self.readouts
@@ -266,26 +266,53 @@ class MACE(torch.nn.Module):
                 node_attrs=node_attrs,
             )
             node_feats_list.append(node_feats)
-            node_energies = readout(node_feats, node_heads)[
-                num_atoms_arange, node_heads
-            ]  # [n_nodes, len(heads)]  == [nbatch*num_nodes, ]
+            node_energies = readout(node_feats, node_heads)#[
+            #    num_atoms_arange, node_heads
+            #]  # [n_nodes, len(heads)]  == [nbatch*num_nodes, ]
             
-            outputs.append(node_energies)
+            outputs.append(node_energies[:,0])
+            if node_energies.shape[1] == 2:
+                node_logvar.append(node_energies[:,1])
             
         # Concatenate node features
         node_feats_out = torch.cat(node_feats_list, dim=-1)
-
+        """
         # Sum over energy contributions
         contributions = torch.stack(outputs, dim=0) # [nlayers, nbatch*num_nodes]
         node_energy = torch.sum(contributions, dim=0) # [nbatch*num_nodes]  # total_energy
         # node_energy = self.scale_shift(node_energy, node_heads) 
-
+        """
+        # Sum over energy contributions
+        node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
+        node_energy = torch.sum(node_energy, dim=-1) # [nbatch*num_nodes]  # total_energy
+        
         node_energy = scatter_sum(
-                src=node_energies,
+                src=node_energy,   # node_energies
                 index=data["batch"],
                 dim=-1,
                 dim_size=num_graphs,
             ) 
+        
+        if node_logvar != []:
+            node_logvar = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
+            node_logvar = node_logvar.mean(dim=-1) # [nbatch*num_nodes]
+        else:
+            node_logvar = torch.zeros(node_feats.shape[0], device=node_energy.device)
+        node_energy_var = torch.exp(node_logvar) 
+        node_energy_var = scatter_sum(
+                src=node_energy_var,
+                index=data["batch"],
+                dim=-1,
+                dim_size=num_graphs,
+            ) 
+        n_node = int(data.num_nodes / num_graphs)
+        n_nodes = torch.tensor([n_node]*num_graphs, device=node_energy_var.device)
+        energy_var = node_energy_var/n_nodes
+
+        preds = {}
+        preds["energy"] = node_energy
+        preds["energy_var"] = energy_var
+
         if self.regress_forces == 'direct' or self.regress_forces:
             forces, virials, stress, hessian = get_outputs(
                 energy=node_energy,
@@ -298,10 +325,7 @@ class MACE(torch.nn.Module):
                 compute_stress=False,
                 compute_hessian=False
             )
-        
-        preds = {}
-        preds["energy"] = node_energy
-        preds["forces"] = forces
+            preds["forces"] = forces
 
         return preds
 
@@ -498,7 +522,6 @@ class RACE(torch.nn.Module):
             if "head" in data
             else torch.zeros_like(data["batch"])
         )
-        data.positions.requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1  # nbatch
         num_atoms_arange = torch.arange(data.positions.shape[0])
         displacement = torch.zeros(

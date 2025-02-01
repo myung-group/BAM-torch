@@ -1,7 +1,8 @@
 import torch
 import numpy as np
-from copy import deepcopy
+from torch_geometric.loader import DataLoader
 from ase.calculators.calculator import Calculator, all_changes
+from copy import deepcopy
 
 from bam_torch.training.base_trainer import BaseTrainer
 from bam_torch.utils.utils import get_graphset_to_predict
@@ -39,19 +40,19 @@ class BaseCalculator(Calculator, BaseTrainer):
     
     def calculate(self, atoms, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
-        data = get_graphset_to_predict(
-                    [atoms],
-                    self.json_data['cutoff'],
-                    self.model_ckpt,
-                    self.json_data['regress_forces']
-                )[0]
 
         uniq_element = self.model_ckpt['uniq_element']
         enr_avg_per_element = self.model_ckpt['enr_avg_per_element']
         species = np.array([uniq_element[iz] for iz in atoms.numbers])
         node_enr_avg = torch.tensor([enr_avg_per_element[int(iz)] for iz in species]).sum()
-
-        preds = self.model(deepcopy(data), backprop=False)
+        data = get_graphset_to_predict(
+                    [atoms.copy()],
+                    self.json_data['cutoff'],
+                    uniq_element,
+                    self.json_data['regress_forces']
+                )
+        
+        preds = self.model(deepcopy(next(iter(DataLoader(data)))), backprop=False)
         energy = preds["energy"]
         energy += node_enr_avg
 
@@ -60,3 +61,5 @@ class BaseCalculator(Calculator, BaseTrainer):
 
     def get_params(self):
         return self.n_params
+    
+    

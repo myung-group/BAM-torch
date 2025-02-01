@@ -10,22 +10,7 @@ from copy import deepcopy
 from bam_torch.utils.logger import Logger
 from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
-
-
-class RMSELoss(torch.nn.Module):
-    def __init__(self, reduction="mean"):
-        super(RMSELoss,self).__init__()
-        self.mse = torch.nn.MSELoss(reduction=reduction)
-        self.eps = 1e-7
-
-    def forward(self,y,y_hat):
-        return torch.sqrt(self.mse(y,y_hat) + self.eps)
-
-
-def l2_regularization(params):
-    wgt = torch.cat([p.view(-1) for p in params if p.requires_grad])
-    #print(wgt)
-    return (wgt * wgt).mean()
+from .loss import RMSELoss, l2_regularization
 
 
 class BaseTrainer:

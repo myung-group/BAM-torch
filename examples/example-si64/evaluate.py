@@ -1,5 +1,5 @@
 from bam_torch.predicting.evaluator import Evaluator
-from bam_torch.utils.utils import find_input_json, date
+from bam_torch.utils import find_input_json, date
 import json
 import torch
 
