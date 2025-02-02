@@ -353,6 +353,7 @@ class RaceInteractionBlock(InteractionBlock):
         num_nodes = node_feats.shape[0]
         node_feats = self.linear_up(node_feats)
         tp_weights = self.conv_tp_weights(edge_feats)
+
         mji = self.conv_tp(
             node_feats[sender], edge_attrs, tp_weights
         )  # [n_edges, irreps]
@@ -437,7 +438,7 @@ class EquivariantRaceBlock(torch.nn.Module):
             irreps_mid,               # hidden_irreps
             instructions=instructions,
             shared_weights=True,
-            internal_weights=True,
+            internal_weights=None,
             cueq_config=cueq_config,
         )
         self.use_sc = use_sc
@@ -449,15 +450,15 @@ class EquivariantRaceBlock(torch.nn.Module):
             shared_weights=True,
             cueq_config=cueq_config,
         )
-
         self.reshape = reshape_irreps(irreps_mid, cueq_config=cueq_config)
+        
     def forward(
         self,
         x_node_feats: torch.Tensor,
         node_feats: torch.Tensor,
         sc: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        node_feats = self.conv_tp(x_node_feats, node_feats)
+        node_feats = self.conv_tp(x_node_feats, node_feats, None)
         #node_feats = self.reshape(node_feats)
         if self.use_sc and sc is not None:
             node_feats = self.linear(node_feats) + sc

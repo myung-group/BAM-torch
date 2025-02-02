@@ -10,6 +10,7 @@ from copy import deepcopy
 from bam_torch.utils.logger import Logger
 from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
+from bam_torch.model.wrapper_ops import CuEquivarianceConfig
 from .loss import RMSELoss, l2_regularization
 
 
@@ -32,7 +33,7 @@ class BaseTrainer:
         self.model.to(self.device)
         # Check the number of parameters
         self.n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f'\nnumber of parameters:\n -- model {self.n_params}\033[0m\n')
+        print(f'\nnumber of parameters:\n\033[33m -- model ({json_data["model"]}) {self.n_params}\033[0m\n')
 
         ## 4) Configure optimizer
         self.configure_optimizer()
@@ -302,15 +303,36 @@ class BaseTrainer:
         nlayers = model_config['nlayers']
         max_ell = model_config['max_ell']
         
-        output_irreps = model_config['output_channels']
+        output_irreps = model_config.get('output_channels')
         if output_irreps == None:
             output_irreps = "1x0e"
-        active_fn = model_config['active_fn']
+        active_fn = model_config.get('active_fn')
         if active_fn == None:
             active_fn = "swish"
-        regress_forces = model_config['regress_forces']
+        regress_forces = model_config.get('regress_forces')
         if regress_forces:
             regress_forces = "direct"
+        
+        cueq_config = model_config.get('cueq_config')  # true or false
+        if cueq_config == None or cueq_config:
+            try:
+                import cuequivariance as cue
+                import cuequivariance_torch as cuet
+                CUET_AVAILABLE = True
+            except ImportError:
+                CUET_AVAILABLE = False
+            if CUET_AVAILABLE:
+                cueq_config = CuEquivarianceConfig(
+                    enabled=True,
+                    layout="ir_mul",
+                    group="O3_e3nn",
+                    optimize_all=True,
+                )
+                print(f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m')
+        else:
+            cueq_config = None
+            print(f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m')
+        
 
         model = model_config["model"]
         if model in ["race", "RACE", "Race"]:
@@ -326,7 +348,8 @@ class BaseTrainer:
                 features_dim=features_dim,
                 output_irreps=output_irreps,
                 active_fn=active_fn,
-                regress_forces=regress_forces
+                regress_forces=regress_forces,
+                cueq_config=cueq_config
                 )
         elif model in ["mace", "MACE", "Mace"]:
             from bam_torch.model.models import MACE
@@ -341,7 +364,8 @@ class BaseTrainer:
                 features_dim=features_dim,
                 output_irreps=output_irreps,
                 active_fn=active_fn,
-                regress_forces=regress_forces
+                regress_forces=regress_forces,
+                cueq_config=cueq_config
                 ) 
         
     def configure_optimizer(self):

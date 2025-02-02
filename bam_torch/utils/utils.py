@@ -146,7 +146,9 @@ def get_dataloader(fname, ntrain, ntest,
     if type(ntrain) == str: 
         train_data = read(ntrain, index=slice(None))
         test_data = read(ntest, index=slice(None))
-        print(f'ntrain: {len(train_data)} | nvalid: {len(test_data)}\n')
+        print('number of data:')
+        print(f'\033[33m -- training   {len(train_data)}')
+        print(f' -- validation {len(test_data)}\033[0m')
         traj = train_data + test_data
     else:
         nsamp = ntrain + ntest
@@ -159,7 +161,9 @@ def get_dataloader(fname, ntrain, ntest,
         idx_test = idx[ntrain:]   
         train_data = [traj[i] for i in idx_train]
         test_data = [traj[i] for i in idx_test]
-        print(f'ntrain: {len(train_data)} | nvalid: {len(test_data)}\n')
+        print('number of data:')
+        print(f'\033[33m -- training   {len(train_data)}')
+        print(f' -- validation {len(test_data)}\033[0m\n')
 
     if element == None or element == 'auto':
         element = sorted(
@@ -167,7 +171,7 @@ def get_dataloader(fname, ntrain, ntest,
                                   for atom in atoms))
         )  # traj: ase.Atoms
     enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element (traj, element) 
-    print(f'mean energy per element: {enr_avg_per_element}\n')
+    print(f'mean energy per element:\n {enr_avg_per_element}\n')
     loaders = []
     for dataset in [train_data, test_data]:
         graphset = get_graphset(dataset, cutoff, uniq_element, 
@@ -331,7 +335,7 @@ def on_exit(fout, separator_bottom, n_params,
     else:
         ntrain = json_data["ntrain"]
         ntest = json_data["ntest"]
-    print(f'\n* DATA INFO:\n - {"N(TRAIN)":14} {ntrain}\n - {"N(TEST)":14} {ntest}', file=fout)
+    print(f'\n* DATA INFO:\n - {"N(TRAIN)":14} {ntrain}\n - {"N(VALID)":14} {ntest}', file=fout)
     print(f' - {"BATCH":14} {json_data["nbatch"]}', file=fout)
     print(f' - {"CUTOFF":14} {json_data["cutoff"]}', file=fout)
     print(f' - {"AVG. NEIGH.":14} {json_data["avg_num_neighbors"]}', file=fout)

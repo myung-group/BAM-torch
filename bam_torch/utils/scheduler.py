@@ -51,7 +51,6 @@ class LRScheduler:
                 if self.optim_config.get("cooldown") == None:
                     self.optim_config["cooldown"] = 0
 
-
                 self.scheduler = lr_scheduler.ReduceLROnPlateau(
                                                 optimizer, 
                                                 factor=self.optim_config["decay_factor"], 

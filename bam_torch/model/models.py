@@ -20,7 +20,6 @@ from .blocks import (
 from .wrapper_ops import Linear
 from bam_torch.utils.scatter import scatter_sum
 from bam_torch.utils.output_utils import get_outputs
-from bam_torch.utils.irreps_tools import reshape_irreps
 
 
 def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:

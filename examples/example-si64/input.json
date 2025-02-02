@@ -1,6 +1,7 @@
 {
     "device" : "gpu",
     "model" : "race",
+    "cueq_config": false,
     "regress_forces" : true,
     "trainer" : "base",
     "fname_traj" : "train.traj",

@@ -104,12 +104,12 @@ class Linear:
                 cue.Irreps(cueq_config.group, irreps_out),
                 layout=cueq_config.layout,
                 shared_weights=shared_weights,
-                optimize_fallback=True,
+                use_fallback=True,
             )
             instance.original_forward = instance.forward
 
             def cuet_forward(self, x: torch.Tensor) -> torch.Tensor:
-                return self.original_forward(x, use_fallback=True)
+                return self.original_forward(x)#, use_fallback=True)
 
             instance.forward = types.MethodType(cuet_forward, instance)
             return instance
@@ -154,7 +154,7 @@ class TensorProduct:
             def cuet_forward(
                 self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor
             ) -> torch.Tensor:
-                return self.original_forward(x, y, z, use_fallback=None)
+                return self.original_forward(x, y, z)#, use_fallback=None)
 
             instance.forward = types.MethodType(cuet_forward, instance)
             return instance
@@ -194,14 +194,14 @@ class FullyConnectedTensorProduct:
                 layout=cueq_config.layout,
                 shared_weights=shared_weights,
                 internal_weights=internal_weights,
-                optimize_fallback=True,
+                use_fallback=True,
             )
             instance.original_forward = instance.forward
 
             def cuet_forward(
                 self, x: torch.Tensor, attrs: torch.Tensor
             ) -> torch.Tensor:
-                return self.original_forward(x, attrs, use_fallback=True)
+                return self.original_forward(x, attrs)#, use_fallback=True)
 
             instance.forward = types.MethodType(cuet_forward, instance)
             return instance
@@ -254,9 +254,8 @@ class SymmetricContractionWrapper:
                 index_attrs = torch.nonzero(attrs)[:, 1].int()
                 return self.original_forward(
                     x.flatten(1),
-                    index_attrs,
-                    use_fallback=None,
-                )
+                    index_attrs,  
+                ) #use_fallback=None,
 
             instance.forward = types.MethodType(cuet_forward, instance)
             return instance
