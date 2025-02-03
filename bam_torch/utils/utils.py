@@ -148,7 +148,7 @@ def get_dataloader(fname, ntrain, ntest,
         test_data = read(ntest, index=slice(None))
         print('number of data:')
         print(f'\033[33m -- training   {len(train_data)}')
-        print(f' -- validation {len(test_data)}\033[0m')
+        print(f' -- validation {len(test_data)}\033[0m\n')
         traj = train_data + test_data
     else:
         nsamp = ntrain + ntest
