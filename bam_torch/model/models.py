@@ -9,6 +9,7 @@ from .blocks import (
     LinearNodeEmbeddingBlock,
     InteractionBlock,
     RealAgnosticInteractionBlock,
+    AgnosticResidualNonlinearInteractionBlock,
     RaceInteractionBlock,
     EquivariantProductBasisBlock,
     EquivariantRaceBlock,
@@ -45,8 +46,8 @@ class MACE(torch.nn.Module):
     """
     def __init__(
             self,
-            interaction_cls_first: Optional[Type[InteractionBlock]] = RealAgnosticInteractionBlock,
-            interaction_cls: Optional[Type[InteractionBlock]] = RealAgnosticInteractionBlock,
+            interaction_cls_first: Optional[Type[InteractionBlock]] = AgnosticResidualNonlinearInteractionBlock,
+            interaction_cls: Optional[Type[InteractionBlock]] = AgnosticResidualNonlinearInteractionBlock,
             cutoff: float = 6.0, 
             avg_num_neighbors: int = 40, 
             num_species: int = 1, 

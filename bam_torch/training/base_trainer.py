@@ -108,7 +108,7 @@ class BaseTrainer:
                 #date = date()
                 step_dict = {
                     "date": date(),
-                    "epoch": epoch,
+                    "epoch": epoch+1,
                 }
                 self.logger.print_epoch_loss(step_dict, 
                                              epoch_loss_train, 
