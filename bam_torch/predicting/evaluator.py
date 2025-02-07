@@ -11,13 +11,15 @@ from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit
 
 class Evaluator(BaseTrainer):
     def __init__(self, json_data):
-        #super().__init__(json_data)
         self.json_data = json_data
         self.json_data['NN']['restart'] = False
         self.json_data["predict"]["evaluate_tag"] = True
         self.date1 = date()
 
-        ## 1) Configure device
+        ## 1) Reproducibility
+        self.set_random_seed()
+
+        ## 2) Configure device
         self.device = self.configure_device()
 
         ## 3) Configure model
@@ -129,7 +131,8 @@ class Evaluator(BaseTrainer):
             fname = "predict.out"
         fout = open(fname, 'w')
         logger = Logger(log_config, self.loss_config, log_length, fout)
-        separator = logger.print_logger_head()
+        logger.print_logger_head()
+        separator = logger.get_seperator()
         atexit.register(lambda: on_exit(
                                     fout, 
                                     separator, 

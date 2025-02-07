@@ -3,6 +3,7 @@ import numpy as np
 from e3nn import o3
 
 import os
+import sys
 import random
 import atexit
 import pprint
@@ -57,7 +58,7 @@ class BaseTrainer:
         self.loss_fn, self.loss_config = self.load_loss()
 
         ## 8) Configure logger
-        self.log_config, self.log_interval, self.logger = self.configure_logger() # Get self.logger
+        self.log_config, self.log_interval, self.logger = self.configure_logger()
 
         ## 9) Test train
         epoch_loss_test = self.train_one_epoch(mode='test')
@@ -76,7 +77,7 @@ class BaseTrainer:
         }
 
         # Save input parameters setting
-        self.save_input_parameters()
+        self.save_input_parameters(self.json_data)
     
     def train(self):
         nepoch = self.json_data['NN']['nepoch']
@@ -139,7 +140,7 @@ class BaseTrainer:
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
-            data = data.to(self.device)
+            data.to(self.device)
             preds = self.model(deepcopy(data), backprop)
             loss_dict = self.compute_loss(preds, data)
             for l in loss_log_config:
@@ -154,16 +155,6 @@ class BaseTrainer:
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
                            for key, value in epoch_loss_dict.items()}      
         return epoch_loss_dict
-    
-    def save_input_parameters(self):
-        train_config = self.json_data.get('train') 
-        fname = train_config.get('fname_log') 
-        if fname == None:
-            fname = "loss_train.out"
-        fname_ls = fname.rsplit('.', 1)
-        fname = f'input_json_of_{fname_ls[0]}_{fname_ls[1]}.txt'
-        fout = open(fname, 'w')
-        pprint.pprint(self.json_data, stream=fout)
     
     def configure_logger_head(self):
         log_config = self.json_data.get("log_config")
@@ -302,6 +293,24 @@ class BaseTrainer:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f'\ndevice:\n\033[33m -- {device}\033[0m')
         return device
+
+    def save_input_parameters(self, input_json, fname=None):
+        if fname == None:
+            train_config = input_json.get('train') 
+            if train_config:
+                fname = train_config.get('fname_log') 
+                if fname == None:
+                    fname = "loss_train.out"
+            else:
+                fname = "loss_train.out"
+
+            fname_ls = fname.rsplit('.', 1)
+            fname = f'input_json_of_{fname_ls[0]}_{fname_ls[1]}.txt'
+        
+        fout = open(fname, 'w')
+        pprint.pprint(input_json, stream=fout)
+
+        return fname
     
     def configure_model(self):
         """ Configure model using model configuration dictionary.
@@ -319,7 +328,16 @@ class BaseTrainer:
             evaluate = False
             self.json_data['predict']['evaluate_tag'] = False
             model_ckpt = torch.load(model_config["fname_pkl"])
-            model.load_state_dict(model_ckpt['params'])
+            try:
+                model.load_state_dict(model_ckpt['params'])
+            except RuntimeError as e:
+                input_json = model_ckpt['input.json']
+                fname = self.save_input_parameters(input_json, 'input_json_from_trained_model.txt')
+                print(e)
+                print(f'\n\033[31mSome of the parameter dimensions in the trained model you are trying to use')
+                print(f'do not match the current input parameters.')
+                print(f' -- Please check the ```{fname}``` file\033[0m\n')
+                sys.exit(1)
             print(f'\n\033[32mrestarting training from the {model_config["fname_pkl"]}\033[0m')
             print(f' -- restarting from the step where the loss was {model_ckpt["loss"]}')
         
@@ -443,4 +461,6 @@ class BaseTrainer:
                                           weight_decay=weight_decay,
                                           amsgrad=amsgrad)
         return optimizer
-    
+
+    def get_params(self):
+        return self.n_params

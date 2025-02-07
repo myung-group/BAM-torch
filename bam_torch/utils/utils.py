@@ -9,6 +9,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
 import os
+import pprint
 from copy import deepcopy
 from datetime import datetime
 
@@ -310,18 +311,17 @@ def find_input_json():
         return None
 
 
-def on_exit(fout, separator_bottom, n_params, 
-           json_data,
-            date1):
+def on_exit(fout, separator_bottom, n_params, json_data, date1):
     print(separator_bottom, file=fout)
     print(f'\n* NUMBER OF PARAMETERS: ', file=fout)
     print(f' - {"MODEL(TOTAL)":14} {n_params}', file=fout)
     #print(f' -- {"EQUIV. MODEL":13} {interface_n_params}', file=fout)
     #print(f' -- {"BACKBONE":13} {backbone_n_params}', file=fout)
     print(f' --- {"HIDDEN.":12} {json_data["hidden_channels"]}', file=fout)
-    print(f' --- {"FEATS. DIM.":12} {json_data["features_dim"]}', file=fout)
+    #print(f' --- {"FEATS. DIM.":12} {json_data["features_dim"]}', file=fout)
     print(f' --- {"RADI. BASIS.":12} {json_data["num_radial_basis"]}', file=fout)
-    print(f'\n* NUMBER OF "g" PER DATA:\n   {" ":14} {json_data.get("nsamples")}', file=fout)
+    if json_data.get("nsamples"):
+        print(f'\n* NUMBER OF "g" PER DATA:\n   {" ":14} {json_data.get("nsamples")}', file=fout)
     print(f'\n* SEED NUMBER:', file=fout)
     print(f' - {"DATA_SEED":14} {json_data["NN"]["data_seed"]}', file=fout)
     print(f' - {"INIT_SEED":14} {json_data["NN"]["init_seed"]}', file=fout)
@@ -348,6 +348,8 @@ def on_exit(fout, separator_bottom, n_params,
     print(f' -- {"HOURS":13} {hours:<15.9g}', file=fout)
     print(f' -- {"MINUTES":13} {minutes:<15.9g}', file=fout)
     print(f' -- {"SECONDS":13} {seconds:<15.9g}\n', file=fout)
+
+    pprint.pprint(json_data, stream=fout)
     fout.flush()
     fout.close()
 
