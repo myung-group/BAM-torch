@@ -2,13 +2,14 @@ from .utils import date
 from copy import deepcopy
 
 class Logger:
-    def __init__(self, log_config, loss_config=None, log_length='simple'):
+    def __init__(self, log_config, loss_config, log_length, fout):
         """ Default of log_config
         log_config = {'step': ['date', 'epoch'],
                       'train': ['loss', 'loss_e', 'loss_f'],
                       'valid': ['loss', 'loss_e', 'loss_f'],
                       'lr': ['lr']}
         loss_config = {'energy_loss': 'mse', 'force_loss': 'mse'}
+        log_length = 'simple' or 'precise'
         """
         self.log_config = log_config
         self.loss_config = loss_config
@@ -18,6 +19,7 @@ class Logger:
             self.length = 7
             self.space = 13
         self.logger_config = self.configure_logger_head()
+        self.fout = fout
 
     def configure_logger_head(self):
         if self.loss_config != None:
@@ -61,7 +63,7 @@ class Logger:
                 
         return logger
 
-    def print_logger_head(self, fout):
+    def print_logger_head(self):
         head = ""
         LINE = ""
         keys = list(self.logger_config.keys())
@@ -88,18 +90,20 @@ class Logger:
                 head += divider
                 LINE += line
         separator = '-' * len(LINE)
-        print(head, file=fout)
-        print(LINE, file=fout)
-        print(separator, file=fout)
-        fout.flush()
+        print(head, file=self.fout)
+        print(LINE, file=self.fout)
+        print(separator, file=self.fout)
+        self.fout.flush()
         print(date())
         print(head)
         print(LINE)
         print(separator)
-
-        return separator
+        self.separator = separator
     
-    def print_epoch_loss(self, step_dict, epoch_loss_train, epoch_loss_valid, lr=None, fout=None):
+    def get_seperator(self):
+        return self.separator
+    
+    def print_epoch_loss(self, step_dict, epoch_loss_train, epoch_loss_valid, lr=None):
 
         keys = list(self.log_config.keys())
         assert len(step_dict) == len(self.log_config[keys[0]])         # step
@@ -130,7 +134,7 @@ class Logger:
             LINE += divider
             LINE += f"{lr:<{intervals[3][0]}.4g}"
         
-        print(LINE, file=fout)
-        fout.flush()
+        print(LINE, file=self.fout)
+        self.fout.flush()
         print(LINE)
 
