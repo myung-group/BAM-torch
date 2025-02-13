@@ -1,4 +1,6 @@
 import torch
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 import numpy as np
 from e3nn import o3
 
@@ -17,11 +19,16 @@ from .loss import RMSELoss, l2_regularization
 
 
 class BaseTrainer:
-    def __init__(self, json_data):
+    def __init__(self, json_data, rank=0, world_size=1):
         """ The json_data (dict.) should include the following information
         ...
         """
         self.json_data = json_data
+        self.rank = rank
+        self.world_size = world_size
+        self.ddp = False
+        if self.world_size > 1:
+            self.ddp = True
         self.date1 = date()
 
         ## 1) Reproducibility
@@ -46,7 +53,9 @@ class BaseTrainer:
                                                             json_data['cutoff'],
                                                             json_data['NN']['data_seed'],
                                                             json_data['element'],
-                                                            json_data['regress_forces']
+                                                            json_data['regress_forces'],
+                                                            self.rank,
+                                                            self.world_size
                                                         )
         
         ## 6) Configure scheduler
@@ -62,6 +71,8 @@ class BaseTrainer:
 
         ## 9) Test train
         epoch_loss_test = self.train_one_epoch(mode='test')
+        if self.ddp:
+            torch.distributed.barrier()
         self.loss_test_min = epoch_loss_test['loss']
 
         ## 10) Configure check point dictionary
@@ -78,44 +89,53 @@ class BaseTrainer:
 
         # Save input parameters setting
         self.save_input_parameters(self.json_data)
-    
+     
     def train(self):
         nepoch = self.json_data['NN']['nepoch']
         ## 11) Main loop
         for epoch in range(nepoch):
+            #self.train_loader.sampler.set_epoch(epoch)
             epoch_loss_train = self.train_one_epoch(mode='train')
+            #check_parameter_sync(self.model, self.rank)
+            if self.ddp:
+                torch.distributed.barrier()
 
             if (epoch+1)%self.log_interval == 0:
                 epoch_loss_valid = self.train_one_epoch(mode='test')
+                if self.ddp:
+                    torch.distributed.barrier()
 
                 ## 12) Save model to pckl file
-                if epoch_loss_valid['loss'] < self.loss_test_min:
-                    self.loss_test_min = epoch_loss_valid['loss']
-                    self.loss_dict['epoch'] = epoch+1
-                    self.loss_dict['train'] = epoch_loss_train['loss']
-                    self.loss_dict['valid'] = epoch_loss_valid['loss']
-                    self.ckpt['params'] = self.model.state_dict()
-                    self.ckpt['opt_state'] = self.optimizer.state_dict()
-                    self.ckpt['loss'] = self.loss_dict
-                    self.l_ckpt_saved = False
+                if self.rank == 0:
+                    if epoch_loss_valid['loss'] < self.loss_test_min:
+                        self.loss_test_min = epoch_loss_valid['loss']
+                        self.loss_dict['epoch'] = epoch+1
+                        self.loss_dict['train'] = epoch_loss_train['loss']
+                        self.loss_dict['valid'] = epoch_loss_valid['loss']
+                        state_dict = self.model.state_dict()
+                        clean_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+                        self.ckpt['params'] = clean_state_dict
+                        self.ckpt['opt_state'] = self.optimizer.state_dict()
+                        self.ckpt['loss'] = self.loss_dict
+                        self.l_ckpt_saved = False
 
-                if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                    torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                    self.l_ckpt_saved = True
+                    if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                        torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                        self.l_ckpt_saved = True
                 
-                # Get the last learning rate
-                if self.json_data['scheduler'] != "Null":
-                    lr = self.scheduler.get_lr()
-                
-                ## 13) Print out epoch loss
-                step_dict = {
-                    "date": date(),
-                    "epoch": epoch+1,
-                }
-                self.logger.print_epoch_loss(step_dict, 
-                                             epoch_loss_train, 
-                                             epoch_loss_valid,
-                                             lr)
+                    # Get the last learning rate
+                    if self.json_data['scheduler'] != "Null":
+                        lr = self.scheduler.get_lr()
+                    
+                    ## 13) Print out epoch loss
+                    step_dict = {
+                        "date": date(),
+                        "epoch": epoch+1,
+                    }
+                    self.logger.print_epoch_loss(step_dict, 
+                                                epoch_loss_train, 
+                                                epoch_loss_valid,
+                                                lr)
                 
                 ## 14) Update scheduler (learning rate)
                 if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
@@ -191,16 +211,17 @@ class BaseTrainer:
             fname = "loss_train.out"
         fout = open(fname, 'w')
         logger = Logger(log_config, self.loss_config, log_length, fout)
-        logger.print_logger_head()
-        separator = logger.get_seperator()
-        atexit.register(lambda: on_exit(
-                                    fout, 
-                                    separator, 
-                                    self.n_params, 
-                                    self.json_data,
-                                    self.date1
-                                )
-                        )
+        if self.rank == 0:
+            logger.print_logger_head()
+            separator = logger.get_seperator()
+            atexit.register(lambda: on_exit(
+                                        fout, 
+                                        separator, 
+                                        self.n_params, 
+                                        self.json_data,
+                                        self.date1
+                                    )
+                            )
         return log_config, log_interval, logger
 
     def load_loss(self, reduction='mean'):
@@ -286,12 +307,30 @@ class BaseTrainer:
 
     def configure_device(self):
         device_config = self.json_data['device']
+        self.msg = ''
         if device_config == 'cpu':
             device = 'cpu'
-            print(f'\ndevice:\n\033[33m -- {device}\033[0m')
+            self.msg += f'\ndevice:\n\033[33m -- {device}\n'
+            try:
+                from mpi4py import MPI
+                self.rank = MPI.COMM_WORLD.Get_rank()
+                size = MPI.COMM_WORLD.Get_size()
+                self.msg += f' -- number of cpu  {size}\033[0m\n'
+            except:
+                self.msg += f' -- number of cpu  {torch.get_num_threads()}\033[0m\n'
         else:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f'\ndevice:\n\033[33m -- {device}\033[0m')
+            self.msg += f'\ndevice:\n\033[33m -- {device}\n'
+                
+            try:
+                if self.ddp:
+                    torch.cuda.set_device(self.rank)
+                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
+                else:
+                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
+            except:
+                self.msg += f' -- number of gpu  1\033[0m\n'
+
         return device
 
     def save_input_parameters(self, input_json, fname=None):
@@ -325,11 +364,14 @@ class BaseTrainer:
         evaluate = evaluate_config.get('evaluate_tag')  # True or False(None)
 
         if restart:
+            rank = self.rank
             evaluate = False
             self.json_data['predict']['evaluate_tag'] = False
             model_ckpt = torch.load(model_config["fname_pkl"])
             try:
                 model.load_state_dict(model_ckpt['params'])
+                if self.ddp:
+                    model = DDP(model, device_ids=[self.rank])
             except RuntimeError as e:
                 input_json = model_ckpt['input.json']
                 fname = self.save_input_parameters(input_json, 'input_json_from_trained_model.txt')
@@ -338,22 +380,29 @@ class BaseTrainer:
                 print(f'do not match the current input parameters.')
                 print(f' -- Please check the ```{fname}``` file\033[0m\n')
                 sys.exit(1)
-            print(f'\n\033[32mrestarting training from the {model_config["fname_pkl"]}\033[0m')
-            print(f' -- restarting from the step where the loss was {model_ckpt["loss"]}')
+            self.msg += f'\n\033[32mrestarting training from the {model_config["fname_pkl"]}\033[0m\n'
+            self.msg += f' -- restarting from the step where the loss was {model_ckpt["loss"]}\n'
         
         if evaluate:  # True or False(None)
+            rank = 0
             model_ckpt = torch.load(evaluate_config["model"])
             model.load_state_dict(model_ckpt['params'])
             model.eval()
-            print(f'\n\033[32mevaluating the {evaluate_config["model"]}\033[0m')
+            self.msg += f'\n\033[32mevaluating the {evaluate_config["model"]}\033[0m\n'
 
-        if not restart and not evaluate: # if not evaluate: initial train case
+        if not restart and not evaluate: # initial train case
+            rank = self.rank
             model_ckpt = None
-            print(f'\n\033[32minitializing training, results will be saved in the {model_config["fname_pkl"]}\033[0m')
+            if self.ddp:
+                model = DDP(model, device_ids=[self.rank])
+            self.msg += f'\n\033[32minitializing training, results will be saved in the {model_config["fname_pkl"]}\033[0m\n'
         
         # Check the number of parameters
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f'\nnumber of parameters:\n\033[33m -- model ({self.json_data["model"]}) {n_params}\033[0m\n')
+        self.msg += f'\nnumber of parameters:\n\033[33m -- model ({self.json_data["model"]})  {n_params}\033[0m\n'
+        
+        if rank == 0:
+            print(self.msg)
 
         return model, n_params, model_ckpt
         
@@ -393,10 +442,11 @@ class BaseTrainer:
                     group="O3_e3nn",
                     optimize_all=True,
                 )
-                print(f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m')
+                self.msg += f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m\n'
         else:
             cueq_config = None
-            print(f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m')
+            self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
+
         
         model = model_config["model"]
         if model in ["race", "RACE", "Race"]:
@@ -464,3 +514,7 @@ class BaseTrainer:
 
     def get_params(self):
         return self.n_params
+    
+    def check_parameter_sync(self):
+        for name, param in self.model.named_parameters():
+            print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}")

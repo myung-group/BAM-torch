@@ -1,5 +1,6 @@
 {
     "device" : "gpu",
+    "gpu-parallel" : false,
     "model" : "race",
     "cueq_config": false,
     "regress_forces" : true,

@@ -7,6 +7,8 @@ import torch
 from torch import nn
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
+from torch.utils.data import ConcatDataset
+from torch.utils.data.distributed import DistributedSampler
 
 import os
 import pprint
@@ -142,14 +144,15 @@ def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
 
 def get_dataloader(fname, ntrain, ntest, 
                    nbatch, cutoff, random_seed, 
-                   element=None,
-                   regress_forces=True):
+                   element=None, regress_forces=True,
+                   rank=0, world_size=1):
+    msg = ''
     if type(ntrain) == str: 
         train_data = read(ntrain, index=slice(None))
         test_data = read(ntest, index=slice(None))
-        print('number of data:')
-        print(f'\033[33m -- training   {len(train_data)}')
-        print(f' -- validation {len(test_data)}\033[0m\n')
+        msg += 'number of data:\n'
+        msg += f'\033[33m -- training      {len(train_data)}\n'
+        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
         traj = train_data + test_data
     else:
         nsamp = ntrain + ntest
@@ -162,9 +165,9 @@ def get_dataloader(fname, ntrain, ntest,
         idx_test = idx[ntrain:]   
         train_data = [traj[i] for i in idx_train]
         test_data = [traj[i] for i in idx_test]
-        print('number of data:')
-        print(f'\033[33m -- training   {len(train_data)}')
-        print(f' -- validation {len(test_data)}\033[0m\n')
+        msg += 'number of data:\n'
+        msg += f'\033[33m -- training      {len(train_data)}\n'
+        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
 
     if element == None or element == 'auto':
         element = sorted(
@@ -172,7 +175,10 @@ def get_dataloader(fname, ntrain, ntest,
                                   for atom in atoms))
         )  # traj: ase.Atoms
     enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element (traj, element) 
-    print(f'mean energy per element:\n {enr_avg_per_element}\n')
+    msg += f'mean energy per element:\n {enr_avg_per_element}\n'
+    if rank == 0:
+        print(msg)
+    
     loaders = []
     for dataset in [train_data, test_data]:
         graphset = get_graphset(dataset, cutoff, uniq_element, 
@@ -185,14 +191,19 @@ def get_dataloader(fname, ntrain, ntest,
             pad_edges_to = max(graph.num_edges, pad_edges_to)
         padded_graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
-        #padded_graphset = [ensure_tensor_attributes(data) for data in padded_graphset]
+        data_sampler = None
+        if world_size > 1:
+            data_sampler = DistributedSampler(
+                                padded_graphset, num_replicas=world_size, rank=rank
+                        )
         loader = DataLoader(padded_graphset,
                             nbatch,
                             shuffle=False,
-                            drop_last=True,
+                            drop_last=False,
                             pin_memory=True,
                             num_workers=0,
-                            collate_fn=None)
+                            collate_fn=None,
+                            sampler=data_sampler)
         loaders.append(loader)
         # train_loader, test_loader
     return loaders[0], loaders[1], uniq_element, enr_avg_per_element  
@@ -348,7 +359,9 @@ def on_exit(fout, separator_bottom, n_params, json_data, date1):
     print(f' -- {"HOURS":13} {hours:<15.9g}', file=fout)
     print(f' -- {"MINUTES":13} {minutes:<15.9g}', file=fout)
     print(f' -- {"SECONDS":13} {seconds:<15.9g}\n', file=fout)
+    print(separator_bottom, file=fout)
 
+    print(' ', file=fout)
     pprint.pprint(json_data, stream=fout)
     fout.flush()
     fout.close()

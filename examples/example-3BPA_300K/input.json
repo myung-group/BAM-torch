@@ -1,11 +1,12 @@
 {
     "device" : "gpu",
+    "gpu-parallel" : false,
     "model" : "race",
-    "cueq_config": false,
+    "cueq_config" : false,
     "regress_forces" : true,
     "trainer" : "base",
     "fname_traj" : "train_300K.xyz",
-    "ntrain" : 400,
+    "ntrain" : 200,
     "ntest" : 100,
     "element" : "auto",
     "cutoff" : 4.5,
@@ -40,6 +41,7 @@
     "scheduler": {
             "scheduler" : "ReduceLROnPlateau",
 	    "lr_gamma" : 0.1,
+	    "decay_factor" : 0.9,
             "max_steps" : 30,
 	    "warmup_steps" : 10,
 	    "warmup_factor" : 0.2
@@ -56,10 +58,10 @@
             "fname_log" : "loss_train.out"
     },
     "predict" : {
-            "fname_traj" : "test_600K.xyz",
-            "ndata" : 1000,
+            "evaluate_tag" : false,
+            "fname_traj" : "train_600K.xyz",
+            "ndata" : "train_600K.xyz",
             "model" : "model.pkl",
-            "valid_tag" : true,
             "fname_plog" : "predict.out"
     }
 }

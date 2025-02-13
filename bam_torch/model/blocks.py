@@ -342,7 +342,7 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
 @compile_mode("script")
 class RaceInteractionBlock(InteractionBlock): 
     """
-    MACE's default interaction block
+    RACE's default interaction block
     """
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):

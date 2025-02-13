@@ -34,10 +34,23 @@ $ pip install -e .
 ## Run
 There are examples in ```examples/example-*/```
 
-* For training,
+* For single-GPU training, you can use ```$ CUDA_VISIBLE_DEVICES={N} {command}```, where {N}: The N-th GPU. For example,
   ```
-  python main.py
+  $ CUDA_VISIBLE_DEVICES=0 python main.py
   ```
+  Or you can set ```'gpu-parallel'=false``` in ```input.json```, and then simply
+  ```
+  $ python main.py
+  ```
+* For multi-GPU (DistributedDataParallel) training, you can use ```$ CUDA_VISIBLE_DEVICES={N1,N2,...} {command}```
+  ```
+  $ CUDA_VISIBLE_DEVICES=0,1 python main.py
+  ```
+  Or you can set ```'gpu-parallel'="data" (or true)``` in ```input.json```, and then simply
+  ```
+  $ python main.py
+  ```
+  In this case, automatically detects all available GPUs and uses them for computation.
 * For evaluating,
   ```
   python evaluate.py
