@@ -34,7 +34,7 @@ There are examples in ```examples/example-*/```
   ```
   $ CUDA_VISIBLE_DEVICES=0 python main.py
   ```
-  Or you can set ```'gpu-parallel'=false``` in ```input.json```, and then simply
+  Or you can set ```"gpu-parallel"=false``` in ```input.json```, and then simply
   ```
   $ python main.py
   ```
@@ -42,7 +42,7 @@ There are examples in ```examples/example-*/```
   ```
   $ CUDA_VISIBLE_DEVICES=0,1 python main.py
   ```
-  Or you can set ```'gpu-parallel'="data" (or true)``` in ```input.json```, and then simply
+  Or you can set ```"gpu-parallel"="data" (or true)``` in ```input.json```, and then simply
   ```
   $ python main.py
   ```
