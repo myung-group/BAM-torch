@@ -38,7 +38,7 @@ There are examples in ```examples/example-*/```
   ```
   $ python main.py
   ```
-* For multi-GPU (DistributedDataParallel) training, you can use ```$ CUDA_VISIBLE_DEVICES={N1},{N2},... {command}```
+* For multi-GPU (DistributedDataParallel) training, you can use ```$ CUDA_VISIBLE_DEVICES={N1},{N2},... {command}```. For example,
   ```
   $ CUDA_VISIBLE_DEVICES=0,1 python main.py
   ```
