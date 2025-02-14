@@ -169,6 +169,82 @@ class TensorProduct:
         )
 
 
+
+class cuetFullTensorProduct (torch.nn.Module):
+
+    def __init__ (
+            self,
+            irreps_in1: cue.Irreps,
+            irreps_in2: cue.Irreps,
+            filter_irreps_out: cue.Irreps = None,
+            *,
+            layout: cue.IrrepsLayout = None,
+            device: torch.device = None
+    ):
+        super().__init__()
+        
+        e = cue.descriptors.full_tensor_product (
+            irreps_in1,
+            irreps_in2,
+            filter_irreps_out
+        )
+        self.irreps_in1 = irreps_in1 
+        self.irreps_in2 = irreps_in2 
+        self.irreps_out = e.operands[-1].irreps 
+
+        self.f = cuet.EquivariantTensorProduct (
+            e,
+            layout=layout,
+            device=device
+        )
+    
+    def forward (
+            self,
+            x1: torch.Tensor,
+            x2: torch.Tensor
+    )-> torch.Tensor:
+        return self.f (x1, x2)
+    
+
+class FullTensorProduct:
+    """ Wrapper around o3\.FullTensorProduct
+    z_{uv} = x_u \otimes y_v
+    NO WEIGHT PARAMETERS
+    """
+    def __new__ (
+            cls,
+            irreps_in1: o3.Irreps,
+            irreps_in2: o3.Irreps,
+            cueq_config: Optional[CuEquivarianceConfig] = None,
+    ):
+        if (
+            CUET_AVAILABLE
+            and cueq_config is not None
+            and cueq_config.enabled
+            and (cueq_config.optimize_all or cueq_config.optimize_fctp)
+        ):
+            
+            instance = cuetFullTensorProduct(
+                cue.Irreps(cueq_config.group, irreps_in1),
+                cue.Irreps(cueq_config.group, irreps_in2),
+                layout=cueq_config.layout,
+            )
+            instance.original_forward = instance.forward
+
+            def cuet_forward(
+                self, x: torch.Tensor, attrs: torch.Tensor
+            ) -> torch.Tensor:
+                return self.original_forward(x, attrs)#, use_fallback=True)
+
+            instance.forward = types.MethodType(cuet_forward, instance)
+            return instance
+
+        return o3.FullTensorProduct(
+            irreps_in1,
+            irreps_in2,
+        )
+
+
 class FullyConnectedTensorProduct:
     """Wrapper around o3.FullyConnectedTensorProduct/cuet.FullyConnectedTensorProduct"""
 

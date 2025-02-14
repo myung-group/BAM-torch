@@ -8,6 +8,7 @@ from e3nn.util.jit import compile_mode
 from .blocks import (
     LinearNodeEmbeddingBlock,
     InteractionBlock,
+    FullyConnectedTensorProduct,
     RealAgnosticInteractionBlock,
     AgnosticResidualNonlinearInteractionBlock,
     RaceInteractionBlock,
@@ -382,7 +383,7 @@ class RACE(torch.nn.Module):
         # Node embedding
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
         node_feats_irreps = o3.Irreps([(hidden_irreps.count(o3.Irrep(0, 1)), (0, 1))])
-        x_node_feats_irreps = node_feats_irreps
+        x_node_feats_irreps = o3.Irreps([(1,(0,1))]) #node_feats_irreps
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
@@ -408,8 +409,9 @@ class RACE(torch.nn.Module):
                                                          normalization="component")
         
         ## 2) Interaction layer  # RealAgnosticInteractionBlock
-        self.linear_x = Linear(
-            x_node_feats_irreps,
+        self.x_node_tp = FullyConnectedTensorProduct(
+            node_feats_irreps,
+            node_attr_irreps,
             x_node_feats_irreps,
             internal_weights=True,
             shared_weights=True,
@@ -504,7 +506,7 @@ class RACE(torch.nn.Module):
         outputs = []
         node_logvar = []
         node_feats_list = []
-        x_node_feats = self.linear_x(node_feats)
+        x_node_feats = self.x_node_tp(node_feats, node_attrs)
         for interaction, product, readout in zip(
             self.interactions, self.products, self.readouts
         ):
@@ -529,7 +531,7 @@ class RACE(torch.nn.Module):
                 node_logvar.append(node_energies[:,1])
 
         # Concatenate node features
-        node_feats_out = torch.cat(node_feats_list, dim=-1)
+        #node_feats_out = torch.cat(node_feats_list, dim=-1)
 
         # Sum over energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
