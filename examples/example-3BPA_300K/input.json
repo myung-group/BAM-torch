@@ -19,7 +19,7 @@
     "nbatch" : 16,
     "nlayers" : 3,
     "features_dim" : 64,
-    "active_fn": "swish",
+    "active_fn": "identity",
     "pbc" : true,
     "NN" : {
             "data_seed" :  10,
