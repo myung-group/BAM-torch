@@ -422,7 +422,7 @@ class BaseTrainer:
             output_irreps = "1x0e"
         active_fn = model_config.get('active_fn')
         if active_fn == None:
-            active_fn = "swish"
+            active_fn = "identity"
         regress_forces = model_config.get('regress_forces')
         if regress_forces:
             regress_forces = "direct"

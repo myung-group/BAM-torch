@@ -508,12 +508,13 @@ class RaceEquivariantBlock(torch.nn.Module):
         cueq_config: Optional[CuEquivarianceConfig] = None,
     ) -> None:
         super().__init__()
-
+        ''' 
         irreps_mid, instructions = tp_out_irreps_with_instructions(
             node_feats_irreps_1,
             node_feats_irreps_2,
             output_irreps,
         )
+        
         self.conv_tp = TensorProduct(
             node_feats_irreps_1, # x_node_feats
             node_feats_irreps_2, # node_feats 
@@ -523,8 +524,14 @@ class RaceEquivariantBlock(torch.nn.Module):
             internal_weights=None,
             cueq_config=cueq_config,
         )
+        '''
+        self.conv_tp = o3.FullTensorProduct (
+            node_feats_irreps_1,
+            node_feats_irreps_2
+        )
         self.use_sc = use_sc
         # Update linear
+        '''
         self.linear = Linear(
             irreps_mid,
             output_irreps,
@@ -532,6 +539,7 @@ class RaceEquivariantBlock(torch.nn.Module):
             shared_weights=True,
             cueq_config=cueq_config,
         )
+        '''
         
     def forward(
         self,
@@ -542,10 +550,10 @@ class RaceEquivariantBlock(torch.nn.Module):
         
         node_feats = self.conv_tp(x_node_feats, node_feats, None)
         if self.use_sc and sc is not None:
-            node_feats = self.linear(node_feats) + sc
-            return node_feats
+            #node_feats = self.linear(node_feats) + sc
+            return node_feats + sc
         
-        node_feats = self.linear(node_feats)
+        #node_feats = self.linear(node_feats)
         return node_feats
 
 
