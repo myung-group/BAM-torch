@@ -313,6 +313,9 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
             self.irreps_out,
             cueq_config=self.cueq_config,
         )
+        ###
+        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
+        ###
 
     def forward(
         self,
@@ -336,7 +339,8 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
         )  # [n_nodes, irreps]
         message = self.linear(message) / self.avg_num_neighbors
         message = message + sc
-        return message, None  # [n_nodes, irreps]
+        
+        return self.reshape(message), None  # [n_nodes, irreps]
 
 
 @compile_mode("script")
@@ -463,7 +467,6 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         cueq_config: Optional[CuEquivarianceConfig] = None,
     ) -> None:
         super().__init__()
-
         self.use_sc = use_sc
         self.symmetric_contractions = SymmetricContractionWrapper(
             irreps_in=node_feats_irreps,
@@ -487,6 +490,7 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         sc: Optional[torch.Tensor],
         node_attrs: torch.Tensor,
     ) -> torch.Tensor:
+        
         node_feats = self.symmetric_contractions(node_feats, node_attrs)
         if self.use_sc and sc is not None:
             return self.linear(node_feats) + sc
@@ -494,7 +498,7 @@ class EquivariantProductBasisBlock(torch.nn.Module):
 
 
 @compile_mode("script")
-class EquivariantRaceBlock(torch.nn.Module):
+class RaceEquivariantBlock(torch.nn.Module):
     def __init__(
         self,
         node_feats_irreps_1: o3.Irreps,  # x_node_feats

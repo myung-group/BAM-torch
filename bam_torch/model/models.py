@@ -12,7 +12,7 @@ from .blocks import (
     AgnosticResidualNonlinearInteractionBlock,
     RaceInteractionBlock,
     EquivariantProductBasisBlock,
-    EquivariantRaceBlock,
+    RaceEquivariantBlock,
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
@@ -438,7 +438,7 @@ class RACE(torch.nn.Module):
             )
             self.interactions.append(inter)
 
-            prod = EquivariantRaceBlock(
+            prod = RaceEquivariantBlock(
                 node_feats_irreps_1=x_node_feats_irreps,  # x_node_feats
                 node_feats_irreps_2=hidden_irreps,  # node_feats
                 output_irreps=hidden_irreps,      # hidden_irreps
