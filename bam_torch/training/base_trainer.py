@@ -112,9 +112,10 @@ class BaseTrainer:
                         self.loss_dict['train'] = epoch_loss_train['loss']
                         self.loss_dict['valid'] = epoch_loss_valid['loss']
                         state_dict = self.model.state_dict()
-                        clean_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+                        clean_state_dict = {k[7:] if k.startswith("module.") else k: v for k, v in state_dict.items()}
                         self.ckpt['params'] = clean_state_dict
                         self.ckpt['opt_state'] = self.optimizer.state_dict()
+                        self.ckpt['scheduler'] = self.scheduler.state_dict()
                         self.ckpt['loss'] = self.loss_dict
                         self.l_ckpt_saved = False
 
