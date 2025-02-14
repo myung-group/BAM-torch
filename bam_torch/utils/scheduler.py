@@ -110,3 +110,10 @@ class LRScheduler:
         for group in self.optimizer.param_groups:
             return group["lr"]
 
+    def state_dict(self):
+        return self.scheduler.state_dict()
+    
+    def load_state_dict(self, model_ckpt):
+        return self.scheduler.load_state_dict(model_ckpt)
+
+        

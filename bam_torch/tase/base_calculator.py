@@ -27,7 +27,7 @@ class BaseCalculator(Calculator, BaseTrainer):
         self.device = self.configure_device()
     
         ## 3) Configure model
-        self.model, self.n_params, model_ckpt = self.configure_model()
+        self.model, self.n_params, model_ckpt, _ = self.configure_model()
         self.uniq_element = model_ckpt['uniq_element']
         self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
 

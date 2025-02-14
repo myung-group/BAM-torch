@@ -38,7 +38,7 @@ class BaseTrainer:
         self.device = self.configure_device()
 
         ## 3) Configure model
-        self.model, self.n_params, _ = self.configure_model()
+        self.model, self.n_params, _, self.start_epoch = self.configure_model()
         
         ## 4) Configure optimizer
         self.optimizer = self.configure_optimizer()
@@ -59,9 +59,7 @@ class BaseTrainer:
                                                         )
         
         ## 6) Configure scheduler
-        scheduler_config = json_data["scheduler"]
-        scheduler_config["lr_init"] = json_data["NN"]["learning_rate"]
-        self.scheduler = LRScheduler(self.optimizer, scheduler_config)
+        self.scheduler = self.configure_scheduler()
 
         ## 7) Configure loss function
         self.loss_fn, self.loss_config = self.load_loss()
@@ -84,7 +82,8 @@ class BaseTrainer:
             'uniq_element': self.uniq_element,
             'enr_avg_per_element': self.enr_avg_per_element,
             'loss': self.loss_dict,
-            'input.json': self.json_data
+            'input.json': self.json_data,
+            'scheduler' : self.scheduler.state_dict()
         }
 
         # Save input parameters setting
@@ -109,7 +108,7 @@ class BaseTrainer:
                 if self.rank == 0:
                     if epoch_loss_valid['loss'] < self.loss_test_min:
                         self.loss_test_min = epoch_loss_valid['loss']
-                        self.loss_dict['epoch'] = epoch+1
+                        self.loss_dict['epoch'] = epoch+1+self.start_epoch
                         self.loss_dict['train'] = epoch_loss_train['loss']
                         self.loss_dict['valid'] = epoch_loss_valid['loss']
                         state_dict = self.model.state_dict()
@@ -130,7 +129,7 @@ class BaseTrainer:
                     ## 13) Print out epoch loss
                     step_dict = {
                         "date": date(),
-                        "epoch": epoch+1,
+                        "epoch": epoch+1+self.start_epoch,
                     }
                     self.logger.print_epoch_loss(step_dict, 
                                                 epoch_loss_train, 
@@ -205,10 +204,7 @@ class BaseTrainer:
         if log_interval == None:
             log_interval == 2
 
-        train_config = self.json_data.get('train') 
-        fname = train_config.get('fname_log') 
-        if fname == None:
-            fname = "loss_train.out"
+        fname = self.get_unique_filename()
         fout = open(fname, 'w')
         logger = Logger(log_config, self.loss_config, log_length, fout)
         if self.rank == 0:
@@ -223,6 +219,32 @@ class BaseTrainer:
                                     )
                             )
         return log_config, log_interval, logger
+    
+    def get_unique_filename(self):
+        train_config = self.json_data.get('train') 
+        fname = train_config.get('fname_log') 
+        if fname == None:
+            fname = "loss_train.out"
+        
+        base, ext = os.path.splitext(fname) # "loss_train", ".out"
+        count = 2
+        # Make a unique filename
+        while os.path.exists(fname): # if exist the file of ```fname``` in this directory
+            fname = f"{base}-{count}{ext}"
+            count += 1
+        # Check this process if restart
+        # if restart, make a unique filename
+        model_config = self.json_data['NN']
+        restart = model_config.get('restart')
+        if restart:
+            base = os.path.splitext(fname)[0]
+            fname = f"{base}-re{ext}"
+            re_count = 2
+            while os.path.exists(fname):
+                fname = f"{base}-re{re_count}{ext}"
+                re_count += 1
+
+        return fname
 
     def load_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
@@ -368,6 +390,7 @@ class BaseTrainer:
             evaluate = False
             self.json_data['predict']['evaluate_tag'] = False
             model_ckpt = torch.load(model_config["fname_pkl"])
+            start_epoch = model_ckpt['loss']['epoch']
             try:
                 model.load_state_dict(model_ckpt['params'])
                 if self.ddp:
@@ -385,6 +408,7 @@ class BaseTrainer:
         
         if evaluate:  # True or False(None)
             rank = 0
+            start_epoch = 0
             model_ckpt = torch.load(evaluate_config["model"])
             model.load_state_dict(model_ckpt['params'])
             model.eval()
@@ -392,6 +416,7 @@ class BaseTrainer:
 
         if not restart and not evaluate: # initial train case
             rank = self.rank
+            start_epoch = 0
             model_ckpt = None
             if self.ddp:
                 model = DDP(model, device_ids=[self.rank])
@@ -404,7 +429,7 @@ class BaseTrainer:
         if rank == 0:
             print(self.msg)
 
-        return model, n_params, model_ckpt
+        return model, n_params, model_ckpt, start_epoch
         
     def set_model(self):
         model_config = self.json_data
@@ -486,7 +511,7 @@ class BaseTrainer:
     def configure_optimizer(self):
         """ Configure optimizer using model configuration dictionary.
         """
-        optimizer = self.set_optimizer() # Set self.optimizer
+        optimizer = self.set_optimizer()
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart:
@@ -511,6 +536,21 @@ class BaseTrainer:
                                           weight_decay=weight_decay,
                                           amsgrad=amsgrad)
         return optimizer
+
+    def configure_scheduler(self):
+        scheduler = self.set_scheduler()
+        model_config = self.json_data['NN']
+        restart = model_config.get('restart')
+        if restart:
+            model_ckpt = torch.load(model_config["fname_pkl"])
+            scheduler.load_state_dict(model_ckpt['scheduler'])
+        return scheduler
+
+    def set_scheduler(self):
+        scheduler_config = self.json_data["scheduler"]
+        scheduler_config["lr_init"] = self.json_data["NN"]["learning_rate"]
+        scheduler = LRScheduler(self.optimizer, scheduler_config)
+        return scheduler
 
     def get_params(self):
         return self.n_params

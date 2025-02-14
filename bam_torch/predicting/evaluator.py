@@ -23,7 +23,7 @@ class Evaluator(BaseTrainer):
         self.device = self.configure_device()
 
         ## 3) Configure model
-        self.model, self.n_params, model_ckpt = self.configure_model()
+        self.model, self.n_params, model_ckpt, _ = self.configure_model()
 
         ## 4) Configure data_loader
         self.data_loader, self.uniq_element, self.enr_avg_per_element = \
