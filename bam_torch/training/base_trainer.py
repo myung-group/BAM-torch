@@ -205,10 +205,11 @@ class BaseTrainer:
         if log_interval == None:
             log_interval == 2
 
-        fname = self.get_unique_filename()
-        fout = open(fname, 'w')
-        logger = Logger(log_config, self.loss_config, log_length, fout)
+        logger = None
         if self.rank == 0:
+            fname = self.get_unique_filename()
+            fout = open(fname, 'w')
+            logger = Logger(log_config, self.loss_config, log_length, fout)
             logger.print_logger_head()
             separator = logger.get_seperator()
             atexit.register(lambda: on_exit(
@@ -231,6 +232,7 @@ class BaseTrainer:
         count = 2
         # Make a unique filename
         while os.path.exists(fname): # if exist the file of ```fname``` in this directory
+            old_name = fname
             fname = f"{base}-{count}{ext}"
             count += 1
         # Check this process if restart
@@ -238,6 +240,7 @@ class BaseTrainer:
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart:
+            fname = old_name
             base = os.path.splitext(fname)[0]
             fname = f"{base}-re{ext}"
             re_count = 2
@@ -245,6 +248,7 @@ class BaseTrainer:
                 fname = f"{base}-re{re_count}{ext}"
                 re_count += 1
 
+        self.json_data['train']['fname_log'] = fname
         return fname
 
     def load_loss(self, reduction='mean'):
@@ -472,7 +476,6 @@ class BaseTrainer:
         else:
             cueq_config = None
             self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
-
         
         model = model_config["model"]
         if model in ["race", "RACE", "Race"]:
