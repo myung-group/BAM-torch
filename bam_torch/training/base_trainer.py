@@ -166,6 +166,7 @@ class BaseTrainer:
         return epoch_loss_dict
     
     def configure_dataloader(self):
+        json_data = self.json_data
         train_loader, valid_loader, uniq_element, enr_avg_per_element = \
                                                         get_dataloader(
                                                             json_data['fname_traj'],

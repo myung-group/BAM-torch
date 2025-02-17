@@ -115,6 +115,7 @@ def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
         if n_nodes < pad_nodes_to:
             padding = torch.zeros((pad_nodes_to - n_nodes, data.positions.size(1)))
             data.positions = torch.cat([data.positions, padding], dim=0)
+            data.forces = torch.cat([data.forces, padding], dim=0)
             data.species = torch.cat([data.species, padding[:, 0]], dim=0).to(torch.long)
             data.num_nodes = pad_nodes_to
             node_mask = torch.cat([torch.ones(original_n_nodes), 
