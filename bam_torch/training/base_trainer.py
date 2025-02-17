@@ -45,18 +45,7 @@ class BaseTrainer:
         
         ## 5) Configure data_loader
         self.train_loader, self.valid_loader, self.uniq_element, self.enr_avg_per_element = \
-                                                        get_dataloader(
-                                                            json_data['fname_traj'],
-                                                            json_data['ntrain'],
-                                                            json_data['ntest'],
-                                                            json_data['nbatch'],
-                                                            json_data['cutoff'],
-                                                            json_data['NN']['data_seed'],
-                                                            json_data['element'],
-                                                            json_data['regress_forces'],
-                                                            self.rank,
-                                                            self.world_size
-                                                        )
+                                                        self.configure_dataloader()
         
         ## 6) Configure scheduler
         self.scheduler = self.configure_scheduler()
@@ -176,6 +165,22 @@ class BaseTrainer:
                            for key, value in epoch_loss_dict.items()}      
         return epoch_loss_dict
     
+    def configure_dataloader(self):
+        train_loader, valid_loader, uniq_element, enr_avg_per_element = \
+                                                        get_dataloader(
+                                                            json_data['fname_traj'],
+                                                            json_data['ntrain'],
+                                                            json_data['ntest'],
+                                                            json_data['nbatch'],
+                                                            json_data['cutoff'],
+                                                            json_data['NN']['data_seed'],
+                                                            json_data['element'],
+                                                            json_data['regress_forces'],
+                                                            self.rank,
+                                                            self.world_size
+                                                        )
+        return train_loader, valid_loader, uniq_element, enr_avg_per_element
+
     def configure_logger_head(self):
         log_config = self.json_data.get("log_config")
         if log_config == None:
