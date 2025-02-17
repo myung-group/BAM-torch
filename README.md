@@ -21,6 +21,12 @@ And then,
 ```
 $ pip install pytorch_warmup
 ```
+Additionally, for the CuEquivariance library,
+```
+$ pip install cuequivariance-torch
+$ pip install cuequivariance
+$ pip install cuequivariance-ops-torch-cu12
+```
 Finally, install BAM-torch
 ```
 $ pip install -e .
