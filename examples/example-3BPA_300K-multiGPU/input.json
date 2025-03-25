@@ -1,32 +1,32 @@
 {
     "device" : "gpu",
-    "gpu-parallel" : "data",
+    "gpu-parallel" : true,
     "model" : "race",
     "cueq_config" : false,
     "regress_forces" : true,
     "trainer" : "base",
     "fname_traj" : "train_300K.xyz",
-    "ntrain" : 200,
-    "ntest" : 100,
+    "ntrain" : 450,
+    "ntest" : 50,
     "element" : "auto",
-    "cutoff" : 4.5,
-    "avg_num_neighbors": 60,
+    "cutoff" : 6.0,
+    "avg_num_neighbors": 26,
     "num_species" : 4,
     "max_ell" : 2,
     "num_radial_basis" : 8,
     "hidden_channels" : "64x0e+64x1o+64x2e",
     "output_channels" : "1x0e",
-    "nbatch" : 16,
+    "nbatch" : 2,
     "nlayers" : 3,
-    "features_dim" : 64,
+    "features_dim" : 128,
     "active_fn": "identity",
     "pbc" : true,
     "NN" : {
             "data_seed" :  10,
 	    "init_seed" :  11,
-            "learning_rate" : 0.001,
-	    "weight_decay" : 1e-3,
-            "nepoch" : 30000,
+            "learning_rate" : 0.01,
+	    "weight_decay" : 0,
+            "nepoch" : 50000,
             "nsave": 5,
             "restart" : false,
             "fname_pkl" : "model.pkl",
@@ -44,7 +44,9 @@
 	    "decay_factor" : 0.9,
             "max_steps" : 30,
 	    "warmup_steps" : 10,
-	    "warmup_factor" : 0.2
+	    "warmup_factor" : 0.2,
+	    "patience" : 50,
+	    "threshold" : 0.0001
     },
     "log_length": "simple",
     "log_interval": 2,
@@ -59,10 +61,11 @@
     },
     "predict" : {
             "evaluate_tag" : false,
-            "fname_traj" : "train_mixedT.xyz",
-            "ndata" : "train_mixedT.xyz",
+            "fname_traj" : "test_1200K.xyz",
+            "ndata" : "test_1200K.xyz",
             "model" : "model.pkl",
             "fname_plog" : "predict.out"
     }
 }
+
 

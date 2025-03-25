@@ -77,7 +77,6 @@ class LRScheduler:
                 self.optimizer, T_max=T_max, eta_min=1e-7
             )
         
-
     def step(self, metrics=None, epoch=None):
         if self.scheduler_type == "Null":
             return

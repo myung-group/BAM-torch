@@ -16,8 +16,8 @@ class Logger:
         self.length = 5
         self.space = 11
         if log_length == 'precise':
-            self.length = 7
-            self.space = 13
+            self.length = 10
+            self.space = 16
         self.logger_config = self.configure_logger_head()
         self.fout = fout
 

@@ -14,6 +14,9 @@ class Evaluator(BaseTrainer):
         self.json_data = json_data
         self.json_data['NN']['restart'] = False
         self.json_data["predict"]["evaluate_tag"] = True
+        self.json_data["nbatch"] = 1
+        self.rank = 0
+        self.world_size = 0
         self.date1 = date()
 
         ## 1) Reproducibility
@@ -23,16 +26,18 @@ class Evaluator(BaseTrainer):
         self.device = self.configure_device()
 
         ## 3) Configure model
-        self.model, self.n_params, model_ckpt, _ = self.configure_model()
+        self.model, self.n_params, self.model_ckpt, _ = self.configure_model()
 
         ## 4) Configure data_loader
+        _, self.valid_loader, _, _ = \
+                                                        self.configure_dataloader()
         self.data_loader, self.uniq_element, self.enr_avg_per_element = \
                                                 get_dataloader_to_predict(
                                                     json_data["predict"]['fname_traj'],
                                                     json_data["predict"]['ndata'],
                                                     1,  # nbatch
                                                     json_data['cutoff'],
-                                                    model_ckpt,
+                                                    self.model_ckpt,
                                                     json_data['regress_forces']
                                                 )
 
@@ -51,19 +56,17 @@ class Evaluator(BaseTrainer):
                            'loss_e':[],
                            'loss_f':[],
                            } 
-        keys = list(total_loss_dict.keys())
+        e_corr = torch.tensor(self.model_ckpt['scale_shift'])
+        e_corr = e_corr.flatten().mean()
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
-            tgt_enr = data.energy
-            target['energy'] = tgt_enr
-            
-            species = data.species
+            target['energy'] = data['energy']
+            species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
             preds = self.model(deepcopy(data), backprop=False)
-            energy = preds["energy"]
-            energy += node_enr_avg
-            preds['energy'] = energy
-            loss_dict = self.compute_loss(preds, data)
+
+            preds['energy'] = preds["energy"] + node_enr_avg + e_corr
+            loss_dict = self.compute_loss(preds, deepcopy(data))
             for l in total_loss_dict.keys(): # predict part
                 total_loss_dict[l].append(loss_dict.get(l, torch.nan))
             loss_dict['energy'] = float(preds['energy'][0])
@@ -80,6 +83,105 @@ class Evaluator(BaseTrainer):
         total_loss_dict = {key: torch.mean(torch.tensor(value)) \
                         for key, value in total_loss_dict.items()}
         
+        separator = self.logger.get_seperator()
+        print(separator, file=self.fout)
+        print(separator)
+        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}")
+        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
+        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
+
+    def _evaluate(self):
+        target = {}
+        total_loss_dict = {'loss':[],
+                           'loss_e':[],
+                           'loss_f':[],
+                           } 
+        keys = list(total_loss_dict.keys())
+        prd_enr_ls = []
+        prd_frc_ls = []
+        ext_enr_ls = []
+        E_EXACT, F_EXACT = self.get_exact()
+        for i, data in enumerate(self.data_loader):
+            data = data.to(self.device)
+            tgt_enr = data['energy']
+            target['energy'] = tgt_enr
+            ext_enr_ls += [tgt_enr]
+            species = data['species']
+            node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
+            preds = self.model(deepcopy(data), backprop=False)
+            energy = preds["energy"]
+            #e_corr = E_EXACT.mean() - energy.mean()
+            #print(energy, e_corr, node_enr_avg)
+            energy = energy + node_enr_avg
+            preds['energy'] = energy
+            prd_enr_ls += [energy]
+            prd_frc_ls += [preds['forces']]
+            loss_dict = self.compute_loss(preds, deepcopy(data))
+            for l in total_loss_dict.keys(): # predict part
+                total_loss_dict[l].append(loss_dict.get(l, torch.nan))
+            loss_dict['energy'] = float(preds['energy'][0])
+            del loss_dict['loss']
+
+            step_dict = {
+                    "date": date(),
+                    "data": i,
+                }
+            self.logger.print_epoch_loss(step_dict, 
+                                         loss_dict, 
+                                         target,
+                                         lr=None)
+        total_loss_dict = {key: torch.mean(torch.tensor(value)) \
+                        for key, value in total_loss_dict.items()}
+        
+        separator = self.logger.get_seperator()
+        print(separator, file=self.fout)
+        print(separator)
+        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}")
+        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
+        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
+        
+        e_corr = E_EXACT.mean() - torch.tensor(prd_enr_ls).mean()
+        prd_enr_ls = torch.tensor(prd_enr_ls, device=self.device) + e_corr
+        target = {}
+        total_loss_dict = {'loss':[],
+                           'loss_e':[],
+                           'loss_f':[],
+                           }
+        
+        print("\n\nSCALE SHIFT", file=self.fout)
+        print("\n\nSCALE SHIFT")
+        print(separator, file=self.fout)
+        print(separator)
+        for i, data in enumerate(self.data_loader):
+            tgt_enr = ext_enr_ls[i]
+            data = data.to(self.device)
+            target['energy'] = tgt_enr
+            prd_enr = prd_enr_ls[i]
+            preds['energy'] = torch.tensor([prd_enr], device=self.device)
+            preds['forces'] = torch.tensor(prd_frc_ls[i], device=self.device)
+            loss_dict = self.compute_loss(preds, deepcopy(data))
+            for l in total_loss_dict.keys(): # predict part
+                total_loss_dict[l].append(loss_dict.get(l, torch.nan))
+            loss_dict['energy'] = float(preds['energy'][0])
+            del loss_dict['loss']
+
+            step_dict = {
+                    "date": date(),
+                    "data": i,
+                }
+            self.logger.print_epoch_loss(step_dict, 
+                                         loss_dict, 
+                                         target,
+                                         lr=None)
+        total_loss_dict = {key: torch.mean(torch.tensor(value)) \
+                        for key, value in total_loss_dict.items()}
+
         separator = self.logger.get_seperator()
         print(separator, file=self.fout)
         print(separator)
@@ -142,3 +244,16 @@ class Evaluator(BaseTrainer):
                                 )
                         )
         return log_config, log_interval, logger, fout
+
+    def get_exact(self):
+        exact_enr = []
+        exact_frc = []
+        for data in self.valid_loader:
+            species = data['species']
+            node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
+
+            # if not active_fn in ['relu', 'silu', 'no']:
+            exact_enr += list(data['energy'].flatten() + node_enr_avg)            
+            exact_frc += list(data['forces'].flatten())
+
+        return torch.tensor(exact_enr, device=self.device), torch.tensor(exact_frc, device=self.device)

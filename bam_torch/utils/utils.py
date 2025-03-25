@@ -185,19 +185,19 @@ def get_dataloader(fname, ntrain, ntest,
         graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
                                 regress_forces)
-        pad_nodes_to = 0 # nbatch * max_nodes 
-        pad_edges_to = 0 # nbatch * max_edges
-        for graph in graphset:
-            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-            pad_edges_to = max(graph.num_edges, pad_edges_to)
-        padded_graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+        #pad_nodes_to = 0 # nbatch * max_nodes 
+        #pad_edges_to = 0 # nbatch * max_edges
+        #for graph in graphset:
+        #    pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+        #    pad_edges_to = max(graph.num_edges, pad_edges_to)
+        #padded_graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:
             data_sampler = DistributedSampler(
-                                padded_graphset, num_replicas=world_size, rank=rank
+                                graphset, num_replicas=world_size, rank=rank
                         )
-        loader = DataLoader(padded_graphset,
+        loader = DataLoader(graphset,
                             nbatch,
                             shuffle=False,
                             drop_last=False,

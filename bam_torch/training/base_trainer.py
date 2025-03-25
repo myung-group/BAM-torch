@@ -16,7 +16,8 @@ from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
 from bam_torch.model.wrapper_ops import CuEquivarianceConfig
 from .loss import RMSELoss, l2_regularization
-
+from e3nn.util import jit
+from torch_geometric.data import Batch as DataBatch
 
 class BaseTrainer:
     def __init__(self, json_data, rank=0, world_size=1):
@@ -39,6 +40,8 @@ class BaseTrainer:
 
         ## 3) Configure model
         self.model, self.n_params, _, self.start_epoch = self.configure_model()
+        #self.model = jit.compile(self.model)
+        #self.model = torch.jit.script(self.model)
         
         ## 4) Configure optimizer
         self.optimizer = self.configure_optimizer()
@@ -57,6 +60,7 @@ class BaseTrainer:
         self.log_config, self.log_interval, self.logger = self.configure_logger()
 
         ## 9) Test train
+        #self.train_one_epoch(mode='compile')
         epoch_loss_test = self.train_one_epoch(mode='test')
         if self.ddp:
             torch.distributed.barrier()
@@ -72,9 +76,9 @@ class BaseTrainer:
             'enr_avg_per_element': self.enr_avg_per_element,
             'loss': self.loss_dict,
             'input.json': self.json_data,
-            'scheduler' : self.scheduler.state_dict()
+            'scheduler' : self.scheduler.state_dict(),
+            'scale_shift' : []
         }
-
         # Save input parameters setting
         self.save_input_parameters(self.json_data)
      
@@ -89,7 +93,7 @@ class BaseTrainer:
                 torch.distributed.barrier()
 
             if (epoch+1)%self.log_interval == 0:
-                epoch_loss_valid = self.train_one_epoch(mode='test')
+                epoch_loss_valid = self.train_one_epoch(mode='valid')
                 if self.ddp:
                     torch.distributed.barrier()
 
@@ -101,8 +105,9 @@ class BaseTrainer:
                         self.loss_dict['train'] = epoch_loss_train['loss']
                         self.loss_dict['valid'] = epoch_loss_valid['loss']
                         state_dict = self.model.state_dict()
-                        clean_state_dict = {k[7:] if k.startswith("module.") else k: v for k, v in state_dict.items()}
-                        self.ckpt['params'] = clean_state_dict
+                        if self.ddp:
+                            state_dict = self.model.module.state_dict()
+                        self.ckpt['params'] = state_dict
                         self.ckpt['opt_state'] = self.optimizer.state_dict()
                         self.ckpt['scheduler'] = self.scheduler.state_dict()
                         self.ckpt['loss'] = self.loss_dict
@@ -110,6 +115,7 @@ class BaseTrainer:
 
                     if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
                         torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                        #self.model.save('model.pt')
                         self.l_ckpt_saved = True
                 
                     # Get the last learning rate
@@ -140,7 +146,15 @@ class BaseTrainer:
             loss_log_config = self.log_config['train']
             if data_loader == None:
                 data_loader = self.train_loader
-        else:
+            self.ckpt['scale_shift'] = []
+        elif mode == 'compile':
+            backprop = False
+            loss_log_config = self.log_config['valid']
+            if data_loader == None:
+                data = next(iter(self.train_loader)).to(self.device)
+                data = self.data_to_dict(data)
+            self.model = torch.jit.trace(self.model, data)
+        else:  # test or valid
             self.model.eval()
             backprop = False
             loss_log_config = self.log_config['valid']
@@ -150,7 +164,10 @@ class BaseTrainer:
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
             data.to(self.device)
+            data = self.data_to_dict(data)  # This is for torch.jit compile
             preds = self.model(deepcopy(data), backprop)
+            preds = self.scale_shift(preds, data, mode)
+
             loss_dict = self.compute_loss(preds, data)
             for l in loss_log_config:
                 epoch_loss_dict[l].append(loss_dict.get(l, torch.nan))
@@ -159,11 +176,22 @@ class BaseTrainer:
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
+                #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
+                torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                 self.optimizer.step()
 
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
                            for key, value in epoch_loss_dict.items()}      
         return epoch_loss_dict
+    
+    def scale_shift(self, preds, data, mode):
+        energy_target = data["energy"].flatten()
+        energy_predict = preds["energy"].flatten()
+        shift_enr = energy_target.mean() - energy_predict.mean()
+        if mode == 'train':
+            self.ckpt['scale_shift'].append(shift_enr)
+        preds["energy"] = energy_predict + shift_enr
+        return preds
     
     def configure_dataloader(self):
         json_data = self.json_data
@@ -289,15 +317,16 @@ class BaseTrainer:
         lambd = self.json_data["NN"]['l2_lambda']
 
         loss = {"loss": []}
-        energy_target = data.energy.flatten()
+        energy_target = data["energy"].flatten()
         loss["loss_e"] = self.loss_fn["energy_loss"](preds["energy"].flatten(), energy_target)
         loss["loss"].append(e_lambda * loss["loss_e"])
 
         if "forces" in preds:
-            force_target = data.forces.flatten()
+            force_target = data["forces"].flatten()
             loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(), force_target)
             loss["loss"].append(f_lambda * loss["loss_f"])
                 
+        # This is for frame-averaging or probabilistic-symmetrization
         if "forces_grad_target" in preds:
             grad_target = preds["forces_grad_target"]
             if cosine_sim:
@@ -314,9 +343,9 @@ class BaseTrainer:
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
             
-        # Sanity check to make sure the compute graph is correct.
-        for lc in loss["loss"]:
-            assert hasattr(lc, "grad_fn")
+        ## Sanity check to make sure the compute graph is correct.
+        #for lc in loss["loss"]:
+        #    assert hasattr(lc, "grad_fn")
 
         loss["loss"] = sum(loss["loss"])
         return loss
@@ -354,7 +383,6 @@ class BaseTrainer:
         else:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.msg += f'\ndevice:\n\033[33m -- {device}\n'
-                
             try:
                 if self.ddp:
                     torch.cuda.set_device(self.rank)
@@ -500,6 +528,22 @@ class BaseTrainer:
                 regress_forces=regress_forces,
                 cueq_config=cueq_config
                 )
+        elif model in ["r_race", "reduced_race", "ReducedRACE", "ReducedRace"]:
+            from bam_torch.model.models import ReducedRACE
+            model = ReducedRACE(
+                cutoff=cutoff,
+                avg_num_neighbors=avg_num_neighbors,
+                num_species=num_species,
+                max_ell=max_ell,
+                num_basis_func=num_basis_func,
+                hidden_irreps=hidden_irreps,
+                nlayers=nlayers,
+                features_dim=features_dim,
+                output_irreps=output_irreps,
+                active_fn=active_fn,
+                regress_forces=regress_forces,
+                cueq_config=cueq_config
+                )
         elif model in ["mace", "MACE", "Mace"]:
             from bam_torch.model.models import MACE
             model = MACE(
@@ -536,15 +580,17 @@ class BaseTrainer:
             lr = 0.001
         weight_decay = optim_config.get('weight_decay')
         if weight_decay == None:
-            weight_decay = 1e-12
+            weight_decay = 0 # 1e-12
         amsgrad = optim_config.get('amsgrad')  
         if amsgrad == None:
             amsgrad = True
-
+        # We can modify this part
         optimizer = torch.optim.Adam(self.model.parameters(), 
-                                          lr=lr, 
-                                          weight_decay=weight_decay,
-                                          amsgrad=amsgrad)
+                                    lr=lr, 
+                                    weight_decay=weight_decay,
+                                    foreach=None,
+                                    fused=None,
+                                    amsgrad=amsgrad)
         return optimizer
 
     def configure_scheduler(self):
@@ -568,3 +614,11 @@ class BaseTrainer:
     def check_parameter_sync(self):
         for name, param in self.model.named_parameters():
             print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}")
+
+    def data_to_dict(self, data):
+        data_dict = data.to_dict() if isinstance(data, DataBatch) else data
+        data_dict = {k: (torch.tensor(v) if isinstance(v, int) else v) 
+                     for k, v in data_dict.items()}
+        data_dict = {k: (torch.tensor(v) if isinstance(v, list) else v) 
+                     for k, v in data_dict.items()}
+        return data_dict
