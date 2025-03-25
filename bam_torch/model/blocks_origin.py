@@ -421,7 +421,7 @@ class RaceInteractionBlock(InteractionBlock):
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
         species: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, None]:
         """
         node_attrs: to_one_hot(species)
         node_feats: node_embedding(node_attrs)

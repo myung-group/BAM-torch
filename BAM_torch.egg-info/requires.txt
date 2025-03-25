@@ -1,0 +1,9 @@
+numpy
+scipy
+ase
+matscipy
+torch
+torch_scatter
+torch_sparse
+e3nn
+pytorch_warmup

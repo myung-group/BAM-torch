@@ -25,30 +25,20 @@ from bam_torch.utils.output_utils import get_outputs
 
 
 def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
-    # 입력 차원 정규화: [..., 1] -> [total_nodes, 1]
-    if indices.dim() == 1:
-        indices = indices.unsqueeze(-1)  # [N] -> [N, 1]
-    elif indices.dim() > 2 or (indices.dim() == 2 and indices.shape[-1] != 1):
-        raise ValueError("indices must be 1D or [..., 1]")
+    """
+    Generates one-hot encoding with <num_classes> classes from <indices>
+    :param indices: (N x 1) tensor
+    :param num_classes: number of classes
+    :param device: torch device
+    :return: (N x num_classes) tensor
+    """
+    shape = indices.shape[:-1] + (num_classes,)
+    oh = torch.zeros(shape, device=indices.device).view(shape)
 
-    total_nodes = indices.shape[0]
-    oh = torch.zeros(total_nodes, num_classes, device=indices.device)
+    # scatter_ is the in-place version of scatter
     oh.scatter_(dim=-1, index=indices, value=1)
-    return oh
 
-
-# def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
-#     """
-#     Generates one-hot encoding with <num_classes> classes from <indices>
-#     :param indices: (N x 1) tensor
-#     :param num_classes: number of classes
-#     :param device: torch device
-#     :return: (N x num_classes) tensor
-#     """
-#     n_nodes = indices.shape[0]
-#     oh = torch.zeros(n_nodes, num_classes, device=indices.device)
-#     oh.scatter_(dim=-1, index=indices, value=1)
-#     return oh
+    return oh.view(*shape)  ## similar with torch.nn.Embedding
 
 
 @compile_mode("script")
@@ -476,11 +466,11 @@ class RACE(torch.nn.Module):
        # print([param for param in self.interactions.parameters()])
         #self._init_model()
     
-    def forward(self, data: Dict[str, torch.Tensor], backprop: bool = True):
+    def forward(self, data, backprop):
         # assert Rij.ndim == 2 and Rij.shape[1] == 3
         # iatoms ==> senders     # edge_index[0]
         # jatoms ==> receivers   # edge_index[1]
-        R = data["positions"]
+        R = data.positions
         R.requires_grad_(True)
         Rij = get_edge_relative_vectors_with_pbc(R, data)
         Rij = Rij / self.cutoff
@@ -492,15 +482,15 @@ class RACE(torch.nn.Module):
         num_graphs = data["ptr"].numel() - 1  # nbatch
         displacement = torch.zeros(
             (num_graphs, 3, 3),
-            dtype=data["positions"].dtype,
-            device=data["positions"].device,
+            dtype=data.positions.dtype,
+            device=data.positions.device,
         )
         # Embedding
-        species = data["species"].unsqueeze(-1)
+        species = data.species.unsqueeze(-1)
         node_attrs = to_one_hot(species, self.num_species)
         node_feats = self.node_embedding(node_attrs)
 
-        edge_index = data["edge_index"]
+        edge_index = data.edge_index
         lengths = torch.norm(Rij, dim=1)
 
         nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
@@ -511,13 +501,15 @@ class RACE(torch.nn.Module):
         edge_attrs = self.spherical_harmonics(Rij)
         edge_feats = self.radial_embedding(lengths.unsqueeze(1), 
                                            node_attrs, 
-                                           data["edge_index"],
+                                           data.edge_index,
                                            species)
         outputs = []
-        node_logvar_list = []  # 리스트로 유지
+        node_logvar = []
         node_feats_list = []
         x_node_feats = self.x_node_tp(node_feats, node_attrs)
-        for interaction, product, readout in zip(self.interactions, self.products, self.readouts):
+        for interaction, product, readout in zip(
+            self.interactions, self.products, self.readouts
+        ):
             node_feats, sc = interaction(
                 node_attrs=node_attrs,
                 node_feats=node_feats,
@@ -526,32 +518,51 @@ class RACE(torch.nn.Module):
                 edge_index=edge_index,
                 species=species
             )
-            node_feats = product(x_node_feats=x_node_feats, node_feats=node_feats, sc=sc)
+            node_feats = product(
+                x_node_feats=x_node_feats,
+                node_feats=node_feats,
+                sc=sc, 
+            )
             node_feats_list.append(node_feats)
-            node_energies = readout(node_feats, node_heads)
-            outputs.append(node_energies[:, 0])
+            node_energies = readout(node_feats, node_heads) # [n_nodes, len(heads)]  == [nbatch*num_nodes, "1x0e" or "2x0e"]
+            
+            outputs.append(node_energies[:,0])
             if node_energies.shape[1] == 2:
-                node_logvar_list.append(node_energies[:, 1])
+                node_logvar.append(node_energies[:,1])
+
+        # Concatenate node features
+        #node_feats_out = torch.cat(node_feats_list, dim=-1)
 
         # Sum over energy contributions
-        node_energy = torch.stack(outputs, dim=-1)
-        if self.act_fn is not None:
+        node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
+        if self.act_fn != None:
             node_energy = self.act_fn(node_energy)
-        node_energy = torch.sum(node_energy, dim=-1)
-        node_energy = scatter_sum(src=node_energy, index=data["batch"], dim=-1, dim_size=num_graphs)
+        
+        # Global pooling
+        node_energy = torch.sum(node_energy, dim=-1) # [nbatch*num_nodes]  # total_energy
+        # node_energy = self.scale_shift(node_energy, node_heads) 
+        node_energy = scatter_sum(
+                src=node_energy,
+                index=data["batch"],
+                dim=-1,
+                dim_size=num_graphs,
+            ) 
 
-        # Variance 계산
-        if node_logvar_list:  # != [] 대신 Pythonic하게
-            node_logvar_tensor = torch.stack(node_logvar_list, dim=-1)  # [nbatch*num_nodes, nlayers]
-            node_logvar = node_logvar_tensor.mean(dim=-1)  # [nbatch*num_nodes]
+        if node_logvar != []:
+            node_logvar = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
+            node_logvar = node_logvar.mean(dim=-1) # [nbatch*num_nodes]
         else:
             node_logvar = torch.zeros(node_feats.shape[0], device=node_energy.device)
-
-        node_energy_var = torch.exp(node_logvar)
-        node_energy_var = scatter_sum(src=node_energy_var, index=data["batch"], dim=-1, dim_size=num_graphs)
-        n_node = int(data["num_nodes"] / num_graphs)
-        n_nodes = torch.tensor([n_node] * num_graphs, device=node_energy_var.device)
-        energy_var = node_energy_var / n_nodes
+        node_energy_var = torch.exp(node_logvar) 
+        node_energy_var = scatter_sum(
+                src=node_energy_var,
+                index=data["batch"],
+                dim=-1,
+                dim_size=num_graphs,
+            ) 
+        n_node = int(data.num_nodes / num_graphs)
+        n_nodes = torch.tensor([n_node]*num_graphs, device=node_energy_var.device)
+        energy_var = node_energy_var/n_nodes
 
         preds = {}
         preds["energy"] = node_energy
@@ -562,41 +573,41 @@ class RACE(torch.nn.Module):
                 energy=node_energy,
                 positions=R,
                 displacement=displacement,
-                cell=data["cell"],
+                cell=data.cell,
                 training=backprop,
                 compute_force=True,
                 compute_virials=False,
                 compute_stress=False,
                 compute_hessian=False
             )
-            preds["forces"] = forces if forces is not None else torch.zeros_like(R)
+            preds["forces"] = forces
 
         return preds
 
         
-def get_edge_relative_vectors_with_pbc(R: torch.Tensor, data_graph: Dict[str, torch.Tensor]) -> torch.Tensor:
-    iatoms = data_graph["edge_index"][0]
-    jatoms = data_graph["edge_index"][1]
-    Sij = data_graph.get("edges", torch.zeros((iatoms.shape[0], 3), dtype=R.dtype, device=R.device))
-    cell = data_graph.get("cell", torch.zeros((data_graph["ptr"].numel() - 1, 3, 3), dtype=R.dtype, device=R.device))
+def get_edge_relative_vectors_with_pbc (R, data_graph):
+    # iatoms ==> senders
+    # jatoms ==> receivers
+    iatoms = data_graph.edge_index[0]   # shape = (b * n_edges)
+    jatoms = data_graph.edge_index[1] # shape = (b * n_edges) 
+    Sij = data_graph.edges   # shape = (b * n_edges, 3)
+    cell = data_graph.cell   # shape = (b, 3, 3)
 
-    b = data_graph["ptr"].numel() - 1  # 배치 크기 (num_graphs)
-    n_edges_total = iatoms.shape[0]    # 전체 엣지 수
-    n_edges_per_batch = n_edges_total // b  # 배치당 엣지 수 (정확한 분할 가정)
+    b, _, _ = cell.shape
+    n_edges = data_graph.num_edges[0]
 
-    if Sij.shape[0] != n_edges_total:
-        raise ValueError(f"Sij size {Sij.shape} does not match expected {n_edges_total} edges")
-    Sij = Sij.view(b, n_edges_per_batch, 3)  # 배치별로 재구성
-
-    repeated_cell = torch.repeat_interleave(cell, repeats=n_edges_per_batch, dim=0)
-    repeated_cell = repeated_cell.view(b, n_edges_per_batch, 3, 3)
+    repeated_cell = torch.repeat_interleave(cell, repeats=n_edges, dim=0)
+    repeated_cell =  repeated_cell.reshape(b, n_edges, 3, 3)
+    Sij = Sij.reshape(b, n_edges, 3)
     shift_v = torch.einsum('bni,bnij->bnj', Sij, repeated_cell)
 
-    _R = R[jatoms] - R[iatoms]
-    _R = _R.view(b, n_edges_per_batch, 3)
+    _R = R[jatoms] - R[iatoms] 
+    _R = _R.view(b, n_edges, 3)
     Rij = _R + shift_v
-    Rij = Rij.view(b * n_edges_per_batch, 3).to(R.device)
-    return Rij
+    Rij = Rij.view(b*n_edges, 3).to(R.device)
+    lengths = torch.norm(Rij, dim=1)
+
+    return Rij # (num_edges, 3)
 
 def determine_atomic_inter_shift(mean, heads):
     if isinstance(mean, np.ndarray):

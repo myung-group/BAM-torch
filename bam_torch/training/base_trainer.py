@@ -110,6 +110,7 @@ class BaseTrainer:
 
                     if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
                         torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                        torch.save(deepcopy(self.model), 'model.pt')
                         self.l_ckpt_saved = True
                 
                     # Get the last learning rate
