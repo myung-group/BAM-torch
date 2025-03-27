@@ -289,11 +289,18 @@ def tensor_irreps_array_product(tensor, irreps_array, irreps):
     x1 = irreps_array # mji
     x1_chunks = split_tensor_by_irreps(x1, irreps)
     x2 = tensor # mix
-
+    """
     num = 0
     chunks = []
     for (mul, ir), x in zip(irreps, x1_chunks):
         mix = x2[:, num:num+mul]
         chunks.append(x*mix.unsqueeze(-1))
         num += mul
+    """
+    offsets = torch.cumsum(torch.tensor([0] + [mul for mul, _ in irreps[:-1]]), dim=0)
+    chunks = [
+        x * x2[:, offset:offset+mul].unsqueeze(-1)
+        for (mul, _), x, offset in zip(irreps, x1_chunks, offsets)
+    ]
     return from_chunks(irreps, chunks, leading_shape=(x1.shape[0], ))
+

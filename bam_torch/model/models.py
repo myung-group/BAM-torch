@@ -14,6 +14,7 @@ from .blocks import (
     RealAgnosticInteractionBlock,
     AgnosticResidualNonlinearInteractionBlock,
     RaceInteractionBlock,
+    ConcatenateRaceInteractionBlock,
     RaceInteractionBlockBasis,
     EquivariantProductBasisBlock,
     ReducedRaceEquivariantBlock,
@@ -628,7 +629,7 @@ class RACE(torch.nn.Module):
     """
     def __init__(
             self, 
-            interaction_cls: Optional[Type[InteractionBlock]] = RaceInteractionBlock,
+            interaction_cls: Optional[Type[InteractionBlock]] = ConcatenateRaceInteractionBlock,
             cutoff: float = 6.0, 
             avg_num_neighbors: int = 40, 
             num_species: int = 1, 

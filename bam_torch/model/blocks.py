@@ -32,9 +32,13 @@ from bam_torch.utils.irreps_tools import (
 from bam_torch.utils.scatter import scatter_sum
 from bam_torch.model.tensor_product_from_jax import (
     TensorProductTorch, 
-    tensor_irreps_array_product
+    tensor_irreps_array_product,
 )
-
+from bam_torch.model.concatenate import (
+    irreps_filter,
+    concatenate_irreps_tensor,
+    tensor_regroup_by_irreps
+)
 
 _SIMPLIFY_REGISTRY = set()
 def simplify_if_compile(module: torch.nn.Module) -> torch.nn.Module:
@@ -465,8 +469,7 @@ class RaceInteractionBlockBasis(InteractionBlock):
 class RaceInteractionBlock(InteractionBlock): 
     """
     RACE's updating interaction block
-    # TODO: 1) Concatenate messages and result of tensor product
-    #       2) CuEquiv. ver. update 
+    # TODO: 2) CuEquiv. ver. update 
     """
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):
@@ -541,6 +544,109 @@ class RaceInteractionBlock(InteractionBlock):
         mji = self.conv_tp(
             node_feats[sender], edge_attrs
         ) # messages in BAM-jax
+        mji = tensor_irreps_array_product(mix, mji, self.irreps_out) # mix * messages
+        message = scatter_sum(
+            src=mji, index=receiver, dim=0, dim_size=num_nodes
+        )  # [n_nodes, irreps]
+        message = message / torch.sqrt(avg_num_neighbors)
+        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
+
+        return (
+            message,
+            skip
+        )  # [n_nodes, channels, (lmax + 1)**2]
+
+
+@compile_mode("script")
+class ConcatenateRaceInteractionBlock(InteractionBlock): 
+    """
+    RACE's updating interaction block
+    # TODO: 1) CuEquiv. ver. update 
+    """
+    def _setup(self) -> None:
+        if not hasattr(self, "cueq_config"):
+            self.cueq_config = None
+        # For skip connection
+        self.skip_tp_node = FullyConnectedTensorProduct(
+            self.node_feats_irreps,
+            self.node_attrs_irreps,
+            self.hidden_irreps,
+            cueq_config=self.cueq_config,
+        )
+        # First linear
+        self.linear_up = Linear(
+            self.node_feats_irreps,
+            self.node_feats_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+        )
+        # TensorProduct
+        irreps_mid, _ = tp_out_irreps_with_instructions(
+            self.node_feats_irreps,
+            self.edge_attrs_irreps,
+            self.target_irreps,
+        )
+        #self.irreps_out = irreps_mid.simplify()
+        self.irreps_mid = irreps_mid.simplify()
+        self.conv_tp = TensorProductTorch(
+            self.node_feats_irreps,
+            self.edge_attrs_irreps,
+            self.irreps_mid,
+        )
+        self.irreps_out = (self.irreps_mid 
+                           + self.node_feats_irreps).sort().irreps.simplify()
+        # Convolution weights
+        input_dim = self.edge_feats_irreps.num_irreps
+        self.conv_tp_weights = nn.FullyConnectedNet(
+            [input_dim] + self.radial_MLP + [self.irreps_out.num_irreps],
+            torch.nn.functional.silu,
+            out_act=False
+        )
+        # Last linear
+        self.linear_down = Linear(
+            self.irreps_out,
+            self.hidden_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=self.cueq_config,
+        )
+
+    def forward(
+        self,
+        node_attrs: torch.Tensor,
+        node_feats: torch.Tensor,
+        edge_attrs: torch.Tensor,
+        edge_feats: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        node_attrs: to_one_hot(species)
+        node_feats: node_embedding(node_attrs)
+        edge_attrs: spherical harmonics(vectors) 
+                    == spherical harmonics(Rab)
+        edge_feats: radial_embedding(lengths)
+        edge_index: torch.Tensor([senders, receivers])
+        """
+        sender = edge_index[0]
+        receiver = edge_index[1]
+        num_nodes = node_feats.shape[0]
+        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
+
+        skip = self.skip_tp_node(node_feats, node_attrs)
+        node_feats = self.linear_up(node_feats)
+        mix = self.conv_tp_weights(edge_feats)  # tp_weights
+        mji = self.conv_tp(
+            node_feats[sender], edge_attrs
+        ) # messages in BAM-jax
+        mji, concat_irreps = concatenate_irreps_tensor(
+            tensors=[node_feats[sender],
+                    mji],
+            irreps_list=[self.node_feats_irreps,
+                        self.irreps_mid]
+        )
+        mji, simplified_irreps = tensor_regroup_by_irreps(mji, concat_irreps)
+        assert self.irreps_out == simplified_irreps
         mji = tensor_irreps_array_product(mix, mji, self.irreps_out) # mix * messages
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
