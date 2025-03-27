@@ -779,7 +779,7 @@ class RaceEquivariantBlock(torch.nn.Module):
         node_feats = self.conv_tp(x_node_feats, node_feats, None)
         if self.use_sc and sc is not None:
             node_feats = self.linear(node_feats) + sc
-            return node_feats + sc
+            return node_feats
         
         node_feats = self.linear(node_feats)
         return node_feats

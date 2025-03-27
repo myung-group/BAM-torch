@@ -613,7 +613,7 @@ class BaseTrainer:
     
     def check_parameter_sync(self):
         for name, param in self.model.named_parameters():
-            print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}")
+            print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}, Shape: {param.shape}, Num.: {param.numel()}")
 
     def data_to_dict(self, data):
         data_dict = data.to_dict() if isinstance(data, DataBatch) else data
