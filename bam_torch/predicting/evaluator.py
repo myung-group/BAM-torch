@@ -28,18 +28,9 @@ class Evaluator(BaseTrainer):
         ## 3) Configure model
         self.model, self.n_params, self.model_ckpt, _ = self.configure_model()
 
-        ## 4) Configure data_loader
-        _, self.valid_loader, _, _ = \
-                                                        self.configure_dataloader()
+        ## 4) Configure data_loader   
         self.data_loader, self.uniq_element, self.enr_avg_per_element = \
-                                                get_dataloader_to_predict(
-                                                    json_data["predict"]['fname_traj'],
-                                                    json_data["predict"]['ndata'],
-                                                    1,  # nbatch
-                                                    json_data['cutoff'],
-                                                    self.model_ckpt,
-                                                    json_data['regress_forces']
-                                                )
+                                                        self.configure_dataloader()
 
         ## 5) Configure loss function
         self.loss_fn, self.loss_config = self.load_loss()
@@ -201,6 +192,19 @@ class Evaluator(BaseTrainer):
         fname = f'input_json_of_{fname_ls[0]}_{fname_ls[1]}.txt'
         fout = open(fname, 'w')
         pprint.pprint(self.json_data, stream=fout)
+
+    def configure_dataloader(self):
+        json_data = self.json_data
+        data_loader, uniq_element, enr_avg_per_element = \
+                                                get_dataloader_to_predict(
+                                                    json_data["predict"]['fname_traj'],
+                                                    json_data["predict"]['ndata'],
+                                                    1,  # nbatch
+                                                    json_data['cutoff'],
+                                                    self.model_ckpt,
+                                                    json_data['regress_forces']
+                                                )
+        return data_loader, uniq_element, enr_avg_per_element
 
     def configure_logger_head(self):
         log_config = self.json_data.get("plog_config")
