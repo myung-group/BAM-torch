@@ -538,7 +538,9 @@ class RACE(torch.nn.Module):
         if self.act_fn is not None:
             node_energy = self.act_fn(node_energy)
         node_energy = torch.sum(node_energy, dim=-1)
-        node_energy = scatter_sum(src=node_energy, index=data["batch"], dim=-1, dim_size=num_graphs)
+        # node_energy = scatter_sum(src=node_energy, index=data["batch"], dim=-1, dim_size=num_graphs)
+        total_energy = scatter_sum(src=node_energy, index=data["batch"], dim=0, dim_size=num_graphs)
+
 
         # Variance 계산
         if node_logvar_list:  # != [] 대신 Pythonic하게
@@ -554,12 +556,18 @@ class RACE(torch.nn.Module):
         energy_var = node_energy_var / n_nodes
 
         preds = {}
-        preds["energy"] = node_energy
+        ##수정
+        preds["node_energy"] = node_energy  # 노드별 에너지 반환
+        preds["energy"] = total_energy      # 그래프별 에너지 추가
         preds["energy_var"] = energy_var
+        ##기존
+        # preds["energy"] = node_energy
+        # preds["energy_var"] = energy_var
 
+# 570번째줄 energy=node_energy에서 total_energy로 수정함.
         if self.regress_forces == 'direct' or self.regress_forces:
             forces, virials, stress, hessian = get_outputs(
-                energy=node_energy,
+                energy=total_energy,
                 positions=R,
                 displacement=displacement,
                 cell=data["cell"],

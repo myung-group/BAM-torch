@@ -21,18 +21,18 @@ def main():
 
     # JSON에서 필요한 정보 추출
     model_path = json_data.get("model_path", "model.pt")
-    dtype = json_data.get("dtype", "float64")
     head = json_data.get("head", None)
 
-    pckl = torch.load('model.pkl', weights_only=False)  # weights_only=True가 불가능할 경우
+    pckl = torch.load('model.pkl', weights_only=False)
     nlayers = pckl['input.json']['nlayers']
     cutoff = pckl['input.json']['cutoff']
 
-    model = torch.load("model.pt", weights_only=False)  # weights_only=True가 불가능할 경우
+    model = torch.load("model.pt", weights_only=False)
     model.eval()
     
     species = extract_species("train_si.xyz")
     model.atomic_numbers = species.clone().detach()
+    model.num_species = len(species)
     model.num_interactions = torch.tensor(nlayers)
     model.r_max = torch.tensor(cutoff)
     print(f"atomic_numbers: {model.atomic_numbers}")
@@ -40,12 +40,9 @@ def main():
     print(f"num_interactions: {model.num_interactions}")
     print(f'species: {species}')
 
-    # 데이터 타입 설정
-    if dtype == "float64":
-        model = model.double().to("cpu")
-    elif dtype == "float32":
-        print("Converting model to float32, this may cause loss of precision.")
-        model = model.float().to("cpu")
+    # 데이터 타입을 float32로 강제 설정
+    print("Converting model to float32 for LAMMPS compatibility.")
+    model = model.float().to("cpu")
 
     # 헤드 처리
     if head is None and hasattr(model, "heads") and len(model.heads) > 1:

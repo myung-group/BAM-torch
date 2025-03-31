@@ -1,9 +1,7 @@
 from typing import Dict, List, Optional
 import torch
 from e3nn.util.jit import compile_mode
-from bam_torch.utils.utils import scatter_sum
-from bam_torch.model.models import to_one_hot
-
+from bam_torch.utils.scatter import scatter_sum
 
 @compile_mode("script")
 class LAMMPS_BAM(torch.nn.Module):
@@ -14,6 +12,7 @@ class LAMMPS_BAM(torch.nn.Module):
         self.register_buffer("r_max", model.r_max.clone().detach())
         self.register_buffer("num_interactions", model.num_interactions.clone().detach())
         self.num_species = len(model.atomic_numbers)
+
         if not hasattr(model, "heads"):
             model.heads = [None]
         self.register_buffer(
@@ -23,6 +22,7 @@ class LAMMPS_BAM(torch.nn.Module):
                 dtype=torch.long,
             ).unsqueeze(0),
         )
+
         for param in self.model.parameters():
             param.requires_grad = False
 
@@ -33,18 +33,35 @@ class LAMMPS_BAM(torch.nn.Module):
         compute_virials: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         num_graphs = data["ptr"].numel() - 1
-        compute_displacement = compute_virials  # virials 계산 시 displacement 필요
 
+        # --- Debug 출력 ---
+        print(f"Input positions dtype: {data['positions'].dtype}")
+        if "node_attrs" in data:
+            print(f"Input node_attrs dtype: {data['node_attrs'].dtype}")
+        print(f"Input batch dtype: {data['batch'].dtype}")
+        print(f"Input ptr dtype: {data['ptr'].dtype}")
+        print(f"batch: {data['batch'].shape}, max={data['batch'].max()}")
+        print(f"ptr: {data['ptr']}, num_graphs={num_graphs}")
+        print(f"local_or_ghost shape: {local_or_ghost.shape}, dtype={local_or_ghost.dtype}")
+
+        # --- species 자동 생성 ---
         if "species" not in data:
-            # LAMMPS의 atom types를 사용하거나, 단일 원소 가정
             num_atoms = data["positions"].shape[0]
-            data["species"] = self.atomic_numbers.repeat(num_atoms)  # [num_atoms]
-        
-        # RACE 모델에 맞게 data와 backprop만 전달
-        data["head"] = self.head
-        out = self.model(data, backprop=False)  # RACE는 backprop 인자를 사용
+            atomic_number = int(self.atomic_numbers[0].item())
+            data["species"] = torch.full((num_atoms,), atomic_number, dtype=torch.long, device=data["positions"].device)
 
-        node_energy = out["energy"]  # RACE는 "energy"를 반환
+        data["head"] = self.head
+        data["batch"] = torch.zeros(data["positions"].shape[0], dtype=torch.long, device=data["positions"].device)
+        data["ptr"] = torch.tensor([0, data["positions"].shape[0]], dtype=torch.long, device=data["positions"].device)
+
+        # --- 모델 실행 ---
+        out = self.model(data, backprop=True)
+        node_energy = out["node_energy"]
+        print(f"node_energy shape: {node_energy.shape}, dtype={node_energy.dtype}")
+
+        if "forces" in out:
+            print(f"Output forces dtype: {out['forces'].dtype}")
+
         if node_energy is None:
             return {
                 "total_energy_local": None,
@@ -53,33 +70,53 @@ class LAMMPS_BAM(torch.nn.Module):
                 "virials": None,
             }
 
+        # --- autograd 연결 ---
         positions = data["positions"]
-        displacement = torch.zeros_like(data["cell"]) if compute_virials else None
+        if not positions.requires_grad:
+            positions.requires_grad_(True)
+
+        if compute_virials:
+            displacement = torch.zeros_like(data["cell"])
+            displacement.requires_grad_(True)
+            virials: Optional[torch.Tensor] = torch.zeros_like(data["cell"]).unsqueeze(0)
+        else:
+            displacement = torch.zeros_like(data["cell"])  # dummy for TorchScript
+            virials: Optional[torch.Tensor] = torch.zeros_like(data["cell"]).unsqueeze(0)
+
         forces: Optional[torch.Tensor] = out.get("forces", torch.zeros_like(positions))
-        virials: Optional[torch.Tensor] = torch.zeros_like(data["cell"])
 
-        # 로컬 원자의 에너지 누적
+        # --- energy sum ---
         node_energy_local = node_energy * local_or_ghost
-        total_energy_local = scatter_sum(
-            src=node_energy_local, index=data["batch"], dim=-1, dim_size=num_graphs
-        )
+        print(f"node_energy_local shape: {node_energy_local.shape}, dtype={node_energy_local.dtype}")
 
-        # virials 계산이 필요할 경우 추가 처리
-        if compute_virials and displacement is not None:
-            grad_outputs: List[Optional[torch.Tensor]] = [
-                torch.ones_like(total_energy_local)
-            ]
-            forces, virials = torch.autograd.grad(
+        if data["batch"].max() >= num_graphs:
+            raise ValueError(f"batch max ({data['batch'].max()}) exceeds num_graphs ({num_graphs})")
+
+        total_energy_local = scatter_sum(
+            src=node_energy_local, index=data["batch"], dim=0, dim_size=num_graphs
+        )
+        print(f"total_energy_local shape: {total_energy_local.shape}, dtype={total_energy_local.dtype}")
+
+        # --- autograd 기반 force/virial 계산 ---
+        if compute_virials:
+            grad_outputs: Optional[List[Optional[torch.Tensor]]] = [torch.ones_like(total_energy_local)]
+            grads = torch.autograd.grad(
                 outputs=[total_energy_local],
                 inputs=[positions, displacement],
                 grad_outputs=grad_outputs,
-                retain_graph=False,
+                retain_graph=True,
                 create_graph=False,
                 allow_unused=True,
             )
-            forces = -forces if forces is not None else torch.zeros_like(positions)
-            virials = -virials if virials is not None else torch.zeros_like(displacement)
+            forces_grad, virials_grad = grads
+            if forces_grad is not None:
+                forces = -forces_grad
+                print(f"Forces dtype after grad: {forces.dtype}")
+            if virials_grad is not None:
+                virials = -virials_grad.unsqueeze(0)  # make [1, 3, 3]
+                print(f"Virials dtype after grad: {virials.dtype}")
 
+        # --- 최종 반환 ---
         return {
             "total_energy_local": total_energy_local,
             "node_energy": node_energy,

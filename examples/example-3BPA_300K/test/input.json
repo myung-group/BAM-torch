@@ -1,0 +1,68 @@
+{
+    "device" : "gpu",
+    "gpu-parallel" : false,
+    "model" : "race",
+    "cueq_config" : false,
+    "regress_forces" : true,
+    "trainer" : "base",
+    "fname_traj" : "train_300K.xyz",
+    "ntrain" : 200,
+    "ntest" : 100,
+    "element" : "auto",
+    "cutoff" : 4.5,
+    "avg_num_neighbors": 60,
+    "num_species" : 4,
+    "max_ell" : 2,
+    "num_radial_basis" : 8,
+    "hidden_channels" : "64x0e+64x1o+64x2e",
+    "output_channels" : "1x0e",
+    "nbatch" : 16,
+    "nlayers" : 3,
+    "features_dim" : 64,
+    "active_fn": "identity",
+    "pbc" : true,
+    "NN" : {
+            "data_seed" :  10,
+	    "init_seed" :  11,
+            "learning_rate" : 0.001,
+	    "weight_decay" : 1e-3,
+            "nepoch" : 30000,
+            "nsave": 5,
+            "restart" : false,
+            "fname_pkl" : "model.pkl",
+	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
+            "frc_lambda" : 100,
+            "enr_lambda" : 1,
+            "energy_grad_loss" : true,
+            "energy_grad_mult" : 10,
+            "l2_lambda" : 0.0,
+            "cosine_sim" : false
+    },
+    "scheduler": {
+            "scheduler" : "ReduceLROnPlateau",
+	    "lr_gamma" : 0.1,
+	    "decay_factor" : 0.9,
+            "max_steps" : 30,
+	    "warmup_steps" : 10,
+	    "warmup_factor" : 0.2
+    },
+    "log_length": "simple",
+    "log_interval": 2,
+    "log_config": {
+            "step":["date", "epoch"],
+            "train": ["loss", "loss_e", "loss_f"],
+            "valid": ["loss", "loss_e", "loss_f"],
+            "lr": ["lr"]
+    },
+    "train" : {
+            "fname_log" : "loss_train.out"
+    },
+    "predict" : {
+            "evaluate_tag" : false,
+            "fname_traj" : "train_600K.xyz",
+            "ndata" : "train_600K.xyz",
+            "model" : "model.pkl",
+            "fname_plog" : "predict.out"
+    }
+}
+

@@ -1,0 +1,95 @@
+                               | TRAIN_____________________________| VALID_____________________________| 
+MM/DD/YYYY HH/MM/SS    EPOCH   | LOSS       MSE_E      MSE_F       | LOSS       MSE_E      MSE_F       | LR   
+--------------------------------------------------------------------------------------------------------------
+03/31/2025 13:26:13    2       | 61.517     0.67759    0.6084      | 46.666     0.14167    0.46524     | 0.001
+03/31/2025 13:26:24    4       | 37.219     0.11572    0.37103     | 31.65      0.017541   0.31633     | 0.001
+03/31/2025 13:26:36    6       | 25.011     0.025141   0.24986     | 21.049     0.017252   0.21031     | 0.001
+03/31/2025 13:26:47    8       | 13.981     0.041292   0.1394      | 12.658     0.031886   0.12626     | 0.001
+03/31/2025 13:26:59    10      | 10.019     0.087344   0.099313    | 9.4519     0.015777   0.094361    | 0.001
+03/31/2025 13:27:10    12      | 8.2203     0.077013   0.081433    | 7.9648     0.021281   0.079435    | 0.001
+03/31/2025 13:27:22    14      | 7.0674     0.05002    0.070174    | 6.9965     0.012931   0.069836    | 0.001
+03/31/2025 13:27:33    16      | 6.2834     0.049608   0.062338    | 6.2641     0.01416    0.062499    | 0.001
+03/31/2025 13:27:45    18      | 5.638      0.049914   0.055881    | 5.6667     0.014887   0.056518    | 0.001
+--------------------------------------------------------------------------------------------------------------
+
+* NUMBER OF PARAMETERS: 
+ - MODEL(TOTAL)   637120
+ --- HIDDEN.      64x0e+64x1o+64x2e
+ --- RADI. BASIS. 8
+
+* SEED NUMBER:
+ - DATA_SEED      10
+ - INIT_SEED      11
+
+* DATA INFO:
+ - N(TRAIN)       200
+ - N(VALID)       100
+ - BATCH          16
+ - CUTOFF         4.5
+ - AVG. NEIGH.    60
+
+* ELAPSED TIME:
+ - 0 DAYS, 0 HOURS, 1 MINUTES, and 56 SECONDS
+ -- DAYS          0.00134259259  
+ -- HOURS         0.0322222222   
+ -- MINUTES       1.93333333     
+ -- SECONDS       116            
+
+--------------------------------------------------------------------------------------------------------------
+ 
+{'NN': {'cosine_sim': False,
+        'data_seed': 10,
+        'energy_grad_loss': True,
+        'energy_grad_mult': 10,
+        'enr_lambda': 1,
+        'fname_pkl': 'model.pkl',
+        'frc_lambda': 100,
+        'init_seed': 11,
+        'l2_lambda': 0.0,
+        'learning_rate': 0.001,
+        'loss_config': {'energy_loss': 'mse', 'force_loss': 'mse'},
+        'nepoch': 30000,
+        'nsave': 5,
+        'restart': False,
+        'weight_decay': 0.001},
+ 'active_fn': 'identity',
+ 'avg_num_neighbors': 60,
+ 'cueq_config': False,
+ 'cutoff': 4.5,
+ 'device': 'gpu',
+ 'element': 'auto',
+ 'features_dim': 64,
+ 'fname_traj': 'train_300K.xyz',
+ 'gpu-parallel': False,
+ 'hidden_channels': '64x0e+64x1o+64x2e',
+ 'log_config': {'lr': ['lr'],
+                'step': ['date', 'epoch'],
+                'train': ['loss', 'loss_e', 'loss_f'],
+                'valid': ['loss', 'loss_e', 'loss_f']},
+ 'log_interval': 2,
+ 'log_length': 'simple',
+ 'max_ell': 2,
+ 'model': 'race',
+ 'nbatch': 16,
+ 'nlayers': 3,
+ 'ntest': 100,
+ 'ntrain': 200,
+ 'num_radial_basis': 8,
+ 'num_species': 4,
+ 'output_channels': '1x0e',
+ 'pbc': True,
+ 'predict': {'evaluate_tag': False,
+             'fname_plog': 'predict.out',
+             'fname_traj': 'train_600K.xyz',
+             'model': 'model.pkl',
+             'ndata': 'train_600K.xyz'},
+ 'regress_forces': True,
+ 'scheduler': {'decay_factor': 0.9,
+               'lr_gamma': 0.1,
+               'lr_init': 0.001,
+               'max_steps': 30,
+               'scheduler': 'ReduceLROnPlateau',
+               'warmup_factor': 0.2,
+               'warmup_steps': 10},
+ 'train': {'fname_log': 'loss_train-2.out'},
+ 'trainer': 'base'}

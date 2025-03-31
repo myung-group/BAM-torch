@@ -1,0 +1,12 @@
+units metal
+newton on
+atom_style atomic
+atom_modify map yes
+
+read_data si64
+pair_style mace no_domain_decomposition
+pair_coeff * * model.pt-lammps.pt Si
+
+fix 1 all nvt temp 300.0 300.0 100.0
+
+run 1

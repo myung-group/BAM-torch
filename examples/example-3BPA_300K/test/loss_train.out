@@ -1,0 +1,100 @@
+                               | TRAIN_____________________________| VALID_____________________________| 
+MM/DD/YYYY HH/MM/SS    EPOCH   | LOSS       MSE_E      MSE_F       | LOSS       MSE_E      MSE_F       | LR   
+--------------------------------------------------------------------------------------------------------------
+03/26/2025 23:10:41    2       | 61.517     0.67759    0.6084      | 46.666     0.14167    0.46524     | 0.001
+03/26/2025 23:10:50    4       | 37.219     0.11572    0.37103     | 31.65      0.017541   0.31633     | 0.001
+03/26/2025 23:10:59    6       | 25.011     0.025141   0.24986     | 21.049     0.017252   0.21031     | 0.001
+03/26/2025 23:11:07    8       | 13.981     0.041292   0.1394      | 12.658     0.031886   0.12626     | 0.001
+03/26/2025 23:11:16    10      | 10.019     0.087344   0.099313    | 9.4519     0.015777   0.094361    | 0.001
+03/26/2025 23:11:25    12      | 8.2203     0.077013   0.081433    | 7.9648     0.021281   0.079435    | 0.001
+03/26/2025 23:11:34    14      | 7.0674     0.05002    0.070174    | 6.9965     0.012931   0.069836    | 0.001
+03/26/2025 23:11:43    16      | 6.2834     0.049608   0.062338    | 6.2641     0.01416    0.062499    | 0.001
+03/26/2025 23:11:52    18      | 5.638      0.049914   0.055881    | 5.6667     0.014887   0.056518    | 0.001
+03/26/2025 23:12:01    20      | 5.0641     0.045453   0.050187    | 5.1742     0.018006   0.051562    | 0.001
+03/26/2025 23:12:09    22      | 4.5869     0.044258   0.045427    | 4.7725     0.023327   0.047492    | 0.001
+03/26/2025 23:12:18    24      | 4.1808     0.043965   0.041369    | 4.4238     0.026394   0.043974    | 0.001
+03/26/2025 23:12:27    26      | 3.8196     0.041982   0.037776    | 4.088      0.024294   0.040638    | 0.001
+03/26/2025 23:12:36    28      | 3.4929     0.038888   0.03454     | 3.7592     0.022366   0.037368    | 0.001
+--------------------------------------------------------------------------------------------------------------
+
+* NUMBER OF PARAMETERS: 
+ - MODEL(TOTAL)   637120
+ --- HIDDEN.      64x0e+64x1o+64x2e
+ --- RADI. BASIS. 8
+
+* SEED NUMBER:
+ - DATA_SEED      10
+ - INIT_SEED      11
+
+* DATA INFO:
+ - N(TRAIN)       200
+ - N(VALID)       100
+ - BATCH          16
+ - CUTOFF         4.5
+ - AVG. NEIGH.    60
+
+* ELAPSED TIME:
+ - 0 DAYS, 0 HOURS, 2 MINUTES, and 11 SECONDS
+ -- DAYS          0.0015162037   
+ -- HOURS         0.0363888889   
+ -- MINUTES       2.18333333     
+ -- SECONDS       131            
+
+--------------------------------------------------------------------------------------------------------------
+ 
+{'NN': {'cosine_sim': False,
+        'data_seed': 10,
+        'energy_grad_loss': True,
+        'energy_grad_mult': 10,
+        'enr_lambda': 1,
+        'fname_pkl': 'model.pkl',
+        'frc_lambda': 100,
+        'init_seed': 11,
+        'l2_lambda': 0.0,
+        'learning_rate': 0.001,
+        'loss_config': {'energy_loss': 'mse', 'force_loss': 'mse'},
+        'nepoch': 30000,
+        'nsave': 5,
+        'restart': False,
+        'weight_decay': 0.001},
+ 'active_fn': 'identity',
+ 'avg_num_neighbors': 60,
+ 'cueq_config': False,
+ 'cutoff': 4.5,
+ 'device': 'gpu',
+ 'element': 'auto',
+ 'features_dim': 64,
+ 'fname_traj': 'train_300K.xyz',
+ 'gpu-parallel': False,
+ 'hidden_channels': '64x0e+64x1o+64x2e',
+ 'log_config': {'lr': ['lr'],
+                'step': ['date', 'epoch'],
+                'train': ['loss', 'loss_e', 'loss_f'],
+                'valid': ['loss', 'loss_e', 'loss_f']},
+ 'log_interval': 2,
+ 'log_length': 'simple',
+ 'max_ell': 2,
+ 'model': 'race',
+ 'nbatch': 16,
+ 'nlayers': 3,
+ 'ntest': 100,
+ 'ntrain': 200,
+ 'num_radial_basis': 8,
+ 'num_species': 4,
+ 'output_channels': '1x0e',
+ 'pbc': True,
+ 'predict': {'evaluate_tag': False,
+             'fname_plog': 'predict.out',
+             'fname_traj': 'train_600K.xyz',
+             'model': 'model.pkl',
+             'ndata': 'train_600K.xyz'},
+ 'regress_forces': True,
+ 'scheduler': {'decay_factor': 0.9,
+               'lr_gamma': 0.1,
+               'lr_init': 0.001,
+               'max_steps': 30,
+               'scheduler': 'ReduceLROnPlateau',
+               'warmup_factor': 0.2,
+               'warmup_steps': 10},
+ 'train': {'fname_log': 'loss_train.out'},
+ 'trainer': 'base'}
