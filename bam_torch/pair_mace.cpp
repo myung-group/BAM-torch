@@ -76,6 +76,8 @@ void PairMACE::compute(int eflag, int vflag)
     positions[i][2] = atom->x[i][2];
   }
 
+  positions.set_requires_grad(true);
+
   // ----- cell -----
   auto cell = torch::zeros({3,3}, torch_float_dtype);
   cell[0][0] = domain->h[0];
@@ -164,13 +166,45 @@ void PairMACE::compute(int eflag, int vflag)
     }
   }
 
-  // ----- node_attrs -----
-  int n_node_feats = mace_atomic_numbers.size();
-  auto node_attrs = torch::zeros({n_nodes,n_node_feats}, torch_float_dtype);
+  // ----- species (0-based MACE 인덱스) -----
+  auto species = torch::empty({n_nodes}, torch::dtype(torch::kInt64));
   #pragma omp parallel for
-  for (int ii=0; ii<n_nodes; ++ii) {
+  for (int ii = 0; ii < n_nodes; ++ii) {
     int i = list->ilist[ii];
-    node_attrs[i][mace_type(atom->type[i])-1] = 1.0;
+    int atomic_num = lammps_atomic_numbers[atom->type[i] - 1];
+    bool matched = false;
+    for (int j = 0; j < mace_atomic_numbers.size(); ++j) {
+      if (atomic_num == mace_atomic_numbers[j]) {
+        species[i] = static_cast<int64_t>(j);  // index in mace_atomic_numbers
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      std::cerr << "Error: atomic number " << atomic_num << " not found in MACE atomic numbers!" << std::endl;
+      exit(1);
+    }
+  }
+
+  // 디버깅: CPU에서 unique species index 출력
+  {
+    auto species_cpu = species.to(torch::kCPU);
+    std::set<int64_t> unique_species;
+    for (int i = 0; i < species_cpu.size(0); ++i) {
+      unique_species.insert(species_cpu[i].item<int64_t>());
+    }
+    std::cout << "Unique species indices (0-based MACE indices): ";
+    for (auto idx : unique_species) std::cout << idx << " ";
+    std::cout << std::endl;
+  }
+
+  // ----- node_attrs (one-hot encoding) -----
+  int n_node_feats = mace_atomic_numbers.size();
+  auto node_attrs = torch::zeros({n_nodes, n_node_feats}, torch_float_dtype);
+  #pragma omp parallel for
+  for (int ii = 0; ii < n_nodes; ++ii) {
+    int j = species[ii].item<int64_t>();
+    node_attrs[ii][j] = 1.0;
   }
 
   // ----- mask for ghost -----
@@ -216,6 +250,9 @@ void PairMACE::compute(int eflag, int vflag)
   input.insert("shifts", shifts);
   input.insert("unit_shifts", unit_shifts);
   input.insert("weight", weight);
+  input.insert("species", species.to(device));
+  input.insert("node_attrs", node_attrs.to(device));
+  input.insert("num_nodes", torch::tensor(n_nodes, torch::dtype(torch::kInt64)).to(device));
   auto output = model.forward({input, mask.to(device), bool(vflag_global)}).toGenericDict();
 
   // mace energy
