@@ -14,6 +14,7 @@ import os
 import pprint
 from copy import deepcopy
 from datetime import datetime
+from .sampler import DistributedBalancedAtomCountBatchSampler
 
 
 def get_enr_avg_per_element (traj, element):
@@ -100,7 +101,9 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
                     num_edges=num_edges,
                     energy=torch.tensor(enr, dtype=torch.float32),
                     cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
-                    edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long)
+                    edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),
+                    stress=torch.tensor(stress),
+                    volume=torch.tensor(volume)
                 )                           # senders, recerivers
         graph_list.append(graph)
 
@@ -141,6 +144,70 @@ def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
 
         graph_list.append(data)
     return graph_list
+
+
+def _get_dataloader(fname, ntrain, ntest, 
+                   nbatch, cutoff, random_seed, 
+                   element=None, regress_forces=True,
+                   rank=0, world_size=1):
+    msg = ''
+    if type(ntrain) == str: 
+        train_data = read(ntrain, index=slice(None))
+        test_data = read(ntest, index=slice(None))
+        msg += 'number of data:\n'
+        msg += f'\033[33m -- training      {len(train_data)}\n'
+        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
+        traj = train_data + test_data
+    else:
+        nsamp = ntrain + ntest
+        traj = read(fname, index=slice(None))[-nsamp:]
+        torch.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+        idx = torch.arange(nsamp)
+        idx = idx[torch.randperm(nsamp)] 
+        idx_train = idx[:ntrain]
+        idx_test = idx[ntrain:]   
+        train_data = [traj[i] for i in idx_train]
+        test_data = [traj[i] for i in idx_test]
+        msg += 'number of data:\n'
+        msg += f'\033[33m -- training      {len(train_data)}\n'
+        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
+
+    if element == None or element == 'auto':
+        element = sorted(
+            list(set(atom.number for atoms in traj 
+                                  for atom in atoms))
+        )  # traj: ase.Atoms
+    enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element (traj, element) 
+    msg += f'mean energy per element:\n {enr_avg_per_element}\n'
+    if rank == 0:
+        print(msg)
+    
+    loaders = []
+    for dataset in [train_data, test_data]:
+        graphset = get_graphset(dataset, cutoff, uniq_element, 
+                                enr_avg_per_element, enr_var,
+                                regress_forces)
+        data_sampler = DistributedBalancedAtomCountBatchSampler(        
+                                dataset=graphset,
+                                batch_size=nbatch,
+                                num_replicas=world_size,
+                                rank=rank,
+                                shuffle=False,
+                                seed=random_seed,
+                                drop_last=False
+                        )
+        loader = DataLoader(graphset,
+                            nbatch,
+                            shuffle=False,
+                            drop_last=False,
+                            pin_memory=True,
+                            num_workers=0,
+                            collate_fn=None,
+                            sampler=data_sampler)
+        loaders.append(loader)
+        # train_loader, test_loader
+    return loaders[0], loaders[1], uniq_element, enr_avg_per_element  
 
 
 def get_dataloader(fname, ntrain, ntest, 

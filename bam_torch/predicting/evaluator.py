@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from bam_torch.utils.logger import Logger
 from bam_torch.training.base_trainer import BaseTrainer
-from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit
+from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit, get_dataloader
 
 
 class Evaluator(BaseTrainer):
@@ -49,6 +49,7 @@ class Evaluator(BaseTrainer):
                            } 
         e_corr = torch.tensor(self.model_ckpt['scale_shift'])
         e_corr = e_corr.flatten().mean()
+        print(e_corr)
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             target['energy'] = data['energy']
@@ -252,6 +253,20 @@ class Evaluator(BaseTrainer):
     def get_exact(self):
         exact_enr = []
         exact_frc = []
+        json_data = self.json_data
+        _, self.valid_loader, _, _ = \
+                                get_dataloader(
+                                    json_data['fname_traj'],
+                                    json_data['ntrain'],
+                                    json_data['ntest'],
+                                    json_data['nbatch'],
+                                    json_data['cutoff'],
+                                    json_data['NN']['data_seed'],
+                                    json_data['element'],
+                                    json_data['regress_forces'],
+                                    self.rank,
+                                    self.world_size
+                                )
         for data in self.valid_loader:
             species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()

@@ -3,6 +3,7 @@ from e3nn.o3 import Irrep, Irreps
 import torch
 from e3nn import o3
 from bam_torch.model.tensor_product_from_jax import split_tensor_by_irreps
+from e3nn.util.jit import compile_mode
 
 
 def irreps_filter(
@@ -65,6 +66,7 @@ def irreps_filter(
 
     if lmax is not None:
         return Irreps([(mul, ir) for mul, ir in irreps if ir.l <= lmax])
+
 
 def concatenate_irreps_tensor(
     tensors: List[torch.Tensor],

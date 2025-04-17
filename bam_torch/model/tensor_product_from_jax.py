@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 from e3nn.o3 import Irreps, Irrep
 import e3nn.o3
 import functools
+from e3nn.util.jit import compile_mode
 
 
 def from_chunks(
@@ -234,6 +235,7 @@ def sort_irreps_chunks(irreps, chunks, leading_shape):
         leading_shape,
     )
 
+@compile_mode('script')
 class TensorProductTorch(torch.nn.Module):
     """Tensor product reduced into irreps (Torch version)."""
     

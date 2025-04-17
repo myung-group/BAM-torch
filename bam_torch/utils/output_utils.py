@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn
 import torch.utils.data
+from bam_torch.utils.scatter import scatter_sum
 
 
 def compute_forces(
@@ -60,10 +61,57 @@ def compute_forces_virials(
 
     return -1 * forces, -1 * virials, stress
 
+def compute_forces_stress(
+    energy: torch.Tensor,
+    positions: torch.Tensor,
+    cell: torch.Tensor,
+    batch_idx: torch.Tensor,
+    num_graphs: int,
+    training: bool = True,
+    compute_stress: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+    cellgrad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+    grad, cellgrad = torch.autograd.grad(
+        outputs=[energy],  # [n_graphs, ]
+        inputs=[positions, cell],  # [n_nodes, 3]
+        grad_outputs=grad_outputs,
+        retain_graph=training,  # Make sure the graph is not destroyed during training
+        create_graph=training,  # Create graph for second derivative
+        allow_unused=True,
+    )
+    if compute_stress and cellgrad is not None:
+        cell = cell.view(-1, 3, 3)
+        volume = torch.linalg.det(cell).abs().unsqueeze(-1)
+        stress_cell = (
+            torch.transpose(cellgrad, 1, 2) @ cell
+        )
+        stress_grad = torch.einsum("iu,iv->iuv", grad, positions)
+        stress_grad = scatter_sum(
+                src=stress_grad,
+                index=batch_idx,
+                dim=0,
+                dim_size=num_graphs,
+            ) 
+        virials = stress_cell + stress_grad
+        stress = virials / volume.view(-1, 1, 1)
+        #stress = torch.where(torch.abs(stress) < 1e10, stress, torch.zeros_like(stress))
+        #stress = stress[:-1]
+        stress = stress.reshape(-1, 9)[:, [0,4,8,5,2,1]]
+
+    if grad is None:
+        forces = torch.zeros_like(positions)
+    if cellgrad is None:
+        virials = torch.zeros((1, 3, 3))
+
+    #del cellgrad
+    #torch.cuda.empty_cache()
+
+    return -1 * grad, -1 * virials, stress
+
 
 def get_symmetric_displacement(
     positions: torch.Tensor,
-    unit_shifts: torch.Tensor,
     cell: Optional[torch.Tensor],
     edge_index: torch.Tensor,
     num_graphs: int,
@@ -91,12 +139,8 @@ def get_symmetric_displacement(
     )
     cell = cell.view(-1, 3, 3)
     cell = cell + torch.matmul(cell, symmetric_displacement)
-    shifts = torch.einsum(
-        "be,bec->bc",
-        unit_shifts,
-        cell[batch[sender]],
-    )
-    return positions, shifts, displacement
+
+    return positions, displacement
 
 
 @torch.jit.unused
@@ -159,6 +203,8 @@ def get_outputs(
     positions: torch.Tensor,
     displacement: Optional[torch.Tensor],
     cell: torch.Tensor,
+    batch_idx: torch.Tensor,
+    num_graphs: int,
     training: bool = False,
     compute_force: bool = True,
     compute_virials: bool = True,
@@ -171,6 +217,7 @@ def get_outputs(
     Optional[torch.Tensor],
 ]:
     if (compute_virials or compute_stress) and displacement is not None:
+        """
         forces, virials, stress = compute_forces_virials(
             energy=energy,
             positions=positions,
@@ -178,6 +225,16 @@ def get_outputs(
             cell=cell,
             compute_stress=compute_stress,
             training=(training or compute_hessian),
+        )
+        """
+        forces, virials, stress = compute_forces_stress(
+            energy=energy,
+            positions=positions,
+            cell=cell,
+            batch_idx=batch_idx,
+            num_graphs=num_graphs,
+            training=(training or compute_hessian),
+            compute_stress=compute_stress,
         )
     elif compute_force:
         forces, virials, stress = (
@@ -191,10 +248,12 @@ def get_outputs(
         )
     else:
         forces, virials, stress = (None, None, None)
+
     if compute_hessian:
         assert forces is not None, "Forces must be computed to get the hessian"
         hessian = compute_hessians_vmap(forces, positions)
     else:
         hessian = None
+
     return forces, virials, stress, hessian
 

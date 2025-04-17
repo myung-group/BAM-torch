@@ -26,7 +26,7 @@ from .blocks import (
 )
 from .wrapper_ops import Linear
 from bam_torch.utils.scatter import scatter_sum
-from bam_torch.utils.output_utils import get_outputs
+from bam_torch.utils.output_utils import get_outputs, get_symmetric_displacement
 
 
 def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -647,6 +647,7 @@ class RACE(torch.nn.Module):
             gate: Optional[Callable] = torch.nn.SiLU(),
             cueq_config: Optional[Dict[str, Any]] = None,
             regress_forces: str = "direct",
+            compute_stress: bool = True
     ):
         super().__init__()
     
@@ -659,6 +660,7 @@ class RACE(torch.nn.Module):
         
         self.cutoff = cutoff
         self.regress_forces = regress_forces
+        self.compute_stress = compute_stress
         self.num_species = num_species
         
         if heads is None:
@@ -760,9 +762,11 @@ class RACE(torch.nn.Module):
         # assert Rij.ndim == 2 and Rij.shape[1] == 3
         # iatoms ==> senders     # edge_index[0]
         # jatoms ==> receivers   # edge_index[1]
+        cell = data["cell"]
+        cell.requires_grad_(True)
         R = data["positions"]
         R.requires_grad_(True)
-        Rij = get_edge_relative_vectors_with_pbc(R, data)
+        Rij = get_edge_relative_vectors_with_pbc(R, cell, data)
         Rij = Rij / self.cutoff
         node_heads = (
             data["head"][data["batch"]]
@@ -775,6 +779,17 @@ class RACE(torch.nn.Module):
             dtype=data["positions"].dtype,
             device=data["positions"].device,
         )
+        if self.compute_stress:
+            (
+                data["positions"],
+                displacement,
+            ) = get_symmetric_displacement(
+                positions=data["positions"],
+                cell=data["cell"],
+                edge_index=data["edge_index"],
+                num_graphs=num_graphs,
+                batch=data["batch"],
+            )
         # Embedding
         species = data["species"]
         node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
@@ -863,27 +878,31 @@ class RACE(torch.nn.Module):
                 energy=node_energy,
                 positions=R,
                 displacement=displacement,
-                cell=data["cell"],
+                cell=cell,
+                batch_idx=data["batch"],
+                num_graphs=num_graphs,
                 training=backprop,
                 compute_force=True,
-                compute_virials=False,
-                compute_stress=False,
+                compute_virials=True,
+                compute_stress=True,
                 compute_hessian=False
             )
             preds["forces"] = forces
+            preds["stress"] = stress
 
         return preds
       
 
 def get_edge_relative_vectors_with_pbc (
         R: torch.Tensor, 
+        cell: torch.Tensor, 
         data_graph: Dict[str, torch.Tensor]):
     # iatoms ==> senders
     # jatoms ==> receivers
     iatoms = data_graph["edge_index"][0]  # shape = (b * n_edges)
     jatoms = data_graph["edge_index"][1]  # shape = (b * n_edges) 
     Sij = data_graph["edges"]   # shape = (b * n_edges, 3)
-    cell = data_graph["cell"]   # shape = (b, 3, 3)
+    #cell = data_graph["cell"]   # shape = (b, 3, 3)
     n_edges = data_graph["num_edges"] # [n_edge_1, n_edge_2, ..., n_edge_N]
 
     Sij = torch.split(Sij, n_edges.tolist(), dim=0)

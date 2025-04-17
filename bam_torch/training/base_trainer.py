@@ -18,12 +18,15 @@ from bam_torch.model.wrapper_ops import CuEquivarianceConfig
 from .loss import RMSELoss, l2_regularization
 from e3nn.util import jit
 from torch_geometric.data import Batch as DataBatch
+from time import time
+
 
 class BaseTrainer:
     def __init__(self, json_data, rank=0, world_size=1):
         """ The json_data (dict.) should include the following information
         ...
         """
+        self.time_log = open(f'time_log-{rank}.txt', 'w')
         self.json_data = json_data
         self.rank = rank
         self.world_size = world_size
@@ -87,12 +90,14 @@ class BaseTrainer:
         ## 11) Main loop
         for epoch in range(nepoch):
             #self.train_loader.sampler.set_epoch(epoch)
+            print(f"\n---------- Train - Epoch : {epoch} ----------", file=self.time_log)
             epoch_loss_train = self.train_one_epoch(mode='train')
             #check_parameter_sync(self.model, self.rank)
             if self.ddp:
                 torch.distributed.barrier()
 
             if (epoch+1)%self.log_interval == 0:
+                print(f"\n---------- Valid - Epoch : {epoch} ----------", file=self.time_log)
                 epoch_loss_valid = self.train_one_epoch(mode='valid')
                 if self.ddp:
                     torch.distributed.barrier()
@@ -161,10 +166,14 @@ class BaseTrainer:
             if data_loader == None:
                 data_loader = self.valid_loader
 
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
             data.to(self.device)
             data = self.data_to_dict(data)  # This is for torch.jit compile
+            start.record()
             preds = self.model(deepcopy(data), backprop)
             preds = self.scale_shift(preds, data, mode)
 
@@ -176,10 +185,17 @@ class BaseTrainer:
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
+                end.record()
+                torch.cuda.synchronize()
                 #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
                 torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                 self.optimizer.step()
-
+            else:
+                end.record()
+                torch.cuda.synchronize()
+            elapsed_time = start.elapsed_time(end)
+            print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True)
+        
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
                            for key, value in epoch_loss_dict.items()}      
         return epoch_loss_dict
