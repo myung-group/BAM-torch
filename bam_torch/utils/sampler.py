@@ -17,6 +17,7 @@ class DistributedBalancedAtomCountBatchSampler(Sampler[list[int]]):
         shuffle: bool = True,
         seed: int = 0,
         drop_last: bool = False,
+        reference: str = 'nodes'
     ):
         if num_replicas is None:
             if not dist.is_available():
@@ -31,7 +32,10 @@ class DistributedBalancedAtomCountBatchSampler(Sampler[list[int]]):
                 f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
             )
         self.dataset = dataset
-        self.atom_counts = [data.num_nodes for data in dataset]
+        if reference == 'nodes':
+            self.atom_counts = [data.num_nodes for data in dataset]
+        elif reference == 'edges':
+            self.atom_counts = [data.num_edges for data in dataset]
         self.batch_size = batch_size
         self.num_replicas = num_replicas
         self.rank = rank

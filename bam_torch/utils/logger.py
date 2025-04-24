@@ -30,6 +30,8 @@ class Logger:
                         log_config[key][i] = f"{self.loss_config['energy_loss']}_e"
                     elif value == 'loss_f':
                         log_config[key][i] = f"{self.loss_config['force_loss']}_f"
+                    elif value == 'loss_s':
+                        log_config[key][i] = f"{self.loss_config['stress_loss']}_s"
         divider = " | "
         logger = {}
         keys = list(log_config.keys())

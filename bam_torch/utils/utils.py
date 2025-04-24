@@ -102,7 +102,7 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
                     energy=torch.tensor(enr, dtype=torch.float32),
                     cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
                     edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),
-                    stress=torch.tensor(stress),
+                    stress=torch.tensor(stress, dtype=torch.float32),
                     volume=torch.tensor(volume)
                 )                           # senders, recerivers
         graph_list.append(graph)
