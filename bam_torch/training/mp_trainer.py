@@ -75,13 +75,10 @@ class MPTrainer(BaseTrainer):
                 data.to(self.device)
                 data = self.data_to_dict(data)  # This is for torch.jit compile
                 start.record()
-                preds = self.model(deepcopy(data), backprop)
+                preds = self.model(data, backprop)
                 preds = self.scale_shift(preds, data, mode)
 
                 loss_dict = self.compute_loss(preds, data)
-                for l in loss_log_config:
-                    epoch_loss_dict[l].append(loss_dict.get(l, torch.nan))
-
                 loss = loss_dict['loss']
                 if backprop:
                     self.optimizer.zero_grad()
@@ -97,6 +94,9 @@ class MPTrainer(BaseTrainer):
                 elapsed_time = start.elapsed_time(end)
                 print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True)
         
+                for l in loss_log_config:
+                    epoch_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+
                 data.clear()
                 del data, preds, loss_dict
                 torch.cuda.empty_cache()
