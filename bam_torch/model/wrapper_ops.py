@@ -12,6 +12,7 @@ import torch
 from e3nn import o3
 
 from .symmetric_contraction import SymmetricContraction
+from ._sub import FullTensorProduct as o3_FullTensorProduct
 
 try:
     import cuequivariance as cue
@@ -240,7 +241,7 @@ class FullTensorProduct:
             instance.forward = types.MethodType(cuet_forward, instance)
             return instance
 
-        return o3.FullTensorProduct(
+        return o3_FullTensorProduct(
             irreps_in1,
             irreps_in2,
             filter_ir_out,
