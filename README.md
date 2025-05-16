@@ -27,6 +27,10 @@ $ pip install cuequivariance-torch
 $ pip install cuequivariance
 $ pip install cuequivariance-ops-torch-cu12
 ```
+Optionally, install laplace
+```
+$ pip install laplace-torch
+```
 Finally, install BAM-torch
 ```
 $ pip install -e .
