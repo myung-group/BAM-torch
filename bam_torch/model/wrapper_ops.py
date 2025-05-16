@@ -215,6 +215,7 @@ class FullTensorProduct:
             cls,
             irreps_in1: o3.Irreps,
             irreps_in2: o3.Irreps,
+            filter_ir_out: o3.Irreps,
             cueq_config: Optional[CuEquivarianceConfig] = None,
     ):
         if (
@@ -242,6 +243,7 @@ class FullTensorProduct:
         return o3.FullTensorProduct(
             irreps_in1,
             irreps_in2,
+            filter_ir_out,
         )
 
 

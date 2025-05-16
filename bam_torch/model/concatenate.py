@@ -82,10 +82,11 @@ def concatenate_irreps_tensor(
 def tensor_regroup_by_irreps(
     tensor: torch.tensor, 
     irreps: Irreps, 
-    dtype=None
+    dtype: Optional[torch.dtype] = None
 ):
     leading_shape = tensor.shape[:-1]
-    chunks = split_tensor_by_irreps(tensor, irreps)
+    irreps_dim = [(x.mul, x.ir.dim) for x in irreps]
+    chunks = split_tensor_by_irreps(tensor, irreps_dim)
     irreps, p, inv = irreps.sort()
     r_chunks = [chunks[i] for i in inv]
     if dtype is None:
@@ -99,3 +100,46 @@ def tensor_regroup_by_irreps(
     )
     return array, irreps.simplify()
 
+@compile_mode("script")
+class TensorRegroupByIrreps(torch.nn.Module):
+    def __init__(self, irreps: o3.Irreps):
+        super().__init__()
+        
+        self.irreps_dims = [(mul, ir.dim) for mul, ir in irreps]
+        self.irreps, _, self.inv = irreps.sort()
+        self.sorted_irreps_dims = [(mul.dim) for mul in self.irreps]
+        self.simplified_irreps = self.irreps.simplify()
+    
+    def forward(self, tensor: torch.Tensor, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        leading_shape = tensor.shape[:-1]
+        chunks = split_tensor_by_irreps(tensor, self.irreps_dims)
+        r_chunks = [chunks[i] for i in self.inv]
+        if dtype is None:
+            dtype = next((x.dtype for x in chunks if x is not None), None)
+            
+        array = torch.cat([
+                    torch.zeros(leading_shape + (mul_ir_dim,), dtype=dtype) if x is None
+                    else x.reshape(leading_shape + (mul_ir_dim,))
+                    for mul_ir_dim, x in zip(self.sorted_irreps_dims, r_chunks)
+                ], dim=-1
+        )
+        return array, self.simplified_irreps
+
+@compile_mode("script")
+class ConcatenateIrrepsTensor(torch.nn.Module):
+    def __init__(self, irreps_list= List[o3.Irreps]):
+        super().__init__()
+        self.concat_irreps = sum(irreps_list[1:], start=irreps_list[0])
+    
+    def forward(
+        self,
+        tensors: List[torch.Tensor],
+        axis: int = -1
+    ) -> torch.Tensor:
+        if axis < 0:
+            axis += tensors[0].ndim
+        concat_tensor = torch.cat(tensors, dim=axis)
+        return concat_tensor
+    
+    def get_concatenated_irreps(self):
+        return self.concat_irreps

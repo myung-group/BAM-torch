@@ -80,12 +80,15 @@ class BaseTrainer:
             'loss': self.loss_dict,
             'input.json': self.json_data,
             'scheduler' : self.scheduler.state_dict(),
-            'scale_shift' : []
+            'train_scale_shift' : [],
+            'valid_scale_shift' : [],
         }
         # Save input parameters setting
         self.save_input_parameters(self.json_data)
      
     def train(self):
+        if self.rank == 0:
+            self.logger.print_logger_head()
         nepoch = self.json_data['NN']['nepoch']
         ## 11) Main loop
         for epoch in range(nepoch):
@@ -151,7 +154,7 @@ class BaseTrainer:
             loss_log_config = self.log_config['train']
             if data_loader == None:
                 data_loader = self.train_loader
-            self.ckpt['scale_shift'] = []
+            self.ckpt['train_scale_shift'] = []
         elif mode == 'compile':
             backprop = False
             loss_log_config = self.log_config['valid']
@@ -165,16 +168,20 @@ class BaseTrainer:
             loss_log_config = self.log_config['valid']
             if data_loader == None:
                 data_loader = self.valid_loader
+            if mode == 'valid':
+                self.ckpt['valid_scale_shift'] = []
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
-            data.to(self.device)
-            data = self.data_to_dict(data)  # This is for torch.jit compile
+            data = self.move_to_device(data, self.device)
+            #data.to(self.device)
+            #data = self.data_to_dict(data)  # This is for torch.jit compile
             start.record()
-            preds = self.model(deepcopy(data), backprop)
+            #preds = self.model(deepcopy(data), backprop)
+            preds = self.model(data, backprop)
             preds = self.scale_shift(preds, data, mode)
 
             loss_dict = self.compute_loss(preds, data)
@@ -194,7 +201,7 @@ class BaseTrainer:
                 end.record()
                 torch.cuda.synchronize()
             elapsed_time = start.elapsed_time(end)
-            print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True)
+            print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True) 
         
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
                            for key, value in epoch_loss_dict.items()}      
@@ -205,7 +212,9 @@ class BaseTrainer:
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         if mode == 'train':
-            self.ckpt['scale_shift'].append(shift_enr)
+            self.ckpt['train_scale_shift'].append(shift_enr)
+        elif mode == 'valid':
+            self.ckpt['valid_scale_shift'].append(shift_enr)
         preds["energy"] = energy_predict + shift_enr
         return preds
     
@@ -215,7 +224,7 @@ class BaseTrainer:
                                                         get_dataloader(
                                                             json_data['fname_traj'],
                                                             json_data['ntrain'],
-                                                            json_data['ntest'],
+                                                            json_data['nvalid'],
                                                             json_data['nbatch'],
                                                             json_data['cutoff'],
                                                             json_data['NN']['data_seed'],
@@ -260,7 +269,7 @@ class BaseTrainer:
             fname = self.get_unique_filename()
             fout = open(fname, 'w')
             logger = Logger(log_config, self.loss_config, log_length, fout)
-            logger.print_logger_head()
+            #logger.print_logger_head()
             separator = logger.get_seperator()
             atexit.register(lambda: on_exit(
                                         fout, 
@@ -313,6 +322,7 @@ class BaseTrainer:
         loss_fn = {}
         loss_fn['energy_loss'] = loss_config.get('energy_loss')
         loss_fn['force_loss'] = loss_config.get('force_loss')
+        loss_fn['stress_loss'] = loss_config.get('stress_loss')
         
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:
@@ -325,12 +335,22 @@ class BaseTrainer:
         return loss_fn, loss_config
 
     def compute_loss(self, preds, data):
-        e_lambda = self.json_data["NN"]['enr_lambda']
-        f_lambda = self.json_data["NN"]['frc_lambda']
-        cosine_sim = self.json_data["NN"]['cosine_sim']
-        energy_grad_mult = self.json_data["NN"]['energy_grad_mult']
-        energy_grad_loss = self.json_data["NN"]['energy_grad_loss']
-        lambd = self.json_data["NN"]['l2_lambda']
+        lambda_config = self.json_data["NN"]
+        e_lambda = lambda_config.get('enr_lambda')
+        f_lambda = lambda_config.get('frc_lambda')
+        s_lambda = lambda_config.get('str_lambda')
+        lambd = lambda_config.get('l2_lambda')
+        if e_lambda == None:
+            e_lambda = 1
+        if f_lambda == None:
+            f_lambda = 1
+        if s_lambda == None:
+            s_lambda = 1
+        if lambd == None:
+            lambd == 0
+        cosine_sim = lambda_config.get('cosine_sim')
+        energy_grad_mult = lambda_config.get('energy_grad_mult')
+        energy_grad_loss = lambda_config.get('energy_grad_loss')
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
@@ -354,6 +374,11 @@ class BaseTrainer:
             if energy_grad_loss:
                 loss["loss"].append(energy_grad_mult * loss["energy_grad_loss"])
         
+        if "stress" in preds and "stress" in data:
+            stress_target = data["stress"].flatten()
+            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
+            loss["loss"].append(s_lambda * loss["loss_s"])
+
         if lambd != 0:
             params = self.model.parameters()
             loss["loss_l2"] = l2_regularization(params)
@@ -432,6 +457,7 @@ class BaseTrainer:
         """ Configure model using model configuration dictionary.
         """
         model = self.set_model() # Set self.model
+        #scripted_model = jit.compile(model)
         model.to(self.device)
 
         model_config = self.json_data['NN']
@@ -464,7 +490,7 @@ class BaseTrainer:
         if evaluate:  # True or False(None)
             rank = 0
             start_epoch = 0
-            model_ckpt = torch.load(evaluate_config["model"])
+            model_ckpt = torch.load(evaluate_config["model"], map_location=self.device)
             model.load_state_dict(model_ckpt['params'])
             model.eval()
             self.msg += f'\n\033[32mevaluating the {evaluate_config["model"]}\033[0m\n'
@@ -629,7 +655,8 @@ class BaseTrainer:
     
     def check_parameter_sync(self):
         for name, param in self.model.named_parameters():
-            print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}, Shape: {param.shape}, Num.: {param.numel()}")
+            #print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}, Shape: {param.shape}, Num.: {param.numel()}")
+            print(f"Rank {self.rank}, Parameter name: {name}, Shape: {param.shape}, Num.: {param.numel()}")
 
     def data_to_dict(self, data):
         data_dict = data.to_dict() if isinstance(data, DataBatch) else data
@@ -638,3 +665,11 @@ class BaseTrainer:
         data_dict = {k: (torch.tensor(v) if isinstance(v, list) else v) 
                      for k, v in data_dict.items()}
         return data_dict
+    
+    def move_to_device(self, data, device):
+        if isinstance(data, dict):
+            return {k: v.to(device) if hasattr(v, "to") else v for k, v in data.items()}
+        elif hasattr(data, "to"):
+            return data.to(device)
+        else:
+            return data

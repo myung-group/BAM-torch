@@ -6,7 +6,7 @@ from e3nn import o3, nn
 
 from typing import Any, Callable, Dict, List, Optional, Type, Union, Tuple
 from e3nn.util.jit import compile_mode
-
+from torch.jit import annotate
 from .blocks import (
     LinearNodeEmbeddingBlock,
     InteractionBlock,
@@ -25,7 +25,7 @@ from .blocks import (
     ScaleShiftBlock
 )
 from .wrapper_ops import Linear
-from bam_torch.utils.scatter import scatter_sum
+from bam_torch.utils.scatter import scatter_sum, scatter_mean
 from bam_torch.utils.output_utils import get_outputs, get_symmetric_displacement
 
 
@@ -506,9 +506,17 @@ class ReducedRACE(torch.nn.Module):
         # assert Rij.ndim == 2 and Rij.shape[1] == 3
         # iatoms ==> senders     # edge_index[0]
         # jatoms ==> receivers   # edge_index[1]
+        cell = data["cell"]
+        cell.requires_grad_(True)
         R = data["positions"]
         R.requires_grad_(True)
-        Rij = get_edge_relative_vectors_with_pbc(R, data)
+        #n_edges: List[int] = annotate(List[int], data["num_edges"].cpu().tolist())
+        #num_edges = getattr(data, "num_edges", None)
+        if "num_edges" not in data:
+            raise ValueError("num_edges is missing in data!")
+        n_edges: List[int] = annotate(List[int], data["num_edges"].cpu().tolist())
+        #Rij = get_edge_relative_vectors_with_pbc(R, cell, n_edges, data)
+        Rij = get_edge_relative_vectors_with_pbc_padding(R, cell, data)
         Rij = Rij / self.cutoff
         node_heads = (
             data["head"][data["batch"]]
@@ -531,10 +539,10 @@ class ReducedRACE(torch.nn.Module):
         edge_index = data["edge_index"]
         lengths = torch.norm(Rij, dim=1)
 
-        #nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
-        #Rij = Rij[nonzero_idx]
-        #lengths = lengths[nonzero_idx]
-        #edge_index = edge_index[:, nonzero_idx]
+        nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
+        Rij = Rij[nonzero_idx]
+        lengths = lengths[nonzero_idx]
+        edge_index = edge_index[:, nonzero_idx]
         
         edge_attrs = self.spherical_harmonics(Rij)
         edge_feats = self.radial_embedding(lengths.unsqueeze(1), 
@@ -572,8 +580,7 @@ class ReducedRACE(torch.nn.Module):
 
         # Sum over energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
-        if self.act_fn != None:
-            node_energy = self.act_fn(node_energy)
+        node_energy = self.act_fn(node_energy)
         
         # Global pooling
         node_energy = torch.sum(node_energy, dim=-1) # [nbatch*num_nodes]  # total_energy
@@ -585,12 +592,12 @@ class ReducedRACE(torch.nn.Module):
                 dim_size=num_graphs,
             ) 
 
-        if node_logvar != []:
-            node_logvar = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
-            node_logvar = node_logvar.mean(dim=-1) # [nbatch*num_nodes]
+        if len(node_logvar) > 0:
+            stacked = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
+            node_logvar_out = stacked.mean(dim=-1) # [nbatch*num_nodes]
         else:
-            node_logvar = torch.zeros(node_feats.shape[0], device=node_energy.device)
-        node_energy_var = torch.exp(node_logvar) 
+            node_logvar_out = torch.zeros(node_feats.shape[0], device=node_energy.device)
+        node_energy_var = torch.exp(node_logvar_out) 
         node_energy_var = scatter_sum(
                 src=node_energy_var,
                 index=data["batch"],
@@ -611,11 +618,13 @@ class ReducedRACE(torch.nn.Module):
                 energy=node_energy,
                 positions=R,
                 displacement=displacement,
-                cell=data["cell"],
+                cell=cell,
+                batch_idx=data["batch"],
+                num_graphs=num_graphs,
                 training=backprop,
                 compute_force=True,
-                compute_virials=False,
-                compute_stress=False,
+                compute_virials=True,
+                compute_stress=True,
                 compute_hessian=False
             )
             preds["forces"] = forces
@@ -662,6 +671,7 @@ class RACE(torch.nn.Module):
         self.regress_forces = regress_forces
         self.compute_stress = compute_stress
         self.num_species = num_species
+        self.output_irreps = o3.Irreps(output_irreps)
         
         if heads is None:
             heads = ["default"]
@@ -716,16 +726,18 @@ class RACE(torch.nn.Module):
         self.interactions = torch.nn.ModuleList()
         self.products = torch.nn.ModuleList()
         self.readouts = torch.nn.ModuleList()
+        target_irreps = o3.Irreps(f"{hidden_irreps.count(o3.Irrep(0, 1))}x0e")
         for i in range(nlayers):
             if i > 0: 
                 node_feats_irreps = hidden_irreps
+                target_irreps = hidden_irreps
 
             inter = interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
                 node_feats_irreps=node_feats_irreps,
                 edge_attrs_irreps=sh_irreps,
                 edge_feats_irreps=edge_feats_irreps,
-                target_irreps=interaction_irreps,
+                target_irreps=target_irreps,  # interaction_irreps
                 hidden_irreps=hidden_irreps,
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
@@ -766,7 +778,13 @@ class RACE(torch.nn.Module):
         cell.requires_grad_(True)
         R = data["positions"]
         R.requires_grad_(True)
-        Rij = get_edge_relative_vectors_with_pbc(R, cell, data)
+        #n_edges: List[int] = annotate(List[int], data["num_edges"].cpu().tolist())
+        #print(data["num_edges"])
+        #if True:
+        n_edges = data["num_edges"].tolist()
+        Rij = get_edge_relative_vectors_with_pbc(R, cell, n_edges, data)
+        #else:
+        #    Rij = get_edge_relative_vectors_with_pbc_padding(R, cell, data)
         Rij = Rij / self.cutoff
         node_heads = (
             data["head"][data["batch"]]
@@ -779,6 +797,7 @@ class RACE(torch.nn.Module):
             dtype=data["positions"].dtype,
             device=data["positions"].device,
         )
+        """
         if self.compute_stress:
             (
                 data["positions"],
@@ -790,6 +809,7 @@ class RACE(torch.nn.Module):
                 num_graphs=num_graphs,
                 batch=data["batch"],
             )
+        """
         # Embedding
         species = data["species"]
         node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
@@ -812,6 +832,7 @@ class RACE(torch.nn.Module):
                                            species)
         outputs = []
         node_logvar = [] 
+        node_f_logvar = [] 
         node_feats_list = []
         x_node_feats = self.linear_x(node_feats)
         for interaction, product, readout in zip(
@@ -833,8 +854,11 @@ class RACE(torch.nn.Module):
             node_feats_list.append(node_feats)
             
             outputs.append(node_energies[:,0])
-            if node_energies.shape[1] == 2:
+            if self.output_irreps == o3.Irreps("2x0e"):
                 node_logvar.append(node_energies[:,1])
+            elif self.output_irreps == o3.Irreps("8x0e"):
+                node_logvar.append(node_energies[:,1])
+                node_f_logvar.append(node_energies[:,2:])
 
         # Concatenate node features
         #node_feats_out = torch.cat(node_feats_list, dim=-1)
@@ -845,37 +869,57 @@ class RACE(torch.nn.Module):
 
         # Global pooling
         node_energy = torch.sum(node_energy, dim=-1) # [nbatch*num_nodes]  # total_energy
-        node_energy = scatter_sum(
+        #print(f"node_energy = {node_energy}")
+        graph_energy = scatter_sum(
                 src=node_energy,
                 index=data["batch"],
                 dim=-1,
                 dim_size=num_graphs,
-            ) 
+            )
+        #print(f"graph_energy = {graph_energy}")
 
-        if node_logvar != []:
+        # Uncertainty quantification
+        if self.output_irreps == o3.Irreps("8x0e"):
             node_logvar_ts = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
             node_logvar_ts = node_logvar_ts.mean(dim=-1) # [nbatch*num_nodes]
-        else:
-            node_logvar_ts = torch.zeros(node_feats.shape[0], device=node_energy.device)
-        node_energy_var = torch.exp(node_logvar_ts) 
-        node_energy_var = scatter_sum(
-                src=node_energy_var,
+            # force variance L Voigt notation - xx, yy, zz, yz, xz, xy
+            node_f_logvar_ts = torch.stack(node_f_logvar, dim=-1) # [nbatch*num_nodes, 6, nlayers]
+            node_f_logvar_ts = node_f_logvar_ts.mean(dim=-1) # [nbatch*num_nodes, 6]
+        elif self.output_irreps == o3.Irreps("2x0e"):
+            node_logvar_ts = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
+            node_logvar_ts = node_logvar_ts.mean(dim=-1) # [nbatch*num_nodes]
+            node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), 
+                                           device=node_energy.device)
+        elif self.output_irreps == o3.Irreps("1x0e"):
+            node_logvar_ts = torch.zeros(node_feats.shape[0], 
+                                         device=node_energy.device)
+            node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), 
+                                           device=node_energy.device)
+        # Eenrgy variance
+        graph_logvar = scatter_mean(
+                src=node_logvar_ts,
                 index=data["batch"],
                 dim=-1,
                 dim_size=num_graphs,
-            ) 
-        n_node = int(data["num_nodes"] / num_graphs)
-        n_nodes = torch.tensor([n_node]*num_graphs, device=node_energy_var.device)
-        energy_var = node_energy_var/n_nodes
+            )
+        graph_energy_var = torch.exp(graph_logvar) 
+
+        # Forces variance
+        node_frc_var = torch.cat(
+            [torch.exp(node_f_logvar_ts[:, :3]), node_f_logvar_ts[:, 3:]], 
+            dim=1
+        ).view(-1, 6)
 
         preds: Dict[str, Optional[torch.Tensor]] = {}
-        preds["energy"] = node_energy #node_energy
-        preds["energy_var"] = energy_var
+        preds["energy"] = graph_energy # total energy
+        preds["energy_var"] = graph_energy_var
+        preds["forces_var"] = node_frc_var
 
         forces: Optional[torch.Tensor] = None
+        stress: Optional[torch.Tensor] = None
         if self.regress_forces == 'direct' or self.regress_forces:
             forces, virials, stress, hessian = get_outputs(
-                energy=node_energy,
+                energy=graph_energy,
                 positions=R,
                 displacement=displacement,
                 cell=cell,
@@ -889,6 +933,7 @@ class RACE(torch.nn.Module):
             )
             preds["forces"] = forces
             preds["stress"] = stress
+            #preds["virials"] = virials
 
         return preds
       
@@ -896,6 +941,7 @@ class RACE(torch.nn.Module):
 def get_edge_relative_vectors_with_pbc (
         R: torch.Tensor, 
         cell: torch.Tensor, 
+        n_edges: List[int],
         data_graph: Dict[str, torch.Tensor]):
     # iatoms ==> senders
     # jatoms ==> receivers
@@ -903,9 +949,9 @@ def get_edge_relative_vectors_with_pbc (
     jatoms = data_graph["edge_index"][1]  # shape = (b * n_edges) 
     Sij = data_graph["edges"]   # shape = (b * n_edges, 3)
     #cell = data_graph["cell"]   # shape = (b, 3, 3)
-    n_edges = data_graph["num_edges"] # [n_edge_1, n_edge_2, ..., n_edge_N]
+    #n_edges = data_graph["num_edges"] # [n_edge_1, n_edge_2, ..., n_edge_N]
 
-    Sij = torch.split(Sij, n_edges.tolist(), dim=0)
+    Sij = torch.split(Sij, n_edges, dim=0)
     shift_v = torch.cat(
         [torch.einsum('ni,ij->nj', s, c)
             for s, c in zip(Sij, cell)], dim=0
@@ -918,13 +964,15 @@ def get_edge_relative_vectors_with_pbc (
 
 def get_edge_relative_vectors_with_pbc_padding (
         R: torch.Tensor, 
+        cell: torch.Tensor, 
         data_graph: Dict[str, torch.Tensor]):
     # iatoms ==> senders
     # jatoms ==> receivers
+    #data_graph["cell"].requires_grad_(True)
     iatoms = data_graph["edge_index"][0]  # shape = (b * n_edges)
     jatoms = data_graph["edge_index"][1]  # shape = (b * n_edges) 
     Sij = data_graph["edges"]   # shape = (b * n_edges, 3)
-    cell = data_graph["cell"]   # shape = (b, 3, 3)
+    #cell = data_graph["cell"]   # shape = (b, 3, 3)
 
     b, _, _ = cell.shape
     n_edges = data_graph["num_edges"][0]

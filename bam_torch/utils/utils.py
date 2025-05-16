@@ -4,10 +4,9 @@ from scipy.optimize import minimize
 from matscipy.neighbours import neighbour_list
 
 import torch
-from torch import nn
+from torch import vmap
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch.utils.data import ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 
 import os
@@ -16,6 +15,18 @@ from copy import deepcopy
 from datetime import datetime
 from .sampler import DistributedBalancedAtomCountBatchSampler
 
+
+def apply_along_axis(func1d, axis: int, arr: torch.Tensor):
+    num_dims = arr.ndim
+    axis = axis % num_dims  # canonicalize
+
+    func = func1d
+    for i in range(1, num_dims - axis):
+        func = vmap(func, in_dims=i, out_dims=-1)
+    for i in range(axis):
+        func = vmap(func, in_dims=0, out_dims=0)
+
+    return func(arr)
 
 def get_enr_avg_per_element (traj, element):
     tgt_enr = np.array([atoms.get_potential_energy()
@@ -58,6 +69,13 @@ def get_relative_vector(atoms, iatoms, jatoms, Sij):
     print(dist)
     return Rij, dist
 
+def data_to_dict(data):
+    data_dict = data.to_dict() if isinstance(data, DataBatch) else data
+    data_dict = {k: (torch.tensor(v) if isinstance(v, int) else v) 
+                    for k, v in data_dict.items()}
+    data_dict = {k: (torch.tensor(v) if isinstance(v, list) else v) 
+                    for k, v in data_dict.items()}
+    return data_dict
 
 def get_graphset(data, cutoff, uniq_element, enr_avg_per_element, 
                  enr_var, regress_forces=True):
@@ -105,6 +123,8 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
                     stress=torch.tensor(stress, dtype=torch.float32),
                     volume=torch.tensor(volume)
                 )                           # senders, recerivers
+        graph["positions"].requires_grad_(True)
+        graph["cell"].requires_grad_(True)
         graph_list.append(graph)
 
     return graph_list
@@ -146,32 +166,32 @@ def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
     return graph_list
 
 
-def _get_dataloader(fname, ntrain, ntest, 
+def _get_dataloader(fname, ntrain, nvalid, 
                    nbatch, cutoff, random_seed, 
                    element=None, regress_forces=True,
                    rank=0, world_size=1):
     msg = ''
     if type(ntrain) == str: 
         train_data = read(ntrain, index=slice(None))
-        test_data = read(ntest, index=slice(None))
+        valid_data = read(nvalid, index=slice(None))
         msg += 'number of data:\n'
         msg += f'\033[33m -- training      {len(train_data)}\n'
-        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
-        traj = train_data + test_data
+        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+        traj = train_data + valid_data
     else:
-        nsamp = ntrain + ntest
+        nsamp = ntrain + nvalid
         traj = read(fname, index=slice(None))[-nsamp:]
         torch.manual_seed(random_seed)
         torch.cuda.manual_seed_all(random_seed)
         idx = torch.arange(nsamp)
         idx = idx[torch.randperm(nsamp)] 
         idx_train = idx[:ntrain]
-        idx_test = idx[ntrain:]   
+        idx_valid = idx[ntrain:]   
         train_data = [traj[i] for i in idx_train]
-        test_data = [traj[i] for i in idx_test]
+        valid_data = [traj[i] for i in idx_valid]
         msg += 'number of data:\n'
         msg += f'\033[33m -- training      {len(train_data)}\n'
-        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
+        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
 
     if element == None or element == 'auto':
         element = sorted(
@@ -184,7 +204,7 @@ def _get_dataloader(fname, ntrain, ntest,
         print(msg)
     
     loaders = []
-    for dataset in [train_data, test_data]:
+    for dataset in [train_data, valid_data]:
         graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
                                 regress_forces)
@@ -210,32 +230,32 @@ def _get_dataloader(fname, ntrain, ntest,
     return loaders[0], loaders[1], uniq_element, enr_avg_per_element  
 
 
-def get_dataloader(fname, ntrain, ntest, 
+def get_dataloader(fname, ntrain, nvalid, 
                    nbatch, cutoff, random_seed, 
                    element=None, regress_forces=True,
                    rank=0, world_size=1):
     msg = ''
     if type(ntrain) == str: 
         train_data = read(ntrain, index=slice(None))
-        test_data = read(ntest, index=slice(None))
+        valid_data = read(nvalid, index=slice(None))
         msg += 'number of data:\n'
         msg += f'\033[33m -- training      {len(train_data)}\n'
-        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
-        traj = train_data + test_data
+        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+        traj = train_data + valid_data
     else:
-        nsamp = ntrain + ntest
+        nsamp = ntrain + nvalid
         traj = read(fname, index=slice(None))[-nsamp:]
         torch.manual_seed(random_seed)
         torch.cuda.manual_seed_all(random_seed)
         idx = torch.arange(nsamp)
         idx = idx[torch.randperm(nsamp)] 
         idx_train = idx[:ntrain]
-        idx_test = idx[ntrain:]   
+        idx_valid = idx[ntrain:]   
         train_data = [traj[i] for i in idx_train]
-        test_data = [traj[i] for i in idx_test]
+        valid_data = [traj[i] for i in idx_valid]
         msg += 'number of data:\n'
         msg += f'\033[33m -- training      {len(train_data)}\n'
-        msg += f' -- validation    {len(test_data)}\033[0m\n\n'
+        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
 
     if element == None or element == 'auto':
         element = sorted(
@@ -248,16 +268,16 @@ def get_dataloader(fname, ntrain, ntest,
         print(msg)
     
     loaders = []
-    for dataset in [train_data, test_data]:
+    for dataset in [train_data, valid_data]:
         graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
                                 regress_forces)
-        #pad_nodes_to = 0 # nbatch * max_nodes 
-        #pad_edges_to = 0 # nbatch * max_edges
-        #for graph in graphset:
-        #    pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-        #    pad_edges_to = max(graph.num_edges, pad_edges_to)
-        #padded_graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+        pad_nodes_to = 0 # nbatch * max_nodes 
+        pad_edges_to = 0 # nbatch * max_edges
+        for graph in graphset:
+            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+            pad_edges_to = max(graph.num_edges, pad_edges_to)
+        #graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:
@@ -341,8 +361,11 @@ def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
                     cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
                     edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long)
                 )   
+        graph["positions"].requires_grad_(True)
+        graph["cell"].requires_grad_(True)
         graph_list.append(graph)
 
+        del atoms
     return graph_list
 
 
@@ -409,12 +432,12 @@ def on_exit(fout, separator_bottom, n_params, json_data, date1):
         from ase.io import read
         train = read(json_data["ntrain"], index=slice(None))
         ntrain = len(train)
-        test = read(json_data["ntest"], index=slice(None))
-        ntest = len(test)
+        valid = read(json_data["nvalid"], index=slice(None))
+        nvalid = len(valid)
     else:
         ntrain = json_data["ntrain"]
-        ntest = json_data["ntest"]
-    print(f'\n* DATA INFO:\n - {"N(TRAIN)":14} {ntrain}\n - {"N(VALID)":14} {ntest}', file=fout)
+        nvalid = json_data["nvalid"]
+    print(f'\n* DATA INFO:\n - {"N(TRAIN)":14} {ntrain}\n - {"N(VALID)":14} {nvalid}', file=fout)
     print(f' - {"BATCH":14} {json_data["nbatch"]}', file=fout)
     print(f' - {"CUTOFF":14} {json_data["cutoff"]}', file=fout)
     print(f' - {"AVG. NEIGH.":14} {json_data["avg_num_neighbors"]}', file=fout)

@@ -1,5 +1,6 @@
 import torch
 
+import gc
 import atexit
 import pprint
 from copy import deepcopy
@@ -26,7 +27,7 @@ class Evaluator(BaseTrainer):
         self.device = self.configure_device()
 
         ## 3) Configure model
-        self.model, self.n_params, self.model_ckpt, _ = self.configure_model()
+        self.model, self.n_params, self.model_ckpt, self.start_epoch = self.configure_model()
 
         ## 4) Configure data_loader   
         self.data_loader, self.uniq_element, self.enr_avg_per_element = \
@@ -42,26 +43,26 @@ class Evaluator(BaseTrainer):
         self.save_input_parameters()
     
     def evaluate(self):
+        self.logger.print_logger_head()
         target = {}
         total_loss_dict = {'loss':[],
                            'loss_e':[],
                            'loss_f':[],
                            } 
-        e_corr = torch.tensor(self.model_ckpt['scale_shift'])
+        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift']) # or train_scale_shift?
         e_corr = e_corr.flatten().mean()
-        print(e_corr)
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             target['energy'] = data['energy']
             species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
-            preds = self.model(deepcopy(data), backprop=False)
+            preds = self.model(data, backprop=False)
 
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
-            loss_dict = self.compute_loss(preds, deepcopy(data))
+            loss_dict = self.compute_loss(preds, data)
             for l in total_loss_dict.keys(): # predict part
-                total_loss_dict[l].append(loss_dict.get(l, torch.nan))
-            loss_dict['energy'] = float(preds['energy'][0])
+                total_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+            loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
             del loss_dict['loss']
 
             step_dict = {
@@ -72,6 +73,10 @@ class Evaluator(BaseTrainer):
                                          loss_dict, 
                                          target,
                                          lr=None)
+            data.clear()
+            del data, preds, loss_dict
+            torch.cuda.empty_cache()
+            gc.collect()
         total_loss_dict = {key: torch.mean(torch.tensor(value)) \
                         for key, value in total_loss_dict.items()}
         
@@ -238,7 +243,7 @@ class Evaluator(BaseTrainer):
             fname = "predict.out"
         fout = open(fname, 'w')
         logger = Logger(log_config, self.loss_config, log_length, fout)
-        logger.print_logger_head()
+        #logger.print_logger_head()
         separator = logger.get_seperator()
         atexit.register(lambda: on_exit(
                                     fout, 

@@ -18,10 +18,10 @@ class Logger:
         if log_length == 'precise':
             self.length = 10
             self.space = 16
-        self.logger_config = self.configure_logger_head()
+        self.logger_config, self.separator = self.configure_logger()
         self.fout = fout
 
-    def configure_logger_head(self):
+    def configure_logger(self):
         if self.loss_config != None:
             log_config = deepcopy(self.log_config)
             for key, values in self.log_config.items():
@@ -62,8 +62,9 @@ class Logger:
                 if k < 3: #len(log_config)-1:
                     line += divider
                 logger[f'{key}'] = [line, space]
+        separator = '-' * sum(len(v[0]) for v in logger.values())
                 
-        return logger
+        return logger, separator
 
     def print_logger_head(self):
         head = ""
@@ -91,16 +92,16 @@ class Logger:
                 line = key_values[0]
                 head += divider
                 LINE += line
-        separator = '-' * len(LINE)
+        #separator = '-' * len(LINE)
         print(head, file=self.fout)
         print(LINE, file=self.fout)
-        print(separator, file=self.fout)
+        print(self.separator, file=self.fout)
         self.fout.flush()
         print(date())
         print(head)
         print(LINE)
-        print(separator)
-        self.separator = separator
+        print(self.separator)
+        #self.separator = separator
     
     def get_seperator(self):
         return self.separator

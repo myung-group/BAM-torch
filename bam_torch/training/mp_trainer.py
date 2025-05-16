@@ -1,16 +1,18 @@
-from bam_torch.training.base_trainer import BaseTrainer
 import os
-import ast 
-from tqdm import tqdm 
-import pickle
-import torch
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from copy import deepcopy
 import gc
+import re
+import pickle
+from pathlib import Path
+from time import time
+from copy import deepcopy
+
+import torch
+from torch_geometric.loader import DataLoader
+
+from bam_torch.training.base_trainer import BaseTrainer
 from bam_torch.utils.sampler import DistributedBalancedAtomCountBatchSampler
 from bam_torch.training.loss import RMSELoss, l2_regularization, HuberLoss
+
 
 
 def move_to_device(data, device):
@@ -147,34 +149,61 @@ class MPTrainer(BaseTrainer):
         return train_files, valid_files
 
     def configure_dataloader_from_pkl(self, file_path, mode):
-        ntrain = self.json_data.get('ntrain')
-        nvalid = self.json_data.get('ntest')
+        file_number = 0
+        match = re.search(r"_(\d+)\.pkl$", file_path)
+        if match:
+            file_number = int(match.group(1))
+        
+        sampled_dataset_save_folder = Path(f"./{mode}_datasets-{self.rank}")
+        sampled_dataset_file_name = f"{mode}-{file_number}.pkl"
+        sampled_dataset_file_path = sampled_dataset_save_folder / sampled_dataset_file_name
 
-        with open(file_path, "rb") as f:
-            data = pickle.load(f)
-        if not isinstance(data, list):
-            data = [data]
+        if sampled_dataset_file_path.exists():
+            t1 = time()
+            file_path = sampled_dataset_file_path
+            with open(file_path, "rb") as f:
+                data = pickle.load(f)
+            if not isinstance(data, list):
+                data = [data]
+            data_loader = self.get_dataloader_from_data(data)
+            print(f'[RANK {self.rank}] Dataset path: {sampled_dataset_file_path} | Elapsed time {(time()-t1)/1000:.6f} sec', file=self.time_log, flush=True)
+        else:
+            t1 = time()
+            os.makedirs(sampled_dataset_save_folder, exist_ok=True)
+    
+            with open(file_path, "rb") as f:
+                data = pickle.load(f)
+            if not isinstance(data, list):
+                data = [data]
+            
+            ntrain = self.json_data.get('ntrain')
+            nvalid = self.json_data.get('ntest')
 
-        if type(ntrain) == float or ntrain < 1.0:
-            ntrain = round(ntrain * len(data))
-            nvalid = round(nvalid * len(data))
-            if ntrain + nvalid > len(data):
-                nvalid = nvalid - (nvalid + ntrain - len(data))
-            assert ntrain + nvalid == len(data)
+            if type(ntrain) == float or ntrain < 1.0:
+                ntrain = round(ntrain * len(data))
+                nvalid = round(nvalid * len(data))
+                if ntrain + nvalid > len(data):
+                    nvalid = nvalid - (nvalid + ntrain - len(data))
+                assert ntrain + nvalid == len(data)
 
-        if type(ntrain) != str:
-            idx = torch.arange(ntrain + nvalid)
-            idx = idx[torch.randperm(ntrain + nvalid)]
-            idx_train = idx[:ntrain]
-            idx_valid = idx[-nvalid:]
-            if mode == 'train':
-                data = [data[i] for i in idx_train]
-                print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
-            else: # mode == 'valid'
-                data = [data[i] for i in idx_valid]
-                print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
+            if type(ntrain) != str:
+                idx = torch.arange(ntrain + nvalid)
+                idx = idx[torch.randperm(ntrain + nvalid)]
+                idx_train = idx[:ntrain]
+                idx_valid = idx[-nvalid:]
+                if mode == 'train':
+                    data = [data[i] for i in idx_train]
+                    print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
+                else: # mode == 'valid'
+                    data = [data[i] for i in idx_valid]
+                    print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
 
-        return self.get_dataloader_from_data(data) # => data_loader
+            data_loader = self.get_dataloader_from_data(data)
+            print(f'[RANK {self.rank}] Dataset path: {file_path} | Elapsed time {(time()-t1)/1000:.6f} sec', file=self.time_log, flush=True)
+            with open(sampled_dataset_file_path, "wb") as f:
+                pickle.dump(data, f)
+                
+        return data_loader
 
     def get_dataloader_from_data(self, graphset):
         data_sampler = DistributedBalancedAtomCountBatchSampler(        
@@ -229,10 +258,19 @@ class MPTrainer(BaseTrainer):
         return loss_fn, loss_config
     
     def compute_loss(self, preds, data):
-        e_lambda = self.json_data["NN"]['enr_lambda']
-        f_lambda = self.json_data["NN"]['frc_lambda']
-        s_lambda = self.json_data["NN"]['str_lambda']
-        lambd = self.json_data["NN"]['l2_lambda']
+        lambda_config = self.json_data["NN"]
+        e_lambda = lambda_config.get('enr_lambda')
+        f_lambda = lambda_config.get('frc_lambda')
+        s_lambda = lambda_config.get('str_lambda')
+        lambd = lambda_config.get('l2_lambda')
+        if e_lambda == None:
+            e_lambda = 1
+        if f_lambda == None:
+            f_lambda = 1
+        if s_lambda == None:
+            s_lambda = 1
+        if lambd == None:
+            lambd == 0
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()

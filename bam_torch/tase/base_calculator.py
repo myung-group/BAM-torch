@@ -50,6 +50,7 @@ class BaseCalculator(Calculator, BaseTrainer):
 
         self.results['energy'] = float(energy)
         self.results['forces'] = np.array(preds['forces'].detach().cpu())
+       # self.results['stress'] = np.array(preds['stress'].detach().cpu())
 
     
     

@@ -5,7 +5,7 @@
 ###########################################################################################
 
 from typing import List, Optional, Tuple
-
+from torch.jit import annotate
 import torch
 import torch.nn
 import torch.utils.data
@@ -69,23 +69,30 @@ def compute_forces_stress(
     num_graphs: int,
     training: bool = True,
     compute_stress: bool = False,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
-    cellgrad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    grad_outputs = annotate(List[Optional[torch.Tensor]], [torch.ones_like(energy)])
+    #cellgrad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+   # grad : torch.Tensor = torch.tensor([])
+    virials = torch.zeros((num_graphs, 3, 3), dtype=positions.dtype, device=positions.device)
+    stress = torch.zeros((num_graphs, 6), dtype=positions.dtype, device=positions.device)
+    #n_edges: torch.Tensor = 
     grad, cellgrad = torch.autograd.grad(
         outputs=[energy],  # [n_graphs, ]
         inputs=[positions, cell],  # [n_nodes, 3]
         grad_outputs=grad_outputs,
-        retain_graph=training,  # Make sure the graph is not destroyed during training
-        create_graph=training,  # Create graph for second derivative
+        retain_graph=True,  # Make sure the graph is not destroyed during training
+        create_graph=True,  # Create graph for second derivative
         allow_unused=True,
     )
+    #print(grad)
     if compute_stress and cellgrad is not None:
         cell = cell.view(-1, 3, 3)
         volume = torch.linalg.det(cell).abs().unsqueeze(-1)
         stress_cell = (
             torch.transpose(cellgrad, 1, 2) @ cell
         )
+        assert grad is not None
+        assert positions is not None
         stress_grad = torch.einsum("iu,iv->iuv", grad, positions)
         stress_grad = scatter_sum(
                 src=stress_grad,
@@ -93,20 +100,23 @@ def compute_forces_stress(
                 dim=0,
                 dim_size=num_graphs,
             ) 
+
         virials = stress_cell + stress_grad
         stress = virials / volume.view(-1, 1, 1)
         #stress = torch.where(torch.abs(stress) < 1e10, stress, torch.zeros_like(stress))
         #stress = stress[:-1]
-        stress = stress.reshape(-1, 9)[:, [0,4,8,5,2,1]]
+        stress = stress.view(-1, 9)[:, [0,4,8,5,2,1]]
 
     if grad is None:
         forces = torch.zeros_like(positions)
-    if cellgrad is None:
-        virials = torch.zeros((1, 3, 3))
+    #if cellgrad is None:
+    #    virials = torch.zeros((1, 3, 3))
 
     #del cellgrad
     #torch.cuda.empty_cache()
-
+    assert grad is not None
+    assert isinstance(virials, torch.Tensor)
+    assert stress is not None
     return -1 * grad, -1 * virials, stress
 
 
