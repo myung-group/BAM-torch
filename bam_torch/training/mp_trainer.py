@@ -113,7 +113,7 @@ class MPTrainer(BaseTrainer):
     def get_pkl_data_path(self):
         dir_path = self.json_data.get('fname_traj')
         ntrain = self.json_data.get('ntrain')
-        nvalid = self.json_data.get('ntest')
+        nvalid = self.json_data.get('nvalid')
         if type(ntrain) == str:
             train_dir_path = ntrain
             if os.path.isdir(train_dir_path):
@@ -177,32 +177,51 @@ class MPTrainer(BaseTrainer):
                 data = [data]
             
             ntrain = self.json_data.get('ntrain')
-            nvalid = self.json_data.get('ntest')
+            nvalid = self.json_data.get('nvalid')
+            ntest = self.json_data.get('ntest')
 
             if type(ntrain) == float or ntrain < 1.0:
                 ntrain = round(ntrain * len(data))
                 nvalid = round(nvalid * len(data))
                 if ntrain + nvalid > len(data):
                     nvalid = nvalid - (nvalid + ntrain - len(data))
-                assert ntrain + nvalid == len(data)
+                if type(ntest) == float:
+                    ntest = round(ntest * len(data))
+                    if ntrain + nvalid + ntest > len(data):
+                        ntest = ntest - (ntrain + nvalid + ntest  - len(data))
 
             if type(ntrain) != str:
-                idx = torch.arange(ntrain + nvalid)
-                idx = idx[torch.randperm(ntrain + nvalid)]
+                if ntest == None:
+                    ntest = 0
+                    if ntrain + nvalid < len(data):
+                        ntest = len(data) - (nvalid + ntrain)
+                        assert ntrain + nvalid + ntest == len(data)
+
+                idx = torch.arange(ntrain + nvalid + ntest)
+                idx = idx[torch.randperm(ntrain + nvalid + ntest)]
                 idx_train = idx[:ntrain]
-                idx_valid = idx[-nvalid:]
+                idx_valid = idx[ntrain:ntrain+nvalid]
+                idx_test = idx[-ntest:]
                 if mode == 'train':
+                    test_data = [data[i] for i in idx_test]
                     data = [data[i] for i in idx_train]
-                    print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
-                else: # mode == 'valid'
+                    print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)                    
+                    print(f"[Rank {self.rank}] Number of Data: {len(test_data)} | Mode: test ", file=self.time_log, flush=True)
+                    sampled_test_dataset_save_folder = Path(f"./test_datasets-{self.rank}")
+                    sampled_test_dataset_file_name = f"test-{file_number}.pkl"
+                    sampled_test_dataset_file_path = sampled_test_dataset_save_folder / sampled_test_dataset_file_name
+                    with open(sampled_test_dataset_file_path, "wb") as f:
+                        pickle.dump(test_data, f)
+                else:
                     data = [data[i] for i in idx_valid]
                     print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
+            
+            if mode != 'test':
+                print(f'[RANK {self.rank}] Dataset path: {file_path} | Elapsed time {(time()-t1)/1000:.6f} sec', file=self.time_log, flush=True)
+                with open(sampled_dataset_file_path, "wb") as f:
+                    pickle.dump(data, f)
 
             data_loader = self.get_dataloader_from_data(data)
-            print(f'[RANK {self.rank}] Dataset path: {file_path} | Elapsed time {(time()-t1)/1000:.6f} sec', file=self.time_log, flush=True)
-            with open(sampled_dataset_file_path, "wb") as f:
-                pickle.dump(data, f)
-                
         return data_loader
 
     def get_dataloader_from_data(self, graphset):
