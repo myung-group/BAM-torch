@@ -1,0 +1,71 @@
+{
+    "device" : "gpu",
+    "gpu-parallel" : false,
+    "model" : "race",
+    "cueq_config" : false,
+    "regress_forces" : true,
+    "trainer" : "base",
+    "fname_traj" : "train_300K.xyz",
+    "ntrain" : 450,
+    "nvalid" : 50,
+    "element" : "auto",
+    "cutoff" : 3.0,
+    "avg_num_neighbors": 19,
+    "num_species" : 4,
+    "max_ell" : 2,
+    "num_radial_basis" : 8,
+    "hidden_channels" : "32x0o + 32x0e + 16x1o + 16x1e + 8x2o + 8x2e",
+    "output_channels" : "8x0e",
+    "nbatch" : 2,
+    "nlayers" : 5,
+    "features_dim" : 32,
+    "active_fn": "identity",
+    "pbc" : true,
+    "NN" : {
+            "data_seed" :  102,
+	    "init_seed" :  103,
+            "learning_rate" : 0.01,
+	    "weight_decay" : 0,
+            "nepoch" : 50000,
+            "nsave": 5,
+            "restart" : false,
+            "fname_pkl" : "model.pkl",
+	    "loss_config" : {"energy_loss": "nll", "force_loss": "nll", "stress_loss": "mse"},
+            "frc_lambda" : 1,
+            "enr_lambda" : 1,
+	    "str_lambda" : 1,
+            "energy_grad_loss" : true,
+            "energy_grad_mult" : 10,
+            "l2_lambda" : 0.0,
+            "cosine_sim" : false
+    },
+    "scheduler": {
+            "scheduler" : "ReduceLROnPlateau",
+	    "lr_gamma" : 0.1,
+	    "decay_factor" : 0.9,
+            "max_steps" : 30,
+	    "warmup_steps" : 10,
+	    "warmup_factor" : 0.2,
+	    "patience" : 50,
+	    "threshold" : 1e-10
+    },
+    "log_length": "simple",
+    "log_interval": 2,
+    "log_config": {
+            "step":["date", "epoch"],
+            "train": ["loss", "loss_e", "loss_f", "log_e", "log_f", "loss_s", "enr_var", "frc_var", "loss_l2"], 
+            "valid": ["loss", "loss_e", "loss_f", "log_e", "log_f"],
+            "lr": ["lr"]
+    },
+    "train" : {
+            "fname_log" : "loss_train.out"
+    },
+    "predict" : {
+            "evaluate_tag" : false,
+            "fname_traj" : "test_1200K.xyz",
+            "ndata" : "test_1200K.xyz",
+            "model" : "model.pkl",
+            "fname_plog" : "predict.out"
+    }
+}
+

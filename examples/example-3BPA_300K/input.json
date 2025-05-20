@@ -7,7 +7,7 @@
     "trainer" : "base",
     "fname_traj" : "train_300K.xyz",
     "ntrain" : 450,
-    "ntest" : 50,
+    "nvalid" : 50,
     "element" : "auto",
     "cutoff" : 6.0,
     "avg_num_neighbors": 26,

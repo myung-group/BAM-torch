@@ -9,62 +9,6 @@ class MVETrainer(BaseTrainer):
     """
     def __init__(self, json_data, rank, world_size):
         super().__init__(json_data, rank, world_size)
-                
-    def train(self):
-        self.logger.print_logger_head()
-        nepoch = self.json_data['NN']['nepoch']
-        ## 11) Main loop
-        for epoch in range(nepoch):
-            epoch_loss_train = self.train_one_epoch(mode='train')
-            if self.ddp:
-                torch.distributed.barrier()
-
-            if (epoch+1)%self.log_interval == 0:
-                epoch_loss_valid = self.train_one_epoch(mode='valid')
-                if self.ddp:
-                    torch.distributed.barrier()
-
-                ## 12) Save model to pckl file
-                if self.rank == 0:
-                    if epoch_loss_valid['loss'] < self.loss_test_min:
-                        self.loss_test_min = epoch_loss_valid['loss']
-                        self.loss_dict['epoch'] = epoch+1+self.start_epoch
-                        self.loss_dict['train'] = epoch_loss_train['loss']
-                        self.loss_dict['valid'] = epoch_loss_valid['loss']
-                        state_dict = self.model.state_dict()
-                        if self.ddp:
-                            state_dict = self.model.module.state_dict()
-                        self.ckpt['params'] = state_dict
-                        self.ckpt['opt_state'] = self.optimizer.state_dict()
-                        self.ckpt['scheduler'] = self.scheduler.state_dict()
-                        self.ckpt['loss'] = self.loss_dict
-                        self.l_ckpt_saved = False
-
-                    if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                        torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                        #self.model.save('model.pt')
-                        self.l_ckpt_saved = True
-                
-                    # Get the last learning rate
-                    if self.json_data['scheduler'] != "Null":
-                        lr = self.scheduler.get_lr()
-                    
-                    ## 13) Print out epoch loss
-                    step_dict = {
-                        "date": date(),
-                        "epoch": epoch+1+self.start_epoch,
-                    }
-                    self.logger.print_epoch_loss(step_dict, 
-                                                epoch_loss_train, 
-                                                epoch_loss_valid,
-                                                lr)
-                
-                ## 14) Update scheduler (learning rate)
-                if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
-                    metrics = epoch_loss_valid['loss']
-                else:
-                    metrics = None
-                self.scheduler.step(metrics, epoch)
     
     def load_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")

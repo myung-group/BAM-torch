@@ -7,7 +7,7 @@
     "trainer" : "base",
     "fname_traj" : "train.traj",
     "ntrain" : "train.traj",
-    "ntest" : "valid.traj",
+    "nvalid" : "valid.traj",
     "element" : "auto",
     "cutoff" : 6.0,
     "avg_num_neighbors": 60,
