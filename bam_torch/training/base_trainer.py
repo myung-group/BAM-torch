@@ -5,6 +5,7 @@ import numpy as np
 from e3nn import o3
 
 import os
+import gc
 import sys
 import random
 import atexit
@@ -139,7 +140,8 @@ class BaseTrainer:
                                                 epoch_loss_train, 
                                                 epoch_loss_valid,
                                                 lr)
-                
+                torch.cuda.empty_cache()
+                gc.collect()
                 ## 14) Update scheduler (learning rate)
                 if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
                     metrics = epoch_loss_valid['loss']
@@ -203,7 +205,7 @@ class BaseTrainer:
             elapsed_time = start.elapsed_time(end)
             print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True) 
         
-        epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
+        epoch_loss_dict = {key: torch.mean(torch.tensor(value).detach().cpu()) \
                            for key, value in epoch_loss_dict.items()}      
         return epoch_loss_dict
     

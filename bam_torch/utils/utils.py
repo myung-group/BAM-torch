@@ -66,7 +66,7 @@ def get_relative_vector(atoms, iatoms, jatoms, Sij):
     shift_v = torch.einsum('ij,kj->ij', Sij, cell)   
     Rij = R[jatoms] - R[iatoms] + shift_v
     dist = torch.norm(Rij, dim=1)
-    print(dist)
+    #print(dist)
     return Rij, dist
 
 def data_to_dict(data):
@@ -78,7 +78,7 @@ def data_to_dict(data):
     return data_dict
 
 def get_graphset(data, cutoff, uniq_element, enr_avg_per_element, 
-                 enr_var, regress_forces=True):
+                 enr_var, regress_forces=True, max_neigh=None):
     graph_list = []
     for atoms in data:
         crds = atoms.get_positions()
@@ -109,6 +109,20 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
         num_nodes = crds.shape[0] 
         num_edges = iatoms.shape[0]
 
+        # Sort neighbors by distance, remove edges larger than max_neighbors
+        if max_neigh != None:
+            Rij, dist = get_relative_vector(atoms, iatoms, jatoms, Sij)
+            nonmax_idx = []
+            for i in range(len(atoms)):
+                idx_i = (iatoms == i).nonzero()[0]
+                idx_sorted = np.argsort(dist[idx_i])[: max_neigh]
+                nonmax_idx.append(idx_i[idx_sorted])
+            nonmax_idx = np.concatenate(nonmax_idx)
+            iatoms = iatoms[nonmax_idx]
+            jatoms = jatoms[nonmax_idx]
+            num_edges = iatoms.shape[0]
+            Sij = Sij[nonmax_idx]
+        
         # Generate Graph data set
         graph = Data(
                     positions=torch.tensor(crds, dtype=torch.float32),   # node features
@@ -123,8 +137,8 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
                     stress=torch.tensor(stress, dtype=torch.float32),
                     volume=torch.tensor(volume)
                 )                           # senders, recerivers
-        graph["positions"].requires_grad_(True)
-        graph["cell"].requires_grad_(True)
+        #graph["positions"].requires_grad_(True)
+        #graph["cell"].requires_grad_(True)
         graph_list.append(graph)
 
     return graph_list
@@ -233,6 +247,7 @@ def _get_dataloader(fname, ntrain, nvalid,
 def get_dataloader(fname, ntrain, nvalid, 
                    nbatch, cutoff, random_seed, 
                    element=None, regress_forces=True,
+                   max_neigh=None,
                    rank=0, world_size=1):
     msg = ''
     if type(ntrain) == str: 
@@ -271,13 +286,13 @@ def get_dataloader(fname, ntrain, nvalid,
     for dataset in [train_data, valid_data]:
         graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
-                                regress_forces)
+                                regress_forces, max_neigh)
         pad_nodes_to = 0 # nbatch * max_nodes 
         pad_edges_to = 0 # nbatch * max_edges
         for graph in graphset:
             pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
             pad_edges_to = max(graph.num_edges, pad_edges_to)
-        #graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:
@@ -317,7 +332,8 @@ def get_edge_relative_vectors(data):
     return Rij
 
 
-def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
+def get_graphset_to_predict(data, cutoff, uniq_element, 
+                            regress_forces=True, max_neigh=None):
     graph_list = []
     for atoms in data:
         if atoms.calc:
@@ -348,7 +364,21 @@ def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
         species = np.array([uniq_element[iz] for iz in atoms.numbers])
         num_nodes = crds.shape[0]
         num_edges = iatoms.shape[0]
-
+        
+        # Sort neighbors by distance, remove edges larger than max_neighbors
+        if max_neigh != None:
+            Rij, dist = get_relative_vector(atoms, iatoms, jatoms, Sij)
+            nonmax_idx = []
+            for i in range(len(atoms)):
+                idx_i = (iatoms == i).nonzero()[0]
+                idx_sorted = np.argsort(dist[idx_i])[: max_neigh]
+                nonmax_idx.append(idx_i[idx_sorted])
+            nonmax_idx = np.concatenate(nonmax_idx)
+            iatoms = iatoms[nonmax_idx]
+            jatoms = jatoms[nonmax_idx]
+            num_edges = iatoms.shape[0]
+            Sij = Sij[nonmax_idx]
+        
         # Generate Graph data set
         graph = Data(
                     positions=torch.tensor(crds, dtype=torch.float32),   # node features
@@ -361,8 +391,8 @@ def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
                     cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
                     edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long)
                 )   
-        graph["positions"].requires_grad_(True)
-        graph["cell"].requires_grad_(True)
+        #graph["positions"].requires_grad_(True)
+        #graph["cell"].requires_grad_(True)
         graph_list.append(graph)
 
         del atoms
@@ -371,7 +401,8 @@ def get_graphset_to_predict(data, cutoff, uniq_element, regress_forces=True):
 
 def get_dataloader_to_predict(fname, ndata, nbatch, 
                               cutoff, model_ckpt,
-                              regress_forces=True):
+                              regress_forces=True, 
+                              max_neigh=None):
     if type(ndata) == str:
         traj = read(fname, index=slice(None))
         print(f'N_test: {len(traj)}\n')
@@ -382,7 +413,8 @@ def get_dataloader_to_predict(fname, ndata, nbatch,
     uniq_element = model_ckpt['uniq_element']
     enr_avg_per_element = model_ckpt['enr_avg_per_element']
 
-    graphset = get_graphset_to_predict(traj, cutoff, uniq_element, regress_forces)
+    graphset = get_graphset_to_predict(traj, cutoff, uniq_element, 
+                                       regress_forces, max_neigh)
     #pad_nodes_to = 0 # nbatch * max_nodes 
     #pad_edges_to = 0 # nbatch * max_edges
     #for graph in graphset:

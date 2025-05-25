@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="BAM-torch",
+    name="BAM-GA",
     version="0.1.0.dev0",
     author="Myung Group",
     author_email="cwmyung@skku.edu",
