@@ -1,24 +1,25 @@
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch_geometric.data import Batch as DataBatch
 
-import numpy as np
 from e3nn import o3
+from e3nn.util import jit
 
+import gc
 import os
 import sys
 import random
 import atexit
 import pprint
+import numpy as np
 from copy import deepcopy
+from time import time
 
 from bam_torch.utils.logger import Logger
 from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
 from bam_torch.model.wrapper_ops import CuEquivarianceConfig
 from .loss import RMSELoss, l2_regularization
-from e3nn.util import jit
-from torch_geometric.data import Batch as DataBatch
-from time import time
 
 
 class BaseTrainer:
@@ -123,7 +124,7 @@ class BaseTrainer:
 
                     if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
                         torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                        #self.model.save('model.pt')
+                        torch.save(deepcopy(self.model), 'model.pt')
                         self.l_ckpt_saved = True
                 
                     # Get the last learning rate
@@ -139,7 +140,8 @@ class BaseTrainer:
                                                 epoch_loss_train, 
                                                 epoch_loss_valid,
                                                 lr)
-                
+                torch.cuda.empty_cache()
+                gc.collect()
                 ## 14) Update scheduler (learning rate)
                 if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
                     metrics = epoch_loss_valid['loss']
@@ -186,7 +188,8 @@ class BaseTrainer:
 
             loss_dict = self.compute_loss(preds, data)
             for l in loss_log_config:
-                epoch_loss_dict[l].append(loss_dict.get(l, torch.nan))
+                val = loss_dict.get(l, torch.nan)
+                epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
             
             loss = loss_dict['loss']
             if backprop:
@@ -211,11 +214,11 @@ class BaseTrainer:
         energy_target = data["energy"].flatten()
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
-        if mode == 'train':
-            self.ckpt['train_scale_shift'].append(shift_enr)
-        elif mode == 'valid':
-            self.ckpt['valid_scale_shift'].append(shift_enr)
         preds["energy"] = energy_predict + shift_enr
+        if mode == 'train':
+            self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+        elif mode == 'valid':
+            self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
         return preds
     
     def configure_dataloader(self):
@@ -230,6 +233,7 @@ class BaseTrainer:
                                                             json_data['NN']['data_seed'],
                                                             json_data['element'],
                                                             json_data['regress_forces'],
+                                                            json_data.get('max_neigh'),
                                                             self.rank,
                                                             self.world_size
                                                         )
@@ -361,22 +365,14 @@ class BaseTrainer:
             force_target = data["forces"].flatten()
             loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(), force_target)
             loss["loss"].append(f_lambda * loss["loss_f"])
-                
-        # This is for frame-averaging or probabilistic-symmetrization
-        if "forces_grad_target" in preds:
-            grad_target = preds["forces_grad_target"]
-            if cosine_sim:
-                cos = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
-                loss["energy_grad_loss"] = -torch.mean(cos(preds["forces"], grad_target))
-            else:
-                loss["energy_grad_loss"] = self.loss_fn["force_loss"](preds["forces"], grad_target)
-        
-            if energy_grad_loss:
-                loss["loss"].append(energy_grad_mult * loss["energy_grad_loss"])
         
         if "stress" in preds and "stress" in data:
             stress_target = data["stress"].flatten()
-            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
+            if (hasattr(self.model, "training_mode_for_lammps") and self.model.training_mode_for_lammps) or \
+            self.loss_fn.get("stress_loss") is None:
+                loss["loss_s"] = torch.tensor(0.0, device=preds["stress"].device, requires_grad=True)
+            else:
+                loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
             loss["loss"].append(s_lambda * loss["loss_s"])
 
         if lambd != 0:

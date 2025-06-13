@@ -108,14 +108,18 @@ class TensorRegroupByIrreps(torch.nn.Module):
         self.irreps_dims = [(mul, ir.dim) for mul, ir in irreps]
         self.irreps, _, self.inv = irreps.sort()
         self.sorted_irreps_dims = [(mul.dim) for mul in self.irreps]
-        self.simplified_irreps = self.irreps.simplify()
+        #self.simplified_irreps = self.irreps.simplify()
     
     def forward(self, tensor: torch.Tensor, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         leading_shape = tensor.shape[:-1]
         chunks = split_tensor_by_irreps(tensor, self.irreps_dims)
         r_chunks = [chunks[i] for i in self.inv]
         if dtype is None:
-            dtype = next((x.dtype for x in chunks if x is not None), None)
+            #dtype = next((x.dtype for x in chunks if x is not None), None)
+            for x in chunks:
+                if x is not None:
+                    dtype = x.dtype
+                    break
             
         array = torch.cat([
                     torch.zeros(leading_shape + (mul_ir_dim,), dtype=dtype) if x is None
@@ -123,7 +127,7 @@ class TensorRegroupByIrreps(torch.nn.Module):
                     for mul_ir_dim, x in zip(self.sorted_irreps_dims, r_chunks)
                 ], dim=-1
         )
-        return array, self.simplified_irreps
+        return array #, self.simplified_irreps
 
 @compile_mode("script")
 class ConcatenateIrrepsTensor(torch.nn.Module):

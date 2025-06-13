@@ -668,9 +668,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
             tensors=[node_feats[sender], mji],
             axis=-1
         )
-        mji, simplified_irreps = self.tensor_regroup_by_irreps(mji)
-        assert self.irreps_out == simplified_irreps
-
+        mji = self.tensor_regroup_by_irreps(mji)
         mji = self.tensor_irreps_array_product(mix, mji) # mix * messages
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
