@@ -21,7 +21,7 @@ $ mv libtorch libtorch-gpu
 
 Install LAMMPS modified for BAM Package
 ```
-$ git clone 
+$ git clone https://github.com/myung-group/lammps.git
 $ cd lammps
 $ mkdir build
 $ cd build
