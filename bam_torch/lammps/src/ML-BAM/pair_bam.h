@@ -18,12 +18,12 @@
 
 #ifdef PAIR_CLASS
 // clang-format off
-PairStyle(mace,PairMACE);
+PairStyle(bam,PairBAM);
 // clang-format on
 #else
 
-#ifndef LMP_PAIR_MACE_H
-#define LMP_PAIR_MACE_H
+#ifndef LMP_PAIR_BAM_H
+#define LMP_PAIR_BAM_H
 
 #include "pair.h"
 
@@ -32,12 +32,12 @@ PairStyle(mace,PairMACE);
 
 namespace LAMMPS_NS {
 
-class PairMACE : public Pair {
+class PairBAM : public Pair {
 
  public:
 
-  PairMACE(class LAMMPS *);
-  ~PairMACE() override;
+  PairBAM(class LAMMPS *);
+  ~PairBAM() override;
   void compute(int, int) override;
   void settings(int, char **) override;
   void coeff(int, char **) override;
@@ -54,9 +54,9 @@ class PairMACE : public Pair {
   double r_max;
   double r_max_squared;
   int64_t num_interactions;
-  std::vector<int64_t> mace_atomic_numbers;
+  std::vector<int64_t> bam_atomic_numbers;
   std::vector<int64_t> lammps_atomic_numbers;
-  int mace_type(int lammps_type);
+  int bam_type(int lammps_type);
   const std::array<std::string,118> periodic_table =
     { "H", "He",
      "Li", "Be",                                                              "B",  "C",  "N",  "O",  "F", "Ne",

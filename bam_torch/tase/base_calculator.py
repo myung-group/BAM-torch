@@ -30,6 +30,7 @@ class BaseCalculator(Calculator, BaseTrainer):
         self.model, self.n_params, model_ckpt, _ = self.configure_model()
         self.uniq_element = model_ckpt['uniq_element']
         self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
+        self.e_corr = model_ckpt['valid_scale_shift']
 
     def calculate(self, atoms, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
@@ -46,7 +47,7 @@ class BaseCalculator(Calculator, BaseTrainer):
         species = np.array([self.uniq_element[iz] for iz in atoms.numbers])
         node_enr_avg = np.array([self.enr_avg_per_element[int(iz)] \
                         for iz in species]).sum()
-        energy = preds["energy"] + node_enr_avg
+        energy = preds["energy"] + node_enr_avg + self.e_corr
 
         self.results['energy'] = float(energy)
         self.results['forces'] = np.array(preds['forces'].detach().cpu())

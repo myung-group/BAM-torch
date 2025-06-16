@@ -13,7 +13,7 @@
 
 /* pair_bam.cpp : BAM-torch(RACE); LAMMPS pair_style */
 
-#include "pair_mace.h" 
+#include "pair_bam.h" 
 #include "atom.h"
 #include "domain.h"
 #include "error.h"
@@ -30,20 +30,20 @@ using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
 
-PairMACE::PairMACE(LAMMPS *lmp) : Pair(lmp)
+PairBAM::PairBAM(LAMMPS *lmp) : Pair(lmp)
 {
   no_virial_fdotr_compute = 1;
 }
 
 /* ---------------------------------------------------------------------- */
 
-PairMACE::~PairMACE()
+PairBAM::~PairBAM()
 {
 }
 
 /* ---------------------------------------------------------------------- */
 
-void PairMACE::compute(int eflag, int vflag)
+void PairBAM::compute(int eflag, int vflag)
 {
   ev_init(eflag, vflag);
 
@@ -169,8 +169,8 @@ void PairMACE::compute(int eflag, int vflag)
   for (int ii=0; ii<n_nodes; ++ii) {
     int i = list->ilist[ii];
     int atomic_num = lammps_atomic_numbers[atom->type[i] - 1];
-    for (int j = 0; j < mace_atomic_numbers.size(); ++j) {
-      if (atomic_num == mace_atomic_numbers[j]) species[i] = j;
+    for (int j = 0; j < bam_atomic_numbers.size(); ++j) {
+      if (atomic_num == bam_atomic_numbers[j]) species[i] = j;
     }
   }
 
@@ -261,16 +261,16 @@ void PairMACE::compute(int eflag, int vflag)
   // bam site virials
   //   -> not available
   if (vflag_atom) {
-    error->all(FLERR, "ERROR: pair_mace does not support vflag_atom.");
+    error->all(FLERR, "ERROR: pair_bam does not support vflag_atom.");
   }
 }
 
 /* ---------------------------------------------------------------------- */
 
-void PairMACE::settings(int narg, char **arg)
+void PairBAM::settings(int narg, char **arg)
 {
   if (narg > 1) {
-    error->all(FLERR, "Too many pair_style arguments for pair_style mace.");
+    error->all(FLERR, "Too many pair_style arguments for pair_style bam.");
   }
 
   if (narg == 1) {
@@ -278,14 +278,14 @@ void PairMACE::settings(int narg, char **arg)
       domain_decomposition = false;
       // TODO: add check against MPI rank
     } else {
-      error->all(FLERR, "Unrecognized argument for pair_style mace.");
+      error->all(FLERR, "Unrecognized argument for pair_style bam.");
     }
   }
 }
 
 /* ---------------------------------------------------------------------- */
 
-void PairMACE::coeff(int narg, char **arg)
+void PairBAM::coeff(int narg, char **arg)
 {
   if (!allocated) allocate();
 
@@ -301,11 +301,11 @@ void PairMACE::coeff(int narg, char **arg)
     device = c10::Device(torch::kCUDA,localrank);
   }
 
-  std::cout << "Loading MACE model from \"" << arg[2] << "\" ...";
+  std::cout << "Loading BAM model from \"" << arg[2] << "\" ...";
   model = torch::jit::load(arg[2], device);
   std::cout << " finished." << std::endl;
 
-  // extract default dtype from mace model
+  // extract default dtype from bam model
   for (auto p: model.named_attributes()) {
       // this is a somewhat random choice of variable to check. could it be improved?
       if (p.name == "model.node_embedding.linear.weight") {
@@ -318,19 +318,19 @@ void PairMACE::coeff(int narg, char **arg)
   }
   std::cout << "  - The torch_float_dtype is: " << torch_float_dtype << std::endl;
 
-  // extract r_max from mace model
+  // extract r_max from bam model
   r_max = model.attr("r_max").toTensor().item<double>();
   r_max_squared = r_max*r_max;
   std::cout << "  - The r_max is: " << r_max << "." << std::endl;
   num_interactions = model.attr("num_interactions").toTensor().item<int64_t>();
   std::cout << "  - The model has: " << num_interactions << " layers." << std::endl;
 
-  // extract atomic numbers from mace model
+  // extract atomic numbers from bam model
   auto a_n = model.attr("atomic_numbers").toTensor();
   for (int i=0; i<a_n.size(0); ++i) {
-    mace_atomic_numbers.push_back(a_n[i].item<int64_t>());
+    bam_atomic_numbers.push_back(a_n[i].item<int64_t>());
   }
-  std::cout << "  - The MACE model atomic numbers are: " << mace_atomic_numbers << "." << std::endl;
+  std::cout << "  - The BAM model atomic numbers are: " << bam_atomic_numbers << "." << std::endl;
 
   // extract atomic numbers from pair_coeff
   for (int i=3; i<narg; ++i) {
@@ -343,7 +343,7 @@ void PairMACE::coeff(int narg, char **arg)
   for (int i=1; i<=lammps_atomic_numbers.size(); ++i) {
     std::cout << "  - Mapping LAMMPS type " << i
       << " (" << periodic_table[lammps_atomic_numbers[i-1]-1]
-      << ") to MACE type " << mace_type(i) << "." << std::endl;
+      << ") to BAM type " << bam_type(i) << "." << std::endl;
   }
 
   for (int i=1; i<atom->ntypes+1; i++)
@@ -351,12 +351,12 @@ void PairMACE::coeff(int narg, char **arg)
       setflag[i][j] = 1;
 }
 
-void PairMACE::init_style()
+void PairBAM::init_style()
 {
-  if (force->newton_pair == 0) error->all(FLERR, "ERROR: Pair style mace requires newton pair on.");
+  if (force->newton_pair == 0) error->all(FLERR, "ERROR: Pair style bam requires newton pair on.");
 
   /*
-    MACE requires the full neighbor list AND neighbors of ghost atoms
+    BAM requires the full neighbor list AND neighbors of ghost atoms
     it appears that:
       * without REQ_GHOST
            list->gnum == 0
@@ -372,13 +372,13 @@ void PairMACE::init_style()
   }
 }
 
-double PairMACE::init_one(int i, int j)
+double PairBAM::init_one(int i, int j)
 {
   // to account for message passing, require cutoff of n_layers * r_max
   return num_interactions*model.attr("r_max").toTensor().item<double>();
 }
 
-void PairMACE::allocate()
+void PairBAM::allocate()
 {
   allocated = 1;
 
@@ -391,13 +391,13 @@ void PairMACE::allocate()
   memory->create(eatom, atom->nmax, "pair:eatom");
 }
 
-int PairMACE::mace_type(int lammps_type)
+int PairBAM::bam_type(int lammps_type)
 {
-    for (int i=0; i<mace_atomic_numbers.size(); ++i) {
-      if (mace_atomic_numbers[i]==lammps_atomic_numbers[lammps_type-1]) {
+    for (int i=0; i<bam_atomic_numbers.size(); ++i) {
+      if (bam_atomic_numbers[i]==lammps_atomic_numbers[lammps_type-1]) {
         return i+1;
       }
     }
-    error->all(FLERR, "Problem converting lammps_type to mace_type.");
+    error->all(FLERR, "Problem converting lammps_type to bam_type.");
     return -1;
 }
