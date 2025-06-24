@@ -811,8 +811,12 @@ class RACE(torch.nn.Module):
             )
         """
         # Embedding
-        species = data["species"]
-        node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
+        if "node_attrs" in data:
+            node_attrs = data["node_attrs"]  # Pre-calculated in C++
+            species = data["species"]
+        else:
+            species = data["species"]
+            node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
         #node_feats = self.emb(species)
         node_feats = self.node_embedding(node_attrs)
 
@@ -916,6 +920,7 @@ class RACE(torch.nn.Module):
         preds["energy"] = graph_energy # total energy
         preds["energy_var"] = graph_energy_var
         preds["forces_var"] = node_frc_var
+        preds["node_energy"] = node_energy
 
         forces: Optional[torch.Tensor] = None
         stress: Optional[torch.Tensor] = None

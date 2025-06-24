@@ -9,20 +9,17 @@ from bam_torch.utils.scatter import scatter_sum
 @compile_mode("script")
 class LAMMPS_BAM(torch.nn.Module):
     def __init__(
-            self, 
-            model, 
-            enr_avg_per_element: Optional[Dict[int, float]] = None, 
-            e_corr: float = 0.0, 
-            **kwargs
-        ):
+        self, 
+        model, 
+        enr_avg_per_element: Dict[int, float], 
+        e_corr: float = 0.0, 
+        **kwargs
+    ):
         super().__init__()
         self.model = model
         self.register_buffer("atomic_numbers", model.atomic_numbers)
         self.register_buffer("r_max", model.r_max)
         self.register_buffer("num_interactions", model.num_interactions)
-        
-        #self.register_buffer("lammps_shifts", torch.empty(0))
-        #self.register_buffer("lammps_displacement", torch.empty(0))
 
         if enr_avg_per_element is not None:
             max_mapped_val = max(enr_avg_per_element.keys())
@@ -49,13 +46,21 @@ class LAMMPS_BAM(torch.nn.Module):
             param.requires_grad = False
             
 
-    def forward(self, data: Dict[str, torch.Tensor], local_or_ghost: torch.Tensor, compute_virials: bool = False) -> Dict[str, Optional[torch.Tensor]]:
+    def forward(
+        self, 
+        data: Dict[str, torch.Tensor], 
+        local_or_ghost: torch.Tensor, 
+        compute_virials: bool = False
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        
         num_graphs = data["ptr"].numel() - 1
         data["head"] = self.head
-        data["num_nodes"] = torch.tensor(data["positions"].shape[0], dtype=torch.long, device=data["positions"].device)
+        data["num_nodes"] = torch.tensor(data["positions"].shape[0], 
+                                         dtype=torch.long, 
+                                         device=data["positions"].device)
 
-        out = self.model(data, backprop=True)
-
+        out = self.model(data, backprop=False)
+        """
         if "energy" not in out or out["energy"] is None:
             return {
                 "total_energy_local": None,
@@ -63,49 +68,38 @@ class LAMMPS_BAM(torch.nn.Module):
                 "forces": None,
                 "virials": None,
             }
+        """
+        #assert energy is not None, "Energy should not be None"
+        """
+        node_enr_avg = scatter_sum(
+            src=node_avg_energies,
+            index=data["batch"],
+            dim=0,
+            dim_size=num_graphs,
+        )
+        energy = energy + node_enr_avg + self.e_corr
+        """
 
-        energy = out["energy"]
-        assert energy is not None, "Energy should not be None"
+        node_energy = out["node_energy"]
+        assert node_energy is not None
+        forces = out["forces"]
         
-        if (self.enr_avg_per_element.numel() > 0 and "species" in data):
-            species = data["species"]
-            node_avg_energies = self.enr_avg_per_element[species]
-            
-            node_enr_avg = scatter_sum(
-                src=node_avg_energies,
-                index=data["batch"],
-                dim=0,
-                dim_size=num_graphs,
-            )
-            
-            energy = energy + node_enr_avg
-        
-        energy = energy + self.e_corr
-        
-        positions = data["positions"]
+        species = data["species"]
+        local_species = species[local_or_ghost]
+        local_node_avg_energies = self.enr_avg_per_element[local_species]
 
-        forces = torch.autograd.grad(
-            outputs=[energy.sum()],
-            inputs=[positions],
-            create_graph=True,
-            retain_graph=True,
-            allow_unused=True,
-        )[0]
+        node_energy[local_or_ghost] = node_energy[local_or_ghost] + local_node_avg_energies
+        energy = node_energy.sum()
 
-        if forces is not None:
-            forces = -forces
-        else:
-            forces = torch.zeros_like(positions)
-
-        num_nodes = positions.shape[0]
-        node_energy = torch.zeros(num_nodes, dtype=energy.dtype, device=energy.device)
-        
-        for i in range(num_graphs):
-            batch_mask = (data["batch"] == i)
-            nodes_in_graph = batch_mask.sum().item()
-            
-            if nodes_in_graph > 0:
-                node_energy[batch_mask] = energy[i] / nodes_in_graph
+        if self.e_corr != 0.0:
+            local_count = local_or_ghost.sum().item()
+            if "total_local_atoms" in data:  # if multi-GPU
+                total_system_atoms = data["total_local_atoms"].item()
+            else:  # if single-GPU
+                total_system_atoms = local_count
+            e_corr_per_local = self.e_corr / total_system_atoms
+            node_energy[local_or_ghost] = node_energy[local_or_ghost] + e_corr_per_local
+            energy = energy + (e_corr_per_local * local_count)
 
         """
         if hasattr(self.model, 'training_mode_for_lammps') and self.model.training_mode_for_lammps:
@@ -118,7 +112,6 @@ class LAMMPS_BAM(torch.nn.Module):
                     device=energy.device
                 )
         """
-
         node_energy_local = node_energy * local_or_ghost
         total_energy_local = scatter_sum(
             src=node_energy_local,

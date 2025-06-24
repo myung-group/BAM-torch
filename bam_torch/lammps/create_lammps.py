@@ -8,7 +8,7 @@ import torch
 from e3nn.util import jit
 from bam_torch.model import models as bam_models
 from bam_torch.model.models import get_edge_relative_vectors_with_pbc_lammps
-from lammps_bam import LAMMPS_BAM
+from bam_torch.lammps.lammps_bam import LAMMPS_BAM
 
 def main():
     input_json_path = find_input_json()
@@ -28,6 +28,9 @@ def main():
     print(f"enr_avg_per_element: {enr_avg_per_element}")
     print(f"e_corr: {e_corr}")
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
     model = torch.load("model.pt", weights_only=False)
     model.eval()
     
@@ -36,7 +39,7 @@ def main():
     model.num_interactions = torch.tensor(nlayers)
     model.r_max = torch.tensor(cutoff)
 
-    model = model.float().to("cpu")
+    model = model.float().to(device)
 
     bam_models.get_edge_relative_vectors_with_pbc = get_edge_relative_vectors_with_pbc_lammps
     model.training_mode_for_lammps = True
@@ -49,8 +52,9 @@ def main():
         enr_avg_per_element=enr_avg_per_element,
         e_corr=e_corr
     )
+    lammps_model = lammps_model.to(device)
     lammps_model_compiled = jit.compile(lammps_model)
-    lammps_model_compiled.save(model_path + "-lammps.pt")
+    lammps_model_compiled.save(f"{model_path.split('.')[0]}" + "-lammps.pt")
     
     print("LAMMPS model created successfully with node_enr_avg + e_corr!")
 

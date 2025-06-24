@@ -163,15 +163,17 @@ void PairBAM::compute(int eflag, int vflag)
     }
   }
 
-  // ----- species -----
+  // ----- species and node_attrs -----
+  int n_node_feats = bam_atomic_numbers.size();
   auto species = torch::zeros({n_nodes}, torch::kInt64);
+  auto node_attrs = torch::zeros({n_nodes, n_node_feats}, torch_float_dtype);
+
   #pragma omp parallel for
   for (int ii=0; ii<n_nodes; ++ii) {
-    int i = list->ilist[ii];
-    int atomic_num = lammps_atomic_numbers[atom->type[i] - 1];
-    for (int j = 0; j < bam_atomic_numbers.size(); ++j) {
-      if (atomic_num == bam_atomic_numbers[j]) species[i] = j;
-    }
+      int i = list->ilist[ii];
+      int bam_idx = bam_type(atom->type[i]) - 1;
+      species[i] = bam_idx;           // generate species
+      node_attrs[i][bam_idx] = 1.0;   // generate node_attrs
   }
 
   // ----- mask for ghost -----
@@ -193,6 +195,7 @@ void PairBAM::compute(int eflag, int vflag)
   batch = batch.to(device);
   cell = cell.to(device);
   edge_index = edge_index.to(device);
+  node_attrs = node_attrs.to(device);
   species = species.to(device);
   positions = positions.to(device);
   ptr = ptr.to(device);
@@ -209,11 +212,20 @@ void PairBAM::compute(int eflag, int vflag)
   input.insert("ptr", ptr);
   input.insert("cell", cell);
   input.insert("edge_index", edge_index);
+  input.insert("node_attrs", node_attrs);
   input.insert("unit_shifts", unit_shifts);
   input.insert("shifts", shifts);
   // input.insert("edges", edges); 
   input.insert("species", species);
   input.insert("weight", weight);
+  
+  // calculate the total number of local atoms
+  int total_local_atoms;
+  MPI_Allreduce(&(atom->nlocal), &total_local_atoms, 1, MPI_INT, MPI_SUM, world);
+
+  // pass to the model
+  auto system_size_tensor = torch::tensor(total_local_atoms, torch::kInt64);
+  input.insert("total_local_atoms", system_size_tensor.to(device));
   
   auto output = model.forward({input, mask, bool(vflag_global)}).toGenericDict();
 
