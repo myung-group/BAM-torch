@@ -96,3 +96,17 @@ $ lmp -h | grep bam
 
 >>> bam             born            buck            buck/coul/cut 
 ```
+
+If the above output does not appear, specify the path in your ```.bashrc``` as shown below.
+Then check again.
+```
+$ vi ~/.bashrc
+```
+```
+export PATH=/your_path/lammps/build:$PATH
+    ex) export PATH=$HOME/prog/lammps/build:$PATH
+```
+```
+$ source ~/.bashrc
+$ lmp -h | grep bam
+```
