@@ -70,7 +70,8 @@ $ git clone https://github.com/myung-group/lammps.git
 $ cd lammps
 $ mkdir build
 $ cd build
-cmake -D CMAKE_INSTALL_PREFIX=$(pwd) \
+$ cmake \
+      -D CMAKE_INSTALL_PREFIX=$(pwd) \
       -D CMAKE_CXX_STANDARD=17 \
       -D CMAKE_CXX_STANDARD_REQUIRED=ON \
       -D BUILD_MPI=ON \
@@ -86,12 +87,12 @@ $ make install
 
 Then, you will see a sentence like the one below.
 ```
-[ 85%] Building CXX object CMakeFiles/lammps.dir/home/gbsim/prog/lammps/src/ML-BAM/pair_bam.cpp.o
+[ 89%] Building CXX object CMakeFiles/lammps.dir/home/gbsim/prog/lammps/src/ML-BAM/pair_bam.cpp.o
 ```
 
 You can check like below,
 ```
 $ lmp -h | grep bam
 
->>> bam             born            buck            buck/coul/cut   buck/coul/cut/kk 
+>>> bam             born            buck            buck/coul/cut 
 ```
