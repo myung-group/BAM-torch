@@ -240,7 +240,7 @@ void PairBAM::compute(int eflag, int vflag)
   //   -> derivatives of total bam energy
   auto forces = output.at("forces").toTensor().cpu();
   #pragma omp parallel for
-  for (int ii=0; ii<n_nodes; ++ii) {
+  for (int ii=0; ii<atom->nlocal; ++ii) {
     int i = list->ilist[ii];
     atom->f[i][0] += forces[i][0].item<double>();
     atom->f[i][1] += forces[i][1].item<double>();
