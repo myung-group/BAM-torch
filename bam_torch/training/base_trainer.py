@@ -409,25 +409,30 @@ class BaseTrainer:
         self.msg = ''
         if device_config == 'cpu':
             device = 'cpu'
-            self.msg += f'\ndevice:\n\033[33m -- {device}\n'
+            self.msg += f'\ndevice:\n -- {device}\n'
             try:
                 from mpi4py import MPI
                 self.rank = MPI.COMM_WORLD.Get_rank()
                 size = MPI.COMM_WORLD.Get_size()
-                self.msg += f' -- number of cpu  {size}\033[0m\n'
+                self.msg += f' -- number of cpu  {size}\n'
             except:
-                self.msg += f' -- number of cpu  {torch.get_num_threads()}\033[0m\n'
+                self.msg += f' -- number of cpu  {torch.get_num_threads()}\n'
         else:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.msg += f'\ndevice:\n\033[33m -- {device}\n'
-            try:
+            if torch.cuda.is_available():
                 if self.ddp:
-                    torch.cuda.set_device(self.rank)
-                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
+                    # Use local rank for device in multi-node setup
+                    local_rank = self.rank % torch.cuda.device_count()
+                    torch.cuda.set_device(local_rank)
+                    device = torch.device(f"cuda:{local_rank}")
+                    self.msg += f'\ndevice:\n -- {device} (local_rank: {local_rank})\n'
+                    self.msg += f' -- number of gpu  {self.world_size}\n'
                 else:
-                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
-            except:
-                self.msg += f' -- number of gpu  1\033[0m\n'
+                    device = torch.device("cuda")
+                    self.msg += f'\ndevice:\n -- {device}\n'
+                    self.msg += f' -- number of gpu  {self.world_size}\n'
+            else:
+                device = torch.device("cpu")
+                self.msg += f'\ndevice:\n -- {device}\n'
 
         return device
 
@@ -471,7 +476,9 @@ class BaseTrainer:
             try:
                 model.load_state_dict(model_ckpt['params'])
                 if self.ddp:
-                    model = DDP(model, device_ids=[self.rank])
+                    # Use local rank for device_ids in multi-node setup
+                    local_rank = self.rank % torch.cuda.device_count()
+                    model = DDP(model, device_ids=[local_rank])
             except RuntimeError as e:
                 input_json = model_ckpt['input.json']
                 fname = self.save_input_parameters(input_json, 'input_json_from_trained_model.txt')
@@ -496,7 +503,9 @@ class BaseTrainer:
             start_epoch = 0
             model_ckpt = None
             if self.ddp:
-                model = DDP(model, device_ids=[self.rank])
+                # Use local rank for device_ids in multi-node setup
+                local_rank = self.rank % torch.cuda.device_count()
+                model = DDP(model, device_ids=[local_rank])
             self.msg += f'\n\033[32minitializing training, results will be saved in the {model_config["fname_pkl"]}\033[0m\n'
         
         # Check the number of parameters
