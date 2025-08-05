@@ -161,7 +161,7 @@ class CurvatureInterface:
                     grads.append(grad_reshaped)
             Js[name] = torch.cat(grads, dim=0).view(batch_size, output_dim, *param_shape)
         f = out
-        print(" Js_autograd: ", Js)
+        #print(" Js_autograd: ", Js)
         # Concatenate over flattened parameters
         Js = [
             j.flatten(start_dim=-p.dim())
@@ -204,8 +204,6 @@ class CurvatureInterface:
         Js, f = torch.func.jacrev(model_fn_params_only, has_aux=True)(
             self.params_dict, self.buffers_dict
         )
-
-        print(" Js:", Js)
 
         # Concatenate over flattened parameters
         Js = [

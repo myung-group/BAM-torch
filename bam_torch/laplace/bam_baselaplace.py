@@ -917,7 +917,14 @@ class ParametricLaplace(BaseLaplace):
             except:
                 X = data.to(self._device)
                 out = self.model(X)
-                out = out[self.dict_key_y]
+                #out = out[self.dict_key_y]
+                out = out[self.dict_key_y.split("_", 1)[0]]
+                if self.dict_key_y == "forces_x":
+                    out = out[:, 0]
+                elif self.dict_key_y == "forces_y":
+                    out = out[:, 1]
+                elif self.dict_key_y == "forces_z":
+                    out = out[:, 2]
 
         self.n_outputs = out.shape[-1]
         setattr(self.model, "output_size", self.n_outputs)
@@ -931,7 +938,14 @@ class ParametricLaplace(BaseLaplace):
             if isinstance(data, MutableMapping):  # To support Huggingface dataset
                 X, y = data, data[self.dict_key_y].to(self._device)
             elif isinstance(data, (Data, Batch)):
-                X, y = data, data[self.dict_key_y]
+                #X, y = data, data[self.dict_key_y]
+                X, y = data, data[self.dict_key_y.split("_", 1)[0]]
+                if self.dict_key_y == "forces_x":
+                    y = y[:, 0]
+                elif self.dict_key_y == "forces_y":
+                    y = y[:, 1]
+                elif self.dict_key_y == "forces_z":
+                    y = y[:, 2]
                 X, y = X.to(self._device), y.to(self._device)
                 #X['positions'].requires_grad_(True)
                 #X['cell'].requires_grad_(True)
@@ -1290,7 +1304,8 @@ class ParametricLaplace(BaseLaplace):
                 X, enable_backprop=self.enable_backprop
             )
         else:
-            Js, f_mu = self.backend.jacobians(X, enable_backprop=self.enable_backprop)
+            Js, f_mu = self.backend.jacobians(X, enable_backprop=self.enable_backprop, 
+                                                dict_key_y=self.dict_key_y)
 
         if joint:
             f_mu = f_mu.flatten()  # (batch*out)

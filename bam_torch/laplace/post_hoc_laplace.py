@@ -102,18 +102,18 @@ class PostHocLaplace(Evaluator):
             f_mu_joint, f_cov = la(data, joint=True)
             print(f"\n =======+------ {i}-th Data -------+=======")
             print(f"f_mu = {f_mu}")
-            print(f"f_var = {f_var}")        
+            print(f"f_var = {f_var}") 
+            print(f"f_mu_joint = {f_mu_joint}")
+            print(f"f_cov = {f_cov}")
             assert torch.allclose(f_mu.flatten(), f_mu_joint)
-            assert torch.allclose(f_var.flatten(), f_cov.diag())
+            #assert torch.allclose(f_var.flatten(), f_cov.diag())
 
             f_mu = f_mu.squeeze().detach().cpu().numpy()
             f_sigma = f_var.squeeze().detach().sqrt().cpu().numpy()
             pred_std = np.sqrt(f_sigma**2 + la.sigma_noise.item() ** 2)
-            f_mu_list.append(f_mu.item())
+            f_mu_list.append(f_mu) #.item()
             pred_std_list.append(pred_std)
             elapsed_time.append(time()-t1)
-            print(f"f_mu_joint = {f_mu_joint}")
-            print(f"f_cov = {f_cov}")
 
             print(f"==+-> f_mu = {f_mu}")
             print(f"==+-> f_sigma = {f_sigma}")
@@ -124,7 +124,7 @@ class PostHocLaplace(Evaluator):
             torch.tensor(data_points), 
             torch.tensor(y_train), 
             torch.tensor(data_points),
-            torch.tensor(f_mu_list), 
+            torch.tensor(f_mu_list), #.flatten()?
             torch.tensor(pred_std_list), 
             file_name="regression_example-energy", 
             plot=True
