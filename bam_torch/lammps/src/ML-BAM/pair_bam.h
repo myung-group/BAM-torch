@@ -48,6 +48,7 @@ class PairBAM : public Pair {
  protected:
 
   bool domain_decomposition = true;
+  double user_cutoff = -1.0;
   torch::Device device = torch::kCPU;
   torch::jit::script::Module model;
   torch::ScalarType torch_float_dtype;

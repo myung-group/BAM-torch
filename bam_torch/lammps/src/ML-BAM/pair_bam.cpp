@@ -281,14 +281,16 @@ void PairBAM::compute(int eflag, int vflag)
 
 void PairBAM::settings(int narg, char **arg)
 {
-  if (narg > 1) {
-    error->all(FLERR, "Too many pair_style arguments for pair_style bam.");
-  }
-
-  if (narg == 1) {
-    if (strcmp(arg[0], "no_domain_decomposition") == 0) {
+  domain_decomposition = true;
+  user_cutoff = -1.0;
+  
+  for (int i = 0; i < narg; i++) {
+    if (strcmp(arg[i], "no_domain_decomposition") == 0) {
       domain_decomposition = false;
-      // TODO: add check against MPI rank
+    } else if (strcmp(arg[i], "cutoff") == 0) {
+      if (i+1 >= narg) error->all(FLERR, "Missing cutoff value for pair_style bam.");
+      user_cutoff = utils::numeric(FLERR, arg[i+1], false, lmp);
+      i++; // skip next argument
     } else {
       error->all(FLERR, "Unrecognized argument for pair_style bam.");
     }
@@ -386,8 +388,11 @@ void PairBAM::init_style()
 
 double PairBAM::init_one(int i, int j)
 {
-  // to account for message passing, require cutoff of n_layers * r_max
-  return num_interactions*model.attr("r_max").toTensor().item<double>();
+  if (user_cutoff > 0.0) {
+    return user_cutoff;
+  }
+  // default: 
+  return num_interactions * r_max;
 }
 
 void PairBAM::allocate()
