@@ -27,7 +27,6 @@ class BaseTrainer:
         """ The json_data (dict.) should include the following information
         ...
         """
-        self.time_log = open(f'time_log-{rank}.txt', 'w')
         self.json_data = json_data
         self.rank = rank
         self.world_size = world_size
@@ -93,15 +92,13 @@ class BaseTrainer:
         nepoch = self.json_data['NN']['nepoch']
         ## 11) Main loop
         for epoch in range(nepoch):
-            #self.train_loader.sampler.set_epoch(epoch)
-            print(f"\n---------- Train - Epoch : {epoch} ----------", file=self.time_log)
+            self.model.update_criterion_value(epoch)
             epoch_loss_train = self.train_one_epoch(mode='train')
             #check_parameter_sync(self.model, self.rank)
             if self.ddp:
                 torch.distributed.barrier()
 
             if (epoch+1)%self.log_interval == 0:
-                print(f"\n---------- Valid - Epoch : {epoch} ----------", file=self.time_log)
                 epoch_loss_valid = self.train_one_epoch(mode='valid')
                 if self.ddp:
                     torch.distributed.barrier()
@@ -121,11 +118,6 @@ class BaseTrainer:
                         self.ckpt['scheduler'] = self.scheduler.state_dict()
                         self.ckpt['loss'] = self.loss_dict
                         self.l_ckpt_saved = False
-
-                    if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                        torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                        torch.save(deepcopy(self.model), 'model.pt')
-                        self.l_ckpt_saved = True
                 
                     # Get the last learning rate
                     if self.json_data['scheduler'] != "Null":
@@ -148,6 +140,11 @@ class BaseTrainer:
                 else:
                     metrics = None
                 self.scheduler.step(metrics, epoch)
+            
+            if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                torch.save(deepcopy(self.model), 'model.pt')
+                self.l_ckpt_saved = True
 
     def train_one_epoch(self, mode='train', data_loader=None):
         if mode == 'train':
@@ -173,16 +170,10 @@ class BaseTrainer:
             if mode == 'valid':
                 self.ckpt['valid_scale_shift'] = []
 
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
             data = self.move_to_device(data, self.device)
-            #data.to(self.device)
             #data = self.data_to_dict(data)  # This is for torch.jit compile
-            start.record()
-            #preds = self.model(deepcopy(data), backprop)
             preds = self.model(data, backprop)
             preds = self.scale_shift(preds, data, mode)
 
@@ -195,16 +186,12 @@ class BaseTrainer:
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
-                end.record()
                 torch.cuda.synchronize()
                 #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
                 torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                 self.optimizer.step()
             else:
-                end.record()
                 torch.cuda.synchronize()
-            elapsed_time = start.elapsed_time(end)
-            print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True) 
         
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
                            for key, value in epoch_loss_dict.items()}      
@@ -215,6 +202,7 @@ class BaseTrainer:
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         preds["energy"] = energy_predict + shift_enr
+        #element_wise_shift = shift_enr / data["num_nodes"]
         if mode == 'train':
             self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
         elif mode == 'valid':
@@ -409,14 +397,14 @@ class BaseTrainer:
         self.msg = ''
         if device_config == 'cpu':
             device = 'cpu'
-            self.msg += f'\ndevice:\n -- {device}\n'
+            self.msg += f'\ndevice:\n\033[33m -- {device}\n'
             try:
                 from mpi4py import MPI
                 self.rank = MPI.COMM_WORLD.Get_rank()
                 size = MPI.COMM_WORLD.Get_size()
-                self.msg += f' -- number of cpu  {size}\n'
+                self.msg += f' -- number of cpu  {size}\n\033[0m\n'
             except:
-                self.msg += f' -- number of cpu  {torch.get_num_threads()}\n'
+                self.msg += f' -- number of cpu  {torch.get_num_threads()}\033[0m\n'
         else:
             if torch.cuda.is_available():
                 if self.ddp:
@@ -424,12 +412,12 @@ class BaseTrainer:
                     local_rank = self.rank % torch.cuda.device_count()
                     torch.cuda.set_device(local_rank)
                     device = torch.device(f"cuda:{local_rank}")
-                    self.msg += f'\ndevice:\n -- {device} (local_rank: {local_rank})\n'
-                    self.msg += f' -- number of gpu  {self.world_size}\n'
+                    self.msg += f'\ndevice:\n\033[33m -- {device} (local_rank: {local_rank})\n'
+                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
                 else:
                     device = torch.device("cuda")
-                    self.msg += f'\ndevice:\n -- {device}\n'
-                    self.msg += f' -- number of gpu  {self.world_size}\n'
+                    self.msg += f'\ndevice:\n\033[33m -- {device}\n'
+                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
             else:
                 device = torch.device("cpu")
                 self.msg += f'\ndevice:\n -- {device}\n'
@@ -460,6 +448,11 @@ class BaseTrainer:
         model = self.set_model() # Set self.model
         #scripted_model = jit.compile(model)
         model.to(self.device)
+
+        # Set criterion for direct force training
+        criterion = self.json_data.get("criterion")
+        criterion_value = self.json_data.get("criterion_value")
+        model.set_criterion(criterion, criterion_value)
 
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
@@ -535,8 +528,8 @@ class BaseTrainer:
         if active_fn == None:
             active_fn = "identity"
         regress_forces = model_config.get('regress_forces')
-        if regress_forces:
-            regress_forces = "direct"
+        if regress_forces == True:
+            regress_forces = "autograd"
         
         cueq_config = model_config.get('cueq_config')  # true or false
         if cueq_config == None or cueq_config:

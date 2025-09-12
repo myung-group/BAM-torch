@@ -9,7 +9,7 @@ from torch.jit import annotate
 import torch
 import torch.nn
 import torch.utils.data
-from bam_torch.utils.scatter import scatter_sum
+from bam_torch.utils.scatter import scatter_sum, scatter_mean
 
 
 def compute_forces(
@@ -265,3 +265,81 @@ def get_outputs(
 
     return forces, virials, stress, hessian
 
+
+def _compute_net_torque(
+    positions: torch.Tensor,
+    forces: torch.Tensor,
+    n_nodes: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute the net torque on a system of particles."""
+    com = scatter_mean(positions, n_nodes, dim=0)
+    com_repeat = com[n_nodes]  # Shape: (N, 3)
+    com_relative_positions = positions - com_repeat  # Shape: (N, 3)
+    torques = torch.linalg.cross(com_relative_positions, forces)  # Shape: (N, 3)
+    net_torque = scatter_sum(torques, n_nodes, dim=0)
+    return net_torque, com_relative_positions
+
+def remove_net_torque(
+    positions: torch.Tensor,
+    forces: torch.Tensor,
+    n_nodes: torch.Tensor,
+) -> torch.Tensor:
+    """Adjust the predicted forces to eliminate net torque for each graph in the batch.
+
+    The mathematical derivation of this function is given here:
+    https://www.notion.so/orbitalmaterials/Net-torque-removal-11f56117b79780dfbbb9ce78e245be38?pvs=4
+
+    The naming conventions here match those in the derivation.
+
+    Args:
+        positions : torch.Tensor of shape (N, 3)
+            Positions of atoms (concatenated for all graphs in the batch).
+        forces : torch.Tensor of shape (N, 3)
+            Predicted forces on atoms.
+        n_nodes : torch.Tensor of shape (B,)
+            Number of nodes in each graph, where B is the number of graphs in the batch.
+
+    Returns:
+        adjusted_forces : torch.Tensor of shape (N, 3)
+            Adjusted forces with zero net torque and net force for each graph.
+    """
+    # B = n_nodes.shape[0]
+    uniq_n_nodes = torch.unique(n_nodes)
+    B = uniq_n_nodes.shape[0]
+    tau_total, r = _compute_net_torque(positions, forces, n_nodes)
+
+    # Compute scalar s per graph: sum_i ||r_i||^2
+    r_squared = torch.sum(r**2, dim=1)  # Shape: (N,)
+    s = scatter_sum(r_squared, n_nodes, dim=0)  # Shape: (B,)
+
+    # Compute matrix S per graph: sum_i outer(r_i, r_i)
+    r_unsqueezed = r.unsqueeze(2)  # Shape: (N, 3, 1)
+    r_T_unsqueezed = r.unsqueeze(1)  # Shape: (N, 1, 3)
+    outer_products = r_unsqueezed @ r_T_unsqueezed  # Shape: (N, 3, 3)
+    S = scatter_sum(outer_products, n_nodes, dim=0)  # Shape: (B, 3, 3)
+
+    # Compute M = S - sI
+    I = (  # noqa: E741
+        torch.eye(3, device=positions.device).unsqueeze(0).expand(B, -1, -1)
+    )  # Shape: (B, 3, 3)
+    M = S - (s.view(-1, 1, 1)) * I  # Shape: (B, 3, 3)
+
+    # Right-hand side vector b per graph
+    b = -tau_total  # Shape: (B, 3)
+
+    # Solve M * mu = b for mu per graph
+    try:
+        mu = torch.linalg.solve(M, b.unsqueeze(2)).squeeze(2)  # Shape: (B, 3)
+    except RuntimeError:
+        # Handle singular matrix M by using the pseudo-inverse
+        M_pinv = torch.linalg.pinv(M)  # Shape: (B, 3, 3)
+        mu = torch.bmm(M_pinv, b.unsqueeze(2)).squeeze(2)  # Shape: (B, 3)
+
+    # Compute adjustments to forces
+    mu_batch = mu[n_nodes]  # Shape: (N, 3)
+    forces_delta = torch.linalg.cross(r, mu_batch)  # Shape: (N, 3)
+
+    # Adjusted forces
+    adjusted_forces = forces + forces_delta  # Shape: (N, 3)
+
+    return adjusted_forces

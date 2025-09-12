@@ -976,8 +976,33 @@ class LinearReadoutBlock(torch.nn.Module):
         return self.linear(x)  # [n_nodes, 1]
 
 
+@compile_mode("script")
+class LinearForceDecoderBlock(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        irrep_out: o3.Irreps,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+    ):
+        super().__init__()
+        self.linear_1 = Linear(
+            irreps_in=irreps_in, irreps_out=irrep_out, cueq_config=cueq_config
+        )
+    def forward(
+        self,
+        x: torch.Tensor,
+        heads: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
+    ) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
+        x = self.linear_1(x)
+        #x = self.linear_2(x)
+        #x = self.non_linearity(x)
+        #x = self.linear_3(x)
+        return x  # [n_nodes, 1]
+
+
 @simplify_if_compile
 @compile_mode("script")
+
 class NonLinearReadoutBlock(torch.nn.Module):
     def __init__(
         self,
@@ -986,28 +1011,70 @@ class NonLinearReadoutBlock(torch.nn.Module):
         gate: Optional[Callable],
         irrep_out: o3.Irreps = o3.Irreps("0e"),
         num_heads: int = 1,
-        cueq_config: Optional[CuEquivarianceConfig] = None,
+        cueq_config: Optional = None,
     ):
         super().__init__()
         self.hidden_irreps = MLP_irreps
         self.num_heads = num_heads
+
         self.linear_1 = Linear(
-            irreps_in=irreps_in, irreps_out=self.hidden_irreps, cueq_config=cueq_config
-        )
-        self.non_linearity = nn.Activation(irreps_in=self.hidden_irreps, acts=[gate])
-        self.linear_2 = Linear(
-            irreps_in=self.hidden_irreps, irreps_out=irrep_out, cueq_config=cueq_config
+            irreps_in=irreps_in,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config
         )
 
-    def forward(
-        self, x: torch.Tensor, heads: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
-        
+        self.non_linearity = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=[gate]
+        )
+
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=irrep_out,
+            cueq_config=cueq_config
+        )
+
+    def forward(self, x: torch.Tensor, heads: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.non_linearity(self.linear_1(x))
-        if hasattr(self, "num_heads"):
-            if self.num_heads > 1 and heads is not None:
-                x = mask_head(x, heads, self.num_heads)
-        return self.linear_2(x)  # [n_nodes, len(heads)]
+        if self.num_heads > 1 and heads is not None:
+            x = mask_head(x, heads, self.num_heads)
+        return self.linear_2(x)
+
+class NonLinearForceReadoutBlock(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        MLP_irreps: o3.Irreps,
+        gate: Optional[Callable],
+        irrep_out: o3.Irreps = o3.Irreps("0e"),
+        num_heads: int = 1,
+        cueq_config: Optional = None,
+    ):
+        super().__init__()
+        self.hidden_irreps = MLP_irreps
+        self.num_heads = num_heads
+
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config
+        )
+
+        self.non_linearity = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=[gate,gate,gate]
+        )
+
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=irrep_out,
+            cueq_config=cueq_config
+        )
+    def forward(self, x: torch.Tensor, heads: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = self.non_linearity(self.linear_1(x))
+        if self.num_heads > 1 and heads is not None:
+            x = mask_head(x, heads, self.num_heads)
+        return self.linear_2(x)
 
 
 @compile_mode("script")

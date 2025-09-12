@@ -22,11 +22,17 @@ from .blocks import (
     LinearReadoutBlock,
     NonLinearReadoutBlock,
     RadialEmbeddingBlock,
-    ScaleShiftBlock
+    ScaleShiftBlock,
+    LinearForceDecoderBlock,
+    NonLinearForceReadoutBlock
 )
 from .wrapper_ops import Linear
 from bam_torch.utils.scatter import scatter_sum, scatter_mean
-from bam_torch.utils.output_utils import get_outputs, get_symmetric_displacement
+from bam_torch.utils.output_utils import (
+    get_outputs, 
+    get_symmetric_displacement,
+    remove_net_torque
+)
 
 
 def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -672,6 +678,8 @@ class RACE(torch.nn.Module):
         self.compute_stress = compute_stress
         self.num_species = num_species
         self.output_irreps = o3.Irreps(output_irreps)
+        hidden_irreps = hidden_irreps.sort().irreps
+        self.hidden_irreps = hidden_irreps
         
         if heads is None:
             heads = ["default"]
@@ -726,6 +734,8 @@ class RACE(torch.nn.Module):
         self.interactions = torch.nn.ModuleList()
         self.products = torch.nn.ModuleList()
         self.readouts = torch.nn.ModuleList()
+        self.force_decoders = torch.nn.ModuleList()
+
         target_irreps = o3.Irreps(f"{hidden_irreps.count(o3.Irrep(0, 1))}x0e")
         for i in range(nlayers):
             if i > 0: 
@@ -763,6 +773,17 @@ class RACE(torch.nn.Module):
                 cueq_config=cueq_config,
             )
             self.readouts.append(readout) # [n_nodes, output_irreps.count(o3.Irrep(0, 1))]
+
+            if "direct" in self.regress_forces:
+                force_decoder = LinearForceDecoderBlock(
+                    irreps_in=hidden_irreps,
+                    irrep_out="1x1o",
+                    cueq_config=cueq_config,
+                )
+
+            else:
+                force_decoder = None
+            self.force_decoders.append(force_decoder)
 
         #self.emb = torch.nn.Embedding(num_embeddings=num_species, embedding_dim=num_species)
     
@@ -838,9 +859,10 @@ class RACE(torch.nn.Module):
         node_logvar = [] 
         node_f_logvar = [] 
         node_feats_list = []
+        frc_out = []
         x_node_feats = self.linear_x(node_feats)
-        for interaction, product, readout in zip(
-            self.interactions, self.products, self.readouts
+        for interaction, product, readout, force_decoder in zip(
+            self.interactions, self.products, self.readouts, self.force_decoders
         ):
             node_feats, sc = interaction(
                 node_attrs=node_attrs,
@@ -855,6 +877,17 @@ class RACE(torch.nn.Module):
                 sc=sc, 
             )
             node_energies = readout(node_feats, node_heads) # [n_nodes, len(heads)]  == [nbatch*num_nodes, "1x0e" or "2x0e"]
+            
+            if "direct" in self.regress_forces:
+                l_0_dim = sum([mul for mul, (l, p) in self.hidden_irreps if str(l) == "0"])
+                l_1_dim = sum([mul for mul, (l, p) in self.hidden_irreps if str(l) == "1"])
+                node_feats_1o = node_feats[:, l_0_dim:l_0_dim+l_1_dim*3]
+                force_magnitude = torch.norm(node_feats_1o, dim =-1, keepdim = True)
+                force_direction = node_feats / force_magnitude
+                node_force_dir = force_decoder(force_direction)
+                node_forces = node_energies*node_force_dir #node_energies*node_force_dir
+                #node_forces = force_decoder(node_feats)
+                frc_out.append(node_forces)
             node_feats_list.append(node_feats)
             
             outputs.append(node_energies[:,0])
@@ -866,7 +899,7 @@ class RACE(torch.nn.Module):
 
         # Concatenate node features
         #node_feats_out = torch.cat(node_feats_list, dim=-1)
-
+        
         # Sum over energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
         node_energy = self.act_fn(node_energy)
@@ -924,7 +957,15 @@ class RACE(torch.nn.Module):
 
         forces: Optional[torch.Tensor] = None
         stress: Optional[torch.Tensor] = None
-        if self.regress_forces == 'direct' or self.regress_forces:
+        #print(self.criterion_value, self.criterion, self.regress_forces)
+        if self.criterion < self.criterion_value:
+            self.regress_forces = "auto"
+            #print(self.criterion_value, self.criterion, self.regress_forces)
+        else:
+            self.regress_forces = "direct"
+
+        if "auto" in self.regress_forces:
+            #print(" \n ** AUTOGRAD ** \n")
             forces, virials, stress, hessian = get_outputs(
                 energy=graph_energy,
                 positions=data["positions"],
@@ -941,9 +982,43 @@ class RACE(torch.nn.Module):
             preds["forces"] = forces
             preds["stress"] = stress
             #preds["virials"] = virials
+        elif "direct" in self.regress_forces:
+            #print(" \n ** DIRECT ** \n")
+            #print(self.criterion_value,'|',self.criterion)
+            node_force = torch.stack(frc_out, dim=-1) # [nbatch*num_nodes, nlayers]
+            node_force = self.act_fn(node_force)
+            forces = torch.sum(node_force, dim=-1) # [nbatch*num_nodes]  # total_energy
+
+            system_means = scatter_mean(forces, data["batch"], dim=0)
+            node_boradcasteds_means = system_means[data["batch"]]
+            forces = forces - node_boradcasteds_means
+            forces = remove_net_torque(data["positions"], forces, data["batch"])
+            # Global pooling
+            preds["forces"] = forces
         #print(node_energy)
 
         return preds
+    
+    def set_criterion(self, criterion_tag, criterion):
+        self.criterion_tag = criterion_tag
+        if "direct" in self.regress_forces:
+            if criterion_tag == None:
+                criterion_tag = "epoch" 
+        
+        self.criterion = criterion
+        if criterion_tag == "epoch":
+            if criterion == None:
+                self.criterion = 50
+                self.criterion_value = 0
+        elif criterion_tag == "loss":
+            if criterion == None:
+                self.criterion = 0.01
+                self.criterion_value = 0.1
+                
+        self.criterion_value = 0
+    
+    def update_criterion_value(self, value):
+        self.criterion_value = value
       
 
 def get_edge_relative_vectors_with_pbc(data: Dict[str, torch.Tensor]):
@@ -1026,6 +1101,3 @@ def determine_atomic_inter_shift(mean, heads):
     return [0.0] * len(heads)
 
 
-
-
-        

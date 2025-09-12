@@ -19,6 +19,7 @@ class Evaluator(BaseTrainer):
         self.rank = 0
         self.world_size = 0
         self.date1 = date()
+        self.ddp = False
 
         ## 1) Reproducibility
         self.set_random_seed()
@@ -55,10 +56,11 @@ class Evaluator(BaseTrainer):
             data = data.to(self.device)
             target['energy'] = data['energy']
             species = data['species']
-            node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
+            node_enr_avg = torch.tensor(
+                [self.enr_avg_per_element[int(iz)] for iz in species],
+                ).sum()
             preds = self.model(data, backprop=False)
-
-            preds['energy'] = preds["energy"] + node_enr_avg + e_corr
+            preds['energy'] = preds["energy"] + node_enr_avg + e_corr # *species
             loss_dict = self.compute_loss(preds, data)
             for l in total_loss_dict.keys(): # predict part
                 total_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
