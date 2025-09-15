@@ -72,7 +72,7 @@ class BaseModel(nn.Module):
                 if mode == "train":
                     # Store the energy gradient as target for "direct_with_gradient_target"
                     # Use it as a metric only in "direct" mode.
-                    preds["forces_grad_target"] = grad_forces#.detach()
+                    preds["forces_grad_target"] = grad_forces.detach()
             else:
                 raise ValueError(
                     f"Unknown forces regression mode {self.regress_forces}"

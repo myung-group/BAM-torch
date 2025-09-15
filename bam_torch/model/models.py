@@ -43,7 +43,8 @@ def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
 
     # scatter_ is the in-place version of scatter
     #oh.scatter_(dim=-1, index=indices, value=1)
-    return oh.scatter_(-1, indices, 1.0)
+    oh = oh.scatter_(-1, indices, 1.0)
+    return oh
     #return oh.view(*shape)  ## similar with torch.nn.Embedding
 
 
@@ -774,15 +775,15 @@ class RACE(torch.nn.Module):
         # assert Rij.ndim == 2 and Rij.shape[1] == 3
         # iatoms ==> senders     # edge_index[0]
         # jatoms ==> receivers   # edge_index[1]
-        cell = data["cell"]
-        cell.requires_grad_(True)
-        R = data["positions"]
-        R.requires_grad_(True)
+        #cell = data["cell"]
+        data["cell"].requires_grad_(True)
+        #R = data["positions"]
+        data["positions"].requires_grad_(True)
         #n_edges: List[int] = annotate(List[int], data["num_edges"].cpu().tolist())
         #print(data["num_edges"])
         #if True:
-        n_edges = data["num_edges"].tolist()
-        Rij = get_edge_relative_vectors_with_pbc(R, cell, n_edges, data)
+        #n_edges: List[int] = data["num_edges"].tolist()
+        Rij = get_edge_relative_vectors_with_pbc(data)
         #else:
         #    Rij = get_edge_relative_vectors_with_pbc_padding(R, cell, data)
         Rij = Rij / self.cutoff
@@ -811,18 +812,22 @@ class RACE(torch.nn.Module):
             )
         """
         # Embedding
-        species = data["species"]
-        node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
+        if "node_attrs" in data:
+            node_attrs = data["node_attrs"]  # Pre-calculated in C++
+            species = data["species"]
+        else:
+            species = data["species"]
+            node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
         #node_feats = self.emb(species)
         node_feats = self.node_embedding(node_attrs)
 
         edge_index = data["edge_index"]
         lengths = torch.norm(Rij, dim=1)
 
-        #nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
-        #Rij = Rij[nonzero_idx]
-        #lengths = lengths[nonzero_idx]
-        #edge_index = edge_index[:, nonzero_idx]
+        nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
+        Rij = Rij[nonzero_idx]
+        lengths = lengths[nonzero_idx]
+        edge_index = edge_index[:, nonzero_idx]
         # R = R[nonzero_idx]
         
         edge_attrs = self.spherical_harmonics(Rij)
@@ -854,9 +859,9 @@ class RACE(torch.nn.Module):
             node_feats_list.append(node_feats)
             
             outputs.append(node_energies[:,0])
-            if self.output_irreps == o3.Irreps("2x0e"):
+            if str(self.output_irreps) == "2x0e":
                 node_logvar.append(node_energies[:,1])
-            elif self.output_irreps == o3.Irreps("8x0e"):
+            elif str(self.output_irreps) == "8x0e":
                 node_logvar.append(node_energies[:,1])
                 node_f_logvar.append(node_energies[:,2:])
 
@@ -878,19 +883,21 @@ class RACE(torch.nn.Module):
             )
         #print(f"graph_energy = {graph_energy}")
 
+        node_logvar_ts = torch.zeros(node_feats.shape[0], device=node_energy.device)
+        node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), device=node_energy.device)
         # Uncertainty quantification
-        if self.output_irreps == o3.Irreps("8x0e"):
+        if str(self.output_irreps) == "8x0e":
             node_logvar_ts = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
             node_logvar_ts = node_logvar_ts.mean(dim=-1) # [nbatch*num_nodes]
             # force variance L Voigt notation - xx, yy, zz, yz, xz, xy
             node_f_logvar_ts = torch.stack(node_f_logvar, dim=-1) # [nbatch*num_nodes, 6, nlayers]
             node_f_logvar_ts = node_f_logvar_ts.mean(dim=-1) # [nbatch*num_nodes, 6]
-        elif self.output_irreps == o3.Irreps("2x0e"):
+        elif str(self.output_irreps) == "2x0e":
             node_logvar_ts = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
             node_logvar_ts = node_logvar_ts.mean(dim=-1) # [nbatch*num_nodes]
             node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), 
                                            device=node_energy.device)
-        elif self.output_irreps == o3.Irreps("1x0e"):
+        elif str(self.output_irreps) == "1x0e":
             node_logvar_ts = torch.zeros(node_feats.shape[0], 
                                          device=node_energy.device)
             node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), 
@@ -914,15 +921,16 @@ class RACE(torch.nn.Module):
         preds["energy"] = graph_energy # total energy
         preds["energy_var"] = graph_energy_var
         preds["forces_var"] = node_frc_var
+        preds["node_energy"] = node_energy
 
         forces: Optional[torch.Tensor] = None
         stress: Optional[torch.Tensor] = None
         if self.regress_forces == 'direct' or self.regress_forces:
             forces, virials, stress, hessian = get_outputs(
                 energy=graph_energy,
-                positions=R,
+                positions=data["positions"],
                 displacement=displacement,
-                cell=cell,
+                cell=data["cell"],
                 batch_idx=data["batch"],
                 num_graphs=num_graphs,
                 training=backprop,
@@ -933,24 +941,22 @@ class RACE(torch.nn.Module):
             )
             preds["forces"] = forces
             preds["stress"] = stress
-            #preds["virials"] = virials
+            preds["virials"] = virials
+        #print(node_energy)
 
         return preds
       
 
-def get_edge_relative_vectors_with_pbc (
-        R: torch.Tensor, 
-        cell: torch.Tensor, 
-        n_edges: List[int],
-        data_graph: Dict[str, torch.Tensor]):
+def get_edge_relative_vectors_with_pbc(data: Dict[str, torch.Tensor]):
     # iatoms ==> senders
     # jatoms ==> receivers
-    iatoms = data_graph["edge_index"][0]  # shape = (b * n_edges)
-    jatoms = data_graph["edge_index"][1]  # shape = (b * n_edges) 
-    Sij = data_graph["edges"]   # shape = (b * n_edges, 3)
-    #cell = data_graph["cell"]   # shape = (b, 3, 3)
-    #n_edges = data_graph["num_edges"] # [n_edge_1, n_edge_2, ..., n_edge_N]
-
+    R = data["positions"]
+    cell = data["cell"]
+    iatoms = data["edge_index"][0]  # shape = (b * n_edges)
+    jatoms = data["edge_index"][1]  # shape = (b * n_edges) 
+    Sij = data["edges"]   # shape = (b * n_edges, 3)
+    n_edges: List[int] = data["num_edges"].tolist()
+    
     Sij = torch.split(Sij, n_edges, dim=0)
     shift_v = torch.cat(
         [torch.einsum('ni,ij->nj', s, c)
@@ -965,17 +971,17 @@ def get_edge_relative_vectors_with_pbc (
 def get_edge_relative_vectors_with_pbc_padding (
         R: torch.Tensor, 
         cell: torch.Tensor, 
-        data_graph: Dict[str, torch.Tensor]):
+        data: Dict[str, torch.Tensor]):
     # iatoms ==> senders
     # jatoms ==> receivers
     #data_graph["cell"].requires_grad_(True)
-    iatoms = data_graph["edge_index"][0]  # shape = (b * n_edges)
-    jatoms = data_graph["edge_index"][1]  # shape = (b * n_edges) 
-    Sij = data_graph["edges"]   # shape = (b * n_edges, 3)
-    #cell = data_graph["cell"]   # shape = (b, 3, 3)
+    iatoms = data["edge_index"][0]  # shape = (b * n_edges)
+    jatoms = data["edge_index"][1]  # shape = (b * n_edges) 
+    Sij = data["edges"]   # shape = (b * n_edges, 3)
+    #cell = data["cell"]   # shape = (b, 3, 3)
 
     b, _, _ = cell.shape
-    n_edges = data_graph["num_edges"][0]
+    n_edges = data["num_edges"][0]
 
     repeated_cell = torch.repeat_interleave(cell, repeats=n_edges, dim=0)
     repeated_cell =  repeated_cell.reshape(b, n_edges, 3, 3)
@@ -989,6 +995,21 @@ def get_edge_relative_vectors_with_pbc_padding (
 
     return Rij # (num_edges, 3)
 
+def get_edge_relative_vectors_with_pbc_lammps(
+        data: Dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+    """
+    For LAMMPS export (for wrapping).
+    Directly use shifts without re-computing them.
+    """
+    R = data["positions"]
+    iatoms = data["edge_index"][0]
+    jatoms = data["edge_index"][1]
+    shifts = data["shifts"]
+
+    Rij = R[jatoms] - R[iatoms] + shifts
+
+    return Rij
 
 def determine_atomic_inter_shift(mean, heads):
     if isinstance(mean, np.ndarray):

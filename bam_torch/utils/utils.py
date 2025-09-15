@@ -15,6 +15,40 @@ from copy import deepcopy
 from datetime import datetime
 from .sampler import DistributedBalancedAtomCountBatchSampler
 
+def batched_gram_schmidt_3d(bvv):
+    assert bvv.ndim == 3
+    assert bvv.shape[1] == bvv.shape[2] == 3
+
+    def projection(bu, bv):
+        return (bv * bu).sum(-1, keepdim=True) / (bu * bu).sum(-1, keepdim=True) * bu
+
+    buu = torch.zeros_like(bvv)
+    buu[:, :, 0] = bvv[:, :, 0].clone()
+
+    # k = 1 start
+    bv1 = bvv[:, :, 1].clone()
+    bu1 = torch.zeros_like(bv1)
+    # j = 0
+    bu0 = buu[:, :, 0].clone()
+    bu1 = bu1 + projection(bu0, bv1)
+    # k = 1 end
+    buu[:, :, 1] = bv1 - bu1
+
+    # k = 2 start
+    bv2 = bvv[:, :, 2].clone()
+    bu2 = torch.zeros_like(bv2)
+    # j = 0
+    bu0 = buu[:, :, 0].clone()
+    bu2 = bu2 + projection(bu0, bv2)
+    # j = 1
+    bu1 = buu[:, :, 1].clone()
+    bu2 = bu2 + projection(bu1, bv2)
+    # k = 2 end
+    buu[:, :, 2] = bv2 - bu2
+
+    # normalize
+    buu = torch.nn.functional.normalize(buu, dim=1)
+    return buu
 
 def apply_along_axis(func1d, axis: int, arr: torch.Tensor):
     num_dims = arr.ndim
@@ -93,6 +127,8 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             stress = np.zeros(6)
         else:
             frc = np.zeros((len(atoms), 3))
+            volume = np.zeros(1)
+            stress = np.zeros(6)
 
         cell = atoms.get_cell()
         if np.all(cell == [0.0, 0.0, 0.0]):
@@ -143,6 +179,81 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
 
     return graph_list
 
+def get_graphset_(data, cutoff, uniq_element, enr_avg_per_element, 
+                 enr_var, regress_forces=True, max_neigh=None):
+    graph_list = []
+    for atoms in data:
+        crds = atoms.get_positions()
+        node_enr_avg = np.array([enr_avg_per_element[uniq_element[iz]]
+                                  for iz in atoms.numbers])
+        #enr = (atoms.get_potential_energy() - node_enr_avg.sum()) / enr_var
+        enr = atoms.get_potential_energy() - node_enr_avg.sum()
+
+        if regress_forces or regress_forces == 'direct':
+            frc = atoms.get_forces()
+            volume = atoms.get_volume()
+            stress = np.zeros(6)
+        else:
+            frc = np.zeros((len(atoms), 3))
+            volume = np.zeros(1)
+            stress = np.zeros(6)
+
+        cell = atoms.get_cell()
+        if np.all(cell == [0.0, 0.0, 0.0]):
+            cell = np.diag([30., 30., 30.])
+            atoms.set_cell(cell)
+        
+        if 'stress' in atoms._calc.results.keys():
+            stress = atoms.get_stress()
+    
+        iatoms, jatoms, Sij = neighbour_list(quantities='ijS',
+                                             atoms=atoms,
+                                             cutoff=cutoff)
+        species = np.array([uniq_element[iz] for iz in atoms.numbers])
+        num_nodes = crds.shape[0] 
+        num_edges = iatoms.shape[0]
+
+        Rij, dist = get_relative_vector(atoms, iatoms, jatoms, Sij)
+
+        # Sort neighbors by distance, remove edges larger than max_neighbors
+        if max_neigh != None:
+            nonmax_idx = []
+            for i in range(len(atoms)):
+                idx_i = (iatoms == i).nonzero()[0]
+                idx_sorted = np.argsort(dist[idx_i])[: max_neigh]
+                nonmax_idx.append(idx_i[idx_sorted])
+            nonmax_idx = np.concatenate(nonmax_idx)
+            iatoms = iatoms[nonmax_idx]
+            jatoms = jatoms[nonmax_idx]
+            num_edges = iatoms.shape[0]
+            Sij = Sij[nonmax_idx]
+            Rij = Rij[nonmax_idx]
+            dist = dist[nonmax_idx]
+        
+        # Generate Graph data set
+        graph = Data(
+                    positions=torch.tensor(crds, dtype=torch.float32),   # node features
+                    species=torch.tensor(species, dtype=torch.long),
+                    forces=torch.tensor(frc, dtype=torch.float32),
+                    edges=torch.tensor(Sij, dtype=torch.float32),# edge features
+                    num_nodes=num_nodes,             
+                    num_edges=num_edges,
+                    energy=torch.tensor(enr, dtype=torch.float32),
+                    cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
+                    edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),
+                    stress=torch.tensor(stress, dtype=torch.float32),
+                    volume=torch.tensor(volume),
+
+                    Rij=Rij,
+                    distance=dist,
+                    senders=torch.tensor(iatoms, dtype=torch.float32),
+                    receivers=torch.tensor(jatoms, dtype=torch.float32),
+                )                           # senders, recerivers
+        #graph["positions"].requires_grad_(True)
+        #graph["cell"].requires_grad_(True)
+        graph_list.append(graph)
+
+    return graph_list
 
 def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
     graph_list = []
@@ -170,6 +281,13 @@ def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
             data.edge_index = torch.cat([data.edge_index, edge_index_padding], dim=1)
             edge_mask = torch.cat([torch.ones(original_n_edges), 
                                    torch.zeros(pad_edges_to - original_n_edges)])
+            ###
+            #send_reci_padding = torch.zeros((pad_edges_to - n_edges))
+            #data.receivers = torch.cat([data.receivers, send_reci_padding.long()], dim=0)
+            #data.senders = torch.cat([data.senders, send_reci_padding.long()], dim=0)
+            #data.Rij = torch.cat([data.Rij, edge_attr_padding], dim=0)
+            #data.distance = torch.cat([data.distance, send_reci_padding], dim=0)
+            ###
         else:
             edge_mask = torch.ones(n_edges)
         data.node_mask = node_mask

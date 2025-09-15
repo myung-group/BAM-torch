@@ -8,6 +8,7 @@ from copy import deepcopy
 from bam_torch.utils.logger import Logger
 from bam_torch.training.base_trainer import BaseTrainer
 from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit, get_dataloader
+from time import time
 
 
 class Evaluator(BaseTrainer):
@@ -56,7 +57,9 @@ class Evaluator(BaseTrainer):
             target['energy'] = data['energy']
             species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
+            t1 = time()
             preds = self.model(data, backprop=False)
+            print(f'Elapsed time of 1 epoch: {time()-t1}')
 
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             loss_dict = self.compute_loss(preds, data)
@@ -76,7 +79,8 @@ class Evaluator(BaseTrainer):
             data.clear()
             del data, preds, loss_dict
             torch.cuda.empty_cache()
-            gc.collect()
+            if (i+1) % 500 == 0:
+                gc.collect()
         total_loss_dict = {key: torch.mean(torch.tensor(value)) \
                         for key, value in total_loss_dict.items()}
         
@@ -208,7 +212,8 @@ class Evaluator(BaseTrainer):
                                                     1,  # nbatch
                                                     json_data['cutoff'],
                                                     self.model_ckpt,
-                                                    json_data['regress_forces']
+                                                    json_data['regress_forces'],
+                                                    json_data.get('max_neigh'),
                                                 )
         return data_loader, uniq_element, enr_avg_per_element
 

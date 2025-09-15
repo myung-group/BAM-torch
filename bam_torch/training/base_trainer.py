@@ -125,6 +125,9 @@ class BaseTrainer:
                     if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
                         torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
                         #self.model.save('model.pt')
+                        torch.save(deepcopy(self.model), 'model.pt')
+                        if self.ddp:
+                            torch.save(deepcopy(self.model.module), 'model.pt')
                         self.l_ckpt_saved = True
                 
                     # Get the last learning rate
@@ -188,7 +191,8 @@ class BaseTrainer:
 
             loss_dict = self.compute_loss(preds, data)
             for l in loss_log_config:
-                epoch_loss_dict[l].append(loss_dict.get(l, torch.nan))
+                val = loss_dict.get(l, torch.nan)
+                epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
             
             loss = loss_dict['loss']
             if backprop:
@@ -213,11 +217,11 @@ class BaseTrainer:
         energy_target = data["energy"].flatten()
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
-        if mode == 'train':
-            self.ckpt['train_scale_shift'].append(shift_enr)
-        elif mode == 'valid':
-            self.ckpt['valid_scale_shift'].append(shift_enr)
         preds["energy"] = energy_predict + shift_enr
+        if mode == 'train':
+            self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+        elif mode == 'valid':
+            self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
         return preds
     
     def configure_dataloader(self):
@@ -232,6 +236,7 @@ class BaseTrainer:
                                                             json_data['NN']['data_seed'],
                                                             json_data['element'],
                                                             json_data['regress_forces'],
+                                                            json_data.get('max_neigh'),
                                                             self.rank,
                                                             self.world_size
                                                         )

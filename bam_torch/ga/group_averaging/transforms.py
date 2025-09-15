@@ -59,6 +59,7 @@ class FrameAveraging(Transform):
             "2D",
             "3D",
             "DA",
+            "no"
         }
         assert self.fa_method in {
             "",
@@ -81,17 +82,26 @@ class FrameAveraging(Transform):
                     self.fa_func = frame_averaging_3D
             elif self.frame_averaging == "DA":
                 self.fa_func = data_augmentation
+            elif self.frame_averaging == "no":
+                self.fa_func = None
             else:
                 raise ValueError(f"Unknown frame averaging: {self.frame_averaging}")
 
-    def __call__(self, data, gs=None):
+    def __call__(self, data, equiv_model=None, n_samples=1):
         """The only requirement for the data is to have a `pos` attribute."""
         if self.inactive:
             return data
         elif self.frame_averaging == "DA":
             return self.fa_func(data, self.fa_method)
-        elif self.fa_method == "prob" or gs != None:
-            return self.pa_func(data, gs, self.fa_method)
+        elif self.frame_averaging == "no":
+            data.fa_pos = data.positions
+            data.fa_cell = data.cell 
+            data.fa_rot = None
+            return data
+        elif self.fa_method == "prob":
+            data.fa_pos, data.fa_cell, data.fa_rot = self.pa_func(data, equiv_model, n_samples, self.fa_method)
+            return data
+
         else:
             data.fa_pos, data.fa_cell, data.fa_rot = self.fa_func(
                 data.positions, data.cell if hasattr(data, "cell") else None, self.fa_method

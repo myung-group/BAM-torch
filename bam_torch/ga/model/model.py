@@ -21,6 +21,7 @@ from bam_torch.ga.utils.fa_utils import (
     pbc_preprocess, 
     base_preprocess
 )
+from bam_torch.model.blocks import RadialEmbeddingBlock
 
 
 class FAENet(BaseModel):
@@ -90,16 +91,16 @@ class FAENet(BaseModel):
         act: str = "swish",
         max_num_neighbors: int = 40,
         hidden_channels: int = 128,
-        tag_hidden_channels: int = 0, # QM9
-        pg_hidden_channels: int = 32,  # QM9
-        phys_embeds: bool = False, # QM9
+        tag_hidden_channels: int = 0, # QM9: 0
+        pg_hidden_channels: int = 32,  # QM9: 32
+        phys_embeds: bool = False, # QM9: False
         phys_hidden_channels: int = 0,
         num_interactions: int = 4,
         num_gaussians: int = 50,
         num_filters: int = 128,
-        second_layer_MLP: bool = True,  # QM9
-        skip_co: bool = False, # QM9
-        mp_type: str = "updownscale_base", # QM9
+        second_layer_MLP: bool = True,  # QM9: True
+        skip_co: bool = False, # QM9: False
+        mp_type: str = "updownscale_base", # QM9: "updownscale_base"
         graph_norm: bool = True,
         complex_mp: bool = False,
         energy_head: Optional[str] = None,
@@ -161,7 +162,15 @@ class FAENet(BaseModel):
         self.distance_expansion = GaussianSmearing(0.0, self.cutoff, self.num_gaussians)
 
         # Radial basis based on "Soft envelope * bessel function"
-        #self.distance_expansion = RadialBasis(self.num_gaussians)
+        
+        self.radial_embedding = RadialEmbeddingBlock(
+            r_max=1.0,
+            num_bessel=self.num_gaussians,
+            num_polynomial_cutoff=6,   # default of BAM-jax
+            radial_type="bessel",
+            distance_transform=None,
+        )
+        
 
         # Embedding block
         self.embed_block = EmbeddingBlock(
@@ -255,7 +264,7 @@ class FAENet(BaseModel):
         # Should output all necessary attributes, in correct format.
         if preproc:
             z, batch, edge_index, rel_pos, edge_weight = self.preprocess(
-                data, self.cutoff, self.max_num_neighbors
+                data, self.cutoff, self.max_num_neighbors,
             )
         else:
             rel_pos = data.positions[data.edge_index[0]] - data.positions[data.edge_index[1]]
@@ -266,14 +275,22 @@ class FAENet(BaseModel):
                 rel_pos,
                 rel_pos.norm(dim=-1),
             )
+        #torch.set_printoptions(profile="full")
         edge_attr = self.distance_expansion(edge_weight)  # RBF of pairwise distances
-        assert z.dim() == 1 and z.dtype == torch.long
+        #print("edge_attr ", edge_attr)
+        """
+        rel_pos = rel_pos / self.cutoff
+        lengths = torch.norm(rel_pos, dim=1) # edge_weight == distances
+        edge_attr = self.radial_embedding(lengths.unsqueeze(1))
+        """
+        #assert z.dim() == 1 and z.dtype == torch.long
 
         # Embedding block
         h, e = self.embed_block(
             z, rel_pos, edge_attr, data.tags if hasattr(data, "tags") else None
         )
-
+        #print("h 1 ", h)
+        #print("e ", e)
         # Compute atom weights for late energy head
         if self.energy_head == "weighted-av-initial-embeds":
             alpha = self.w_lin(h)
@@ -298,10 +315,10 @@ class FAENet(BaseModel):
         if self.skip_co == "concat_atom":
             energy_skip_co.append(h)
             h = self.act(self.mlp_skip_co(torch.cat(energy_skip_co, dim=1)))
-
+        #print("h 2 ", h)
         energy = self.output_block(h, edge_index, edge_weight, batch, alpha)
-
-        # Skip-connection
+        #print("energy ",energy)
+        # Skip-connection   
         energy_skip_co.append(energy)
         if self.skip_co == "concat":
             energy = self.mlp_skip_co(torch.cat(energy_skip_co, dim=1))

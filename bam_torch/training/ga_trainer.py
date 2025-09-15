@@ -1,7 +1,8 @@
 import torch
 
 from bam_torch.ga.group_averaging.transforms import FrameAveraging
-from bam_torch.ga.group_averaging.fa_forward import model_forward
+from bam_torch.ga.group_averaging.fa_forward import model_forward, pa_model_forward
+from bam_torch.ga.model.equivariant_layer import EquivariantInterface
 from bam_torch.utils.utils import get_dataloader
 from .loss import l2_regularization
 from .base_trainer import BaseTrainer
@@ -9,7 +10,33 @@ from .base_trainer import BaseTrainer
 from time import time
 import os
 import gc
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import numpy as np
+#os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+
+#torch.autograd.set_detect_anomaly(True)
+
+def check_nan(out):
+    if isinstance(out, torch.Tensor):
+        return torch.isnan(out).any()
+    elif isinstance(out, (tuple, list)):
+        return any(check_nan(o) for o in out if isinstance(o, torch.Tensor))
+    elif isinstance(out, dict):
+        return any(check_nan(o) for o in out.values() if isinstance(o, torch.Tensor))
+    else:
+        return False
+
+
+def _has_nan(x):
+    import torch
+    if isinstance(x, torch.Tensor):
+        return torch.isnan(x).any() or torch.isinf(x).any()
+    if isinstance(x, (list, tuple)):
+        return any(_has_nan(xx) for xx in x)
+    if isinstance(x, dict):
+        return any(_has_nan(v) for v in x.values())
+    return False
+
 
 class GATrainer(BaseTrainer):
     """Trainer for group averaging model 
@@ -17,6 +44,16 @@ class GATrainer(BaseTrainer):
     """
     def __init__(self, json_data, rank, world_size):
         super().__init__(json_data, rank, world_size)
+       #torch.autograd.set_detect_anomaly(True)
+        #for name, module in self.model.named_modules():
+        #    module.register_forward_hook(
+        #        lambda m, inp, out, n=name:
+        #            print(f"[NaN/Inf in FORWARD] {n}") if _has_nan(out) else None
+        #    )
+        #    module.register_full_backward_hook(
+        #        lambda m, grad_in, grad_out, n=name:
+        #            print(f"[NaN/Inf in BACKWARD] {n}") if _has_nan(grad_out) else None
+        #    )
 
     def train_one_epoch(self, mode='train', data_loader=None):
         if mode == 'train':
@@ -43,15 +80,17 @@ class GATrainer(BaseTrainer):
                 self.ckpt['valid_scale_shift'] = []
 
         fa_method = self.json_data.get('ga_method')
+        gs = [None] * len(data_loader)
         if fa_method == None:
             # The frame averaging method
             # : {"det", "all", "se3-stochastic", "se3-det", "se3-all", "stochastic"}
             fa_method = "stochastic"
+
         frame_averaging = self.json_data.get('frame_averaging')
         if frame_averaging == None:
             # ["2D", "3D", "DA", ""]
             frame_averaging = "3D"
-        pbc = self.json_data.get('pbc') # the frame averaging method: {"det", "all", "se3-stochastic", "se3-det", "se3-all", "stochastic"}:
+        pbc = self.json_data.get('pbc') 
         if pbc == None:
             pbc = True
         transform = FrameAveraging(frame_averaging, fa_method)
@@ -61,18 +100,33 @@ class GATrainer(BaseTrainer):
             data = self.move_to_device(data, self.device)
             #data.to(self.device)
             #data = self.data_to_dict(data)  # This is for torch.jit compile
-            preds = model_forward(
-                batch=transform(data),  # transform the PyG graph data
-                model=self.model,
-                frame_averaging=frame_averaging, 
-                mode=mode,      
-                crystal_task=pbc, 
-            )
-            #preds = self.scale_shift(preds, data, mode)
+            if fa_method == "prob":
+                preds = pa_model_forward(
+                    batch=transform(data, self.equiv_model, self.json_data.get("nsamples")),  # transform the PyG graph data
+                    model=self.model,
+                    frame_averaging=frame_averaging, 
+                    mode=mode,      
+                    crystal_task=pbc, 
+                )
+            else:
+                preds = model_forward(
+                    batch=transform(data),  # transform the PyG graph data
+                    model=self.model,
+                    frame_averaging=frame_averaging, 
+                    mode=mode,      
+                    crystal_task=pbc, 
+                )
+            """
+            data.pos = data.positions
+            preds = self.model(data)
+            """
+            preds = self.scale_shift(preds, data, mode)
             loss_dict = self.compute_loss(preds, data)
 
             for l in loss_log_config:
-                epoch_loss_dict[l].append(loss_dict.get(l, torch.nan))
+                #epoch_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+                val = loss_dict.get(l, torch.nan)
+                epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
             
             loss = loss_dict['loss']
             if backprop:
@@ -80,8 +134,8 @@ class GATrainer(BaseTrainer):
                 loss.backward()
                 t1 = time()
                 torch.cuda.synchronize()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
-                #torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
+                #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
+                torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                 self.optimizer.step()
             else:
                 torch.cuda.synchronize()
@@ -145,7 +199,6 @@ class GATrainer(BaseTrainer):
         ## Sanity check to make sure the compute graph is correct.
         #for lc in loss["loss"]:
         #    assert hasattr(lc, "grad_fn")
-
         loss["loss"] = sum(loss["loss"])
         return loss
 
@@ -196,6 +249,21 @@ class GATrainer(BaseTrainer):
                 num_interactions=nlayers,         # default = 4
                 num_gaussians=num_radial_basis,   # default = 50 for Gaussian
             )
+        if model_config.get("ga_method") == "prob": # Probabilistic symmetrization
+            self.equiv_model = EquivariantInterface(
+                symmetry='O3',
+                interface='prob',
+                fixed_noise=False,
+                noise_scale=1,
+                tau=0.01,
+                hard=True,
+                vnn_dropout=0.1,
+                vnn_hidden_dim =96,
+                vnn_k_nearest_neighbors=avg_num_neighbors
+            ).to(self.device)
+            interface_n_params = sum(p.numel() for p in self.equiv_model.parameters() if p.requires_grad)
+            print(f'\nnumber of parameters:\n\033[36m -- interface (vnn) {interface_n_params}\033[0m\n')
+
         return model
     
     def configure_dataloader(self):

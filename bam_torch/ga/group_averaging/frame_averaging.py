@@ -30,6 +30,8 @@ def compute_frames(
     dim = pos.shape[1]  # to differentiate between 2D or 3D case
     plus_minus_list = list(product([1, -1], repeat=dim))
     plus_minus_list = [torch.tensor(x) for x in plus_minus_list]
+    if fa_method == "prob":
+        plus_minus_list = plus_minus_list[0]
     all_fa_pos = []
     all_cell = []
     all_rots = []
@@ -40,6 +42,7 @@ def compute_frames(
         "se3-all",
         "se3-stochastic",
         "se3-det",
+        "prob"  ### 
     }
     se3 = fa_method in {
         "se3-all",
@@ -57,7 +60,6 @@ def compute_frames(
         # Append new graph positions to list
         pm = pm.to(eigenvec.device)
         new_eigenvec = pm * eigenvec
-
         # Consider frame if it passes above check
         fa_pos = pos @ new_eigenvec
 
@@ -97,27 +99,30 @@ def compute_frames(
     return [all_fa_pos[index]], [all_cell[index]], [all_rots[index]]
 
 
-def probablistic_averaging_3D(data, gs=None, fa_method="prob", check=False):
+def probablistic_averaging_3D_(data, gs=None, fa_method="prob", check=False):
     
     b, k, _, _ = gs.shape
-    b_n, _ = data.pos.shape
+    b_n, _ = data.positions.shape
     n = int(b_n/b)
-    device = data.pos.device
+    device = data.positions.device
 
-    pos = data.pos.view(b, n, 3)
+    pos = data.positions.view(b, n, 3)
     pos = pos[:, None, :, :].expand(b, k, n, 3)
     cell = data.cell[:, None, :, :].expand(b, k, 3, 3)
     _, center = torch.std_mean(pos, dim=2, keepdim=True)
     pos = pos - center
 
     # if symmetry == 'O3' or 'SO3'
+    print(gs.shape)
+    print(gs)
+    gs = torch.from_numpy(gs).to(device)
     gs_inv = gs.transpose(2, 3).to(device)
     pa_pos = torch.einsum('bkij,bkjt->bkit', pos, gs_inv)
     pa_pos = pa_pos.view(b*k, n, 3)
     pa_pos = pa_pos.view(b*k*n, 3)
     pa_cell = torch.einsum('bkij,bkjt->bkit', cell, gs_inv)
 
-    cell_offsets = data.cell_offsets
+    cell_offsets = data.edges # cell_offsets (Sij)
     cell_offsets = cell_offsets.view(b, -1, 3)
     b, e, _ = cell_offsets.shape
     cell_offsets = cell_offsets[:, None, :, :].expand(b, k, e, 3)
@@ -128,11 +133,12 @@ def probablistic_averaging_3D(data, gs=None, fa_method="prob", check=False):
     data.fa_pos = [pa_pos]
     data.fa_cell = [pa_cell.view(b*k, 3, 3)]
 
-    iatoms = data.senders
-    jatoms = data.receivers
-    iatoms = iatoms.reshape(b, 1, e).long()
-    jatoms = jatoms.reshape(b, 1, e).long()
-    edge_idx = torch.cat([jatoms, iatoms], dim=1).long()
+    #iatoms = data.senders
+    #jatoms = data.receivers
+    #iatoms = iatoms.reshape(b, 1, e).long()
+    #jatoms = jatoms.reshape(b, 1, e).long()
+    #edge_idx = torch.cat([jatoms, iatoms], dim=1).long()
+    edge_idx = data.edge_index
     edge_idx = edge_idx[:, None, :, :].expand(b, k, 2, e)
     edge_idx = edge_idx.reshape(b*k, 2, e)
 
@@ -141,8 +147,72 @@ def probablistic_averaging_3D(data, gs=None, fa_method="prob", check=False):
     pyg_edge_idx = incr_edge_idx.transpose(0, 1).reshape(2, b*k*e).long()
     data.pa_edge_index = pyg_edge_idx
 
-
     return data
+
+def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", check=False):
+    pos = data.positions
+
+
+    node_features, edge_features, edge_idx, idx = parse_batch(data, device=pos.device)
+    b, n, _, d_node = node_features.shape
+    b, n, n, d_edge = edge_features.shape
+    _, _, n_edges = edge_idx.shape
+    assert node_features.shape == (b, n, 3, d_node)
+    assert edge_features.shape == (b, n, n, d_edge)
+    assert edge_idx.shape == (b, 2, n_edges)
+    assert idx.shape == (b,)
+    ## Handle residual component: Translational transform
+    #loc_input, loc_center, node_features = parse_translation(node_features)
+
+    ## 2) Sample from p(g|x)
+    gs_list = equiv_model(node_features, edge_features, idx, n_samples)
+    #gs_list = equiv_model(data, n_samples)
+    # Shape: b, k, 3, 3
+    #pos = data.positions
+    pos = pos - pos.mean(dim=0, keepdim=True)
+    # Compute fa_pos
+    #gs_list = torch.from_numpy(gs).to(pos.device)
+    
+    all_fa_pos = []
+    all_cell = []
+    all_rots = []
+
+    fa_cell = data.cell
+    cell = data.cell
+    pos_3D = None
+    nbatch, _, _ = cell.shape
+    b_n, _ = pos.shape
+    n = int(b_n/nbatch)
+    fa_pos = pos.view(nbatch, n, 3)
+    #print("fa_pos.shape", fa_pos.shape)
+    #print("gs_list", gs_list) 
+    #print("cell", cell.shape)
+    """
+    for b in range(nbatch):
+
+        for gs in gs_list[b]:
+            # Append new graph positions to list
+            rot_pos = fa_pos[b] @ gs.T
+
+            if cell is not None:
+                rot_cell = fa_cell[b] @ gs
+
+            all_fa_pos.append(rot_pos)
+            all_cell.append(rot_cell)
+            all_rots.append(gs.unsqueeze(0))
+    all_fa_pos = torch.cat(all_fa_pos, dim=0)
+    all_cell = torch.cat(all_cell, dim=0)
+    """
+    fa_pos_exp = fa_pos[:, None, :, :]  
+    fa_cell_exp = fa_cell[:, None, :, :]
+    fa_pos_exp = torch.matmul(fa_pos_exp, gs_list.transpose(-1, -2))
+    fa_cell_exp = torch.matmul(fa_cell_exp, gs_list.transpose(-1, -2))
+    all_fa_pos = fa_pos_exp.permute(1, 0, 2, 3).contiguous().view(n_samples, b_n, 3)
+    all_cell = fa_cell_exp.permute(1, 0, 2, 3).contiguous()
+    all_rots = gs_list.permute(1, 0, 2, 3) #.contiguous().view(n_samples, 3, 3)
+    # No need to update distances, they are preserved.
+    #print(all_fa_pos.shape)
+    return all_fa_pos, all_cell, all_rots
 
 
 def check_constraints(eigenval, eigenvec, dim=3):
@@ -277,3 +347,133 @@ def data_augmentation(g, d=3, *args):
     graph_rotated, _, _ = transform(g)
 
     return graph_rotated
+
+
+@torch.no_grad()
+def parse_batch(data, device):
+    """
+    pos = torch.tensor(data.x, dtype=torch.float32).to(device)
+    forces = torch.tensor(data.x_forces, dtype=torch.float32).to(device)
+    num_edges = torch.tensor(data.num_edges, dtype=int).to(device)
+    b = num_edges.shape[0]
+            
+    edges = torch.tensor(data.edge_idx, dtype=torch.float32).to(device)
+    """
+    #torch.autograd.set_detect_anomaly(True)
+    pos = data.positions
+    num_edges = data.num_edges
+    b = num_edges.shape[0]
+    #num_edges = num_edges[0]
+    b_n, _ = pos.shape
+    n = int(b_n / b)
+    
+    #Rij = data.Rij 
+    #loc_dist = data.distance 
+    #Rij = Rij.view(b, num_edges, 3)
+    #loc_dist = loc_dist.view(b, 1, num_edges).float()
+    #iatoms = data.senders
+    #jatoms = data.receivers
+    #iatoms = iatoms.view(b, 1, num_edges).long()
+    #jatoms = jatoms.view(b, 1, num_edges).long()
+
+    #edges = torch.cat([iatoms, jatoms], dim=1).long()
+    edges = data.edge_index
+    cell = data.cell
+    iatoms = edges[0]
+    jatoms = edges[1]
+    Sij = data.edges
+    Sij = torch.split(Sij, num_edges.tolist(), dim=0)
+    shift_v = torch.cat(
+        [torch.einsum('ni,ij->nj', s, c)
+         for s, c in zip(Sij, cell)], dim=0
+    )
+    _R = pos[jatoms] - pos[iatoms]
+    Rij = _R + shift_v
+    loc_dist = torch.norm(Rij, dim=1)
+    loc_dist = loc_dist.view(b, 1, num_edges[0])
+
+    iatoms = iatoms.view(b, 1, num_edges[0]).long()
+    jatoms = jatoms.view(b, 1, num_edges[0]).long()
+    offsets = torch.arange(b, device=iatoms.device).view(b, 1, 1) * n
+    iatoms = iatoms - offsets
+    jatoms = jatoms - offsets
+
+    edges = torch.cat([iatoms, jatoms], dim=1).long()
+    edge_attr = torch.cat([edges, loc_dist], dim=1)
+    edge_attr = edge_attr.transpose(1, 2)
+
+
+    species = data.species
+    species = species.view(b, n, 1)
+    species = species[:, :, :, None].expand(-1, -1, -1, 3).view(b, n, 3)
+    #node_features = torch.cat([pos, forces], dim=-1)
+    pos = pos.view(b, n, 3)
+    node_features = torch.cat([pos, species], dim=-1) # pos, Rij..?
+    # node_features = torch.cat([pos, forces, species.unsqueeze(-1)], dim=-1)
+    node_features = node_features.view(b, n, 2, 3)    
+    node_features = node_features.transpose(-1, -2)
+    assert (pos - node_features[:, :, :, 0]).abs().sum().item() == 0
+
+    idx = torch.tensor([i for i in range(b)], device=device)
+    edge_features = torch.zeros(b, n, n, edge_attr.size(-1), device=device) 
+    batch_idxs = torch.arange(b, device=device).repeat_interleave(num_edges[0]).long()
+    edge_features[batch_idxs, edges[:, 0, :].flatten().long(), edges[:, 1, :].flatten().long(), :] \
+        = edge_attr.reshape(-1, edge_attr.size(-1))
+
+    return node_features, edge_features, edges, idx
+
+@torch.no_grad()
+def parse_batch_(data, device):
+    """
+    pos = torch.tensor(data.x, dtype=torch.float32).to(device)
+    forces = torch.tensor(data.x_forces, dtype=torch.float32).to(device)
+    num_edges = torch.tensor(data.num_edges, dtype=int).to(device)
+    b = num_edges.shape[0]
+            
+    edges = torch.tensor(data.edge_idx, dtype=torch.float32).to(device)
+    """
+    pos = data.positions
+    num_edges = data.num_edges
+    b = num_edges.shape[0]
+    num_edges = num_edges[0]
+    b_n, _ = pos.shape
+    n = int(b_n / b)
+    pos = pos.view(b, n, 3)
+    
+    Rij = data.Rij 
+    loc_dist = data.distance 
+    Rij = Rij.view(b, num_edges, 3)
+    loc_dist = loc_dist.view(b, 1, num_edges).float()
+    iatoms = data.senders
+    jatoms = data.receivers
+    iatoms = iatoms.view(b, 1, num_edges).long()
+    jatoms = jatoms.view(b, 1, num_edges).long()
+ 
+    edges = torch.cat([iatoms, jatoms], dim=1).long()
+    edge_attr = torch.cat([edges, loc_dist], dim=1)
+    edge_attr = edge_attr.transpose(1, 2)
+
+    species = data.species
+    species = species.view(b, n, 1)
+    species = species[:, :, :, None].expand(-1, -1, -1, 3).view(b, n, 3)
+    #node_features = torch.cat([pos, forces], dim=-1)
+    node_features = torch.cat([pos, species], dim=-1)
+    # node_features = torch.cat([pos, forces, species.unsqueeze(-1)], dim=-1)
+    node_features = node_features.view(b, n, 2, 3)    
+    node_features = node_features.transpose(-1, -2)
+    assert (pos - node_features[:, :, :, 0]).abs().sum().item() == 0
+
+    idx = torch.tensor([i for i in range(b)], device=device)
+    edge_features = torch.zeros(b, n, n, edge_attr.size(-1), device=device) 
+    batch_idxs = torch.arange(b, device=device).repeat_interleave(num_edges).long()
+    edge_features[batch_idxs, edges[:, 0, :].flatten().long(), edges[:, 1, :].flatten().long(), :] \
+        = edge_attr.reshape(-1, edge_attr.size(-1))
+
+    return node_features, edge_features, edges, idx
+
+def parse_translation(node_features):
+    pos, frc = node_features.unbind(-1)
+    _, pos_center = torch.std_mean(pos, dim=-1, keepdim=True)
+    node_features = torch.stack([pos - pos_center, frc], dim=-1)
+
+    return pos, pos_center, node_features

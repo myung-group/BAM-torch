@@ -13,6 +13,12 @@ def swish(x):
     """Swish activation function"""
     return torch.nn.functional.silu(x)
 
+def _check_index_bounds(name, size0, idx):
+    assert idx.dtype == torch.long, f"{name}: must be long, got {idx.dtype}"
+    mn = int(idx.min().item()); mx = int(idx.max().item())
+    ok = (mn >= 0) and (mx < size0)
+    print(f"[{name}] size0={size0}, min={mn}, max={mx}, ok={ok}")
+    return ok
 
 def get_pbc_distances(
     pos,
@@ -37,6 +43,12 @@ def get_pbc_distances(
         (dict): dictionary with the updated edge_index, atom distances,
             and optionally the offsets and distance vectors.
     """
+    #N = pos.size(0)
+    #ok0 = _check_index_bounds("edge_index[0]", N, edge_index[0])
+    #ok1 = _check_index_bounds("edge_index[1]", N, edge_index[1])
+    #assert ok0 and ok1, "edge_index out of bounds"
+    #print(pos.shape)
+    #print(edge_index.shape)
     rel_pos = pos[edge_index[0]] - pos[edge_index[1]] # R[jatoms] - R[iatoms]
 
     # correct for pbc
@@ -47,12 +59,16 @@ def get_pbc_distances(
     expanded_cell = torch.repeat_interleave(cell, repeats=e_size, dim=0)
     expanded_cell = expanded_cell.reshape(b, e_size, 3, 3)
     offsets = torch.einsum('bni,bnij->bnj', cell_offsets, expanded_cell).view(-1, 3)
-    rel_pos += offsets
+    #print(rel_pos.shape)
+    #print(offsets.shape)
+    rel_pos = rel_pos + offsets
 
     # compute distances
-    distances = rel_pos.norm(dim=-1)
+    #torch.set_printoptions(profile="full")
+    #print(f"\nrel_pos: {rel_pos}")
+    distances = rel_pos.norm(dim=-1) #.clamp(min=1e-8)
+    #print(f"distances: {distances}")
 
-    
     # redundancy: remove zero distances
     nonzero_idx = torch.arange(len(distances), device=distances.device)[distances != 0]
     #nonzero_idx = torch.arange(len(distances), device=distances.device)
@@ -127,11 +143,15 @@ def pbc_preprocess(data, cutoff=6.0, max_num_neighbors=40):
     Returns:
         (tuple): atomic_numbers, batch, sparse adjacency matrix, relative positions, distances
     """
-    data.edge_index[[0, 1]] = data.edge_index[[1, 0]]
+    #data.edge_index[[0, 1]] = data.edge_index[[1, 0]]
+    edge_index = data.edge_index
+    edge_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
+    data.edge_index = edge_index
     if hasattr(data, "pa_edge_index"):
         edge_index = data.pa_edge_index
     else:
         edge_index = data.edge_index
+    #print(data.pos)
     out = get_pbc_distances(
         data.pos,
         edge_index,
@@ -152,15 +172,17 @@ def pbc_preprocess(data, cutoff=6.0, max_num_neighbors=40):
 class GaussianSmearing(nn.Module):
     r"""Smears a distance distribution by a Gaussian function."""
 
-    def __init__(self, start=0.0, stop=5.0, num_gaussians=50):
+    def __init__(self, start=0.0, stop=5.0, num_gaussians=50, eps=1e-6):
         super().__init__()
         offset = torch.linspace(start, stop, num_gaussians)
-        self.coeff = -0.5 / (offset[1] - offset[0]).item() ** 2
+        self.coeff = -0.5 / (offset[1] - offset[0]).item() ** 2 #+ eps)
         self.register_buffer("offset", offset)
 
     def forward(self, dist):
         dist = dist.view(-1, 1) - self.offset.view(1, -1)
-        return torch.exp(self.coeff * torch.pow(dist, 2))
+        out = torch.exp(self.coeff * torch.pow(dist, 2))
+        out = torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
+        return out
 
 
 class RandomRotate(object):

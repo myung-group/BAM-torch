@@ -121,9 +121,9 @@ class RadialEmbeddingBlock(torch.nn.Module):
     def forward(
         self,
         edge_lengths: torch.Tensor,  # [n_edges, 1]
-        node_attrs: torch.Tensor,
-        edge_index: torch.Tensor,
-        atomic_numbers: torch.Tensor,
+        node_attrs: torch.Tensor | None = None,
+        edge_index: torch.Tensor | None = None,
+        atomic_numbers: torch.Tensor| None = None,
     ):
         cutoff = self.cutoff_fn(edge_lengths)  # [n_edges, 1]
         if hasattr(self, "distance_transform"):
@@ -598,7 +598,6 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
             self.edge_attrs_irreps,
             self.hidden_irreps,
         )
-        #self.irreps_out = irreps_mid.simplify()
         self.irreps_mid = irreps_mid.simplify()
         """
         self.conv_tp = TensorProductTorch(

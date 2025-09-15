@@ -64,7 +64,13 @@ class EmbeddingBlock(nn.Module):
             - phys_hidden_channels
             - 2 * pg_hidden_channels,
         )
-
+        """
+        self.lin_h = Linear(4,             
+            hidden_channels
+            - tag_hidden_channels
+            - phys_hidden_channels
+            - 2 * pg_hidden_channels)
+        """
         # MLP
         self.lin = Linear(hidden_channels, hidden_channels)
         if self.second_layer_MLP:
@@ -89,6 +95,7 @@ class EmbeddingBlock(nn.Module):
             self.period_embedding.reset_parameters()
             self.group_embedding.reset_parameters()
         nn.init.xavier_uniform_(self.lin.weight)
+        #self.lin_h.bias.data.fill_(0)
         self.lin.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.lin_e1.weight)
         self.lin_e1.bias.data.fill_(0)
@@ -126,7 +133,18 @@ class EmbeddingBlock(nn.Module):
         # --- Node embedding --
 
         # Create atom embeddings based on its characteristic number
+        #from bam_torch.model.models import to_one_hot
+        #node_attrs = to_one_hot(z.unsqueeze(-1), 4)
+        #print(node_attrs)
+        #print(self.lin_h)
+        #h = self.lin_h(node_attrs)
         h = self.emb(z)
+        
+        #torch.set_printoptions(threshold=float('inf'))
+        #print('emb:', self.emb)
+        #print('h:', h)
+        #print(h.shape)
+        #print(d)
 
         if self.phys_emb.device != h.device:
             self.phys_emb = self.phys_emb.to(h.device)
