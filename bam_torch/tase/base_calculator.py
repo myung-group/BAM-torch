@@ -32,7 +32,8 @@ class RACECalculator(Calculator, BaseTrainer):
         self.model, self.n_params, model_ckpt, _ = self.configure_model()
         self.uniq_element = model_ckpt['uniq_element']
         self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
-        self.e_corr = torch.tensor(model_ckpt['valid_scale_shift']).flatten().mean()
+        e_corr_raw = self.model_ckpt['valid_scale_shift']
+        self.e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
 
     def calculate(self, atoms, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
@@ -49,7 +50,10 @@ class RACECalculator(Calculator, BaseTrainer):
         species = np.array([self.uniq_element[iz] for iz in atoms.numbers])
         node_enr_avg = np.array([self.enr_avg_per_element[int(iz)] \
                         for iz in species]).sum()
-        energy = preds["energy"] + node_enr_avg + self.e_corr #* len(species)
+        e_corr = torch.tensor(
+                [self.e_corr_mean[int(iz)] for iz in species]
+                ).sum()
+        energy = preds["energy"] + node_enr_avg + self.e_corr
 
         self.results['energy'] = float(energy)
         self.results['forces'] = np.array(preds['forces'].detach().cpu())

@@ -230,7 +230,6 @@ class FullTensorProduct(TensorProduct):
             (i_1, i_2, p[i_out], mode, train)
             for i_1, i_2, i_out, mode, train in instr
         ]
-
         super().__init__(
             irreps_in1,
             irreps_in2,

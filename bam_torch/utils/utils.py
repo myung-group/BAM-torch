@@ -46,7 +46,7 @@ def get_enr_avg_per_element (traj, element):
                                 for e, i in uniq_element.items()}
     c0 = np.array ([element_counts[i] for i in element_counts.keys()])
     m0 = tgt_enr.sum()/c0.sum()
-    w0 = np.array ([m0 for _ in element])
+    w0 = np.array ([m0 for _ in element], dtype=np.float32)
 
     def loss_fn (weight, count):
         # weight:  (nspec)
@@ -110,6 +110,9 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
         
         if 'stress' in atoms._calc.results.keys():
             stress = atoms.get_stress()
+        else:
+            stress = np.zeros(6)
+            volume = np.zeros(1)
     
         iatoms, jatoms, Sij = neighbour_list(quantities='ijS',
                                              atoms=atoms,
@@ -359,6 +362,8 @@ def get_graphset_to_predict(data, cutoff, uniq_element,
                 stress = atoms.get_stress()
         else:
             frc = np.zeros((len(atoms), 3))
+            stress = np.zeros(6)
+            volume = np.zeros(1)
 
         cell = atoms.get_cell()
         if np.all(cell == [0.0, 0.0, 0.0]):

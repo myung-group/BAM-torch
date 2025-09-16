@@ -8,7 +8,7 @@ from copy import deepcopy
 from bam_torch.utils.logger import Logger
 from bam_torch.training.base_trainer import BaseTrainer
 from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit, get_dataloader
-
+import numpy as np
 
 class Evaluator(BaseTrainer):
     def __init__(self, json_data):
@@ -33,7 +33,9 @@ class Evaluator(BaseTrainer):
         ## 4) Configure data_loader   
         self.data_loader, self.uniq_element, self.enr_avg_per_element = \
                                                         self.configure_dataloader()
-
+        #print(self.enr_avg_per_element)
+        #self.enr_avg_per_element = {0: -654.0902527295206,
+        # 5: -654.0902527295206, 6: -654.0902527295206, 7: -654.0902527295206}
         ## 5) Configure loss function
         self.loss_fn, self.loss_config = self.load_loss()
 
@@ -50,8 +52,10 @@ class Evaluator(BaseTrainer):
                            'loss_e':[],
                            'loss_f':[],
                            } 
-        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift']) # or train_scale_shift?
-        e_corr = e_corr.flatten().mean()
+        ###
+        e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
+        e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
+        ###
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             target['energy'] = data['energy']
@@ -59,8 +63,11 @@ class Evaluator(BaseTrainer):
             node_enr_avg = torch.tensor(
                 [self.enr_avg_per_element[int(iz)] for iz in species],
                 ).sum()
+            e_corr = torch.tensor(
+                [e_corr_mean[int(iz)] for iz in species]
+                ).sum()
             preds = self.model(data, backprop=False)
-            preds['energy'] = preds["energy"] + node_enr_avg + e_corr # *species
+            preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             loss_dict = self.compute_loss(preds, data)
             for l in total_loss_dict.keys(): # predict part
                 total_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())

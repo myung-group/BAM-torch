@@ -958,11 +958,12 @@ class RACE(torch.nn.Module):
         forces: Optional[torch.Tensor] = None
         stress: Optional[torch.Tensor] = None
         #print(self.criterion_value, self.criterion, self.regress_forces)
-        if self.criterion < self.criterion_value:
-            self.regress_forces = "auto"
-            #print(self.criterion_value, self.criterion, self.regress_forces)
-        else:
-            self.regress_forces = "direct"
+        if self.criterion != None: 
+            if self.criterion < self.criterion_value:
+                self.regress_forces = "auto"
+                #print(self.criterion_value, self.criterion, self.regress_forces)
+            else:
+                self.regress_forces = "direct"
 
         if "auto" in self.regress_forces:
             #print(" \n ** AUTOGRAD ** \n")

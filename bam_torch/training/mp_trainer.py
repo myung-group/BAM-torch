@@ -347,6 +347,7 @@ def collate_identity(x):
 class MPTrainer_V2(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
         # git version
+        print('\n *** MPTrainer_V2 ***')
         self.time_log = open(f'time_log-{rank}.txt', 'w')
         
         # multi-node version
@@ -376,7 +377,7 @@ class MPTrainer_V2(BaseTrainer):
             content = file.read()
         enr_avg_per_element, uniq_element = ast.literal_eval(content)
 
-        return None, None, enr_avg_per_element, uniq_element
+        return None, None, uniq_element, enr_avg_per_element
     
     # multi-node version
     def load_pickle_files(self, filename, folder_path):

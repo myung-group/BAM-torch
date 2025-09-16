@@ -153,7 +153,9 @@ class BaseTrainer:
             loss_log_config = self.log_config['train']
             if data_loader == None:
                 data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
         elif mode == 'compile':
             backprop = False
             loss_log_config = self.log_config['valid']
@@ -168,7 +170,9 @@ class BaseTrainer:
             if data_loader == None:
                 data_loader = self.valid_loader
             if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = []
+                self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
@@ -202,11 +206,24 @@ class BaseTrainer:
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         preds["energy"] = energy_predict + shift_enr
-        #element_wise_shift = shift_enr / data["num_nodes"]
+        ###
+        node_energy = preds["node_energy"].detach()
+        energy = energy_predict.detach()
+        batch = data["batch"]
+        ratios = node_energy/energy[batch]
+        shift_node_enr = shift_enr * ratios
+        species = data["species"][:len(node_energy)]
+        ###
         if mode == 'train':
-            self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+            #self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+            for i in range(len(species)):
+                self.ckpt['train_scale_shift'][species[i].item()].append(
+                    shift_node_enr[i].detach().cpu())
         elif mode == 'valid':
-            self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
+            #self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
+            for i in range(len(species)):
+                self.ckpt['valid_scale_shift'][species[i].item()].append(
+                    shift_node_enr[i].detach().cpu())
         return preds
     
     def configure_dataloader(self):
@@ -349,12 +366,12 @@ class BaseTrainer:
         loss["loss_e"] = self.loss_fn["energy_loss"](preds["energy"].flatten(), energy_target)
         loss["loss"].append(e_lambda * loss["loss_e"])
 
-        if "forces" in preds:
+        if "forces" in preds and self.loss_fn['force_loss'] != None:
             force_target = data["forces"].flatten()
             loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(), force_target)
             loss["loss"].append(f_lambda * loss["loss_f"])
         
-        if "stress" in preds and "stress" in data:
+        if "stress" in preds and self.loss_fn['stress_loss'] != None:
             stress_target = data["stress"].flatten()
             if (hasattr(self.model, "training_mode_for_lammps") and self.model.training_mode_for_lammps) or \
             self.loss_fn.get("stress_loss") is None:
@@ -530,6 +547,8 @@ class BaseTrainer:
         regress_forces = model_config.get('regress_forces')
         if regress_forces == True:
             regress_forces = "autograd"
+        elif regress_forces == False:
+            regress_forces = "false"
         
         cueq_config = model_config.get('cueq_config')  # true or false
         if cueq_config == None or cueq_config:
