@@ -7,6 +7,10 @@
 
 ## Overview
 
+<p align="center">
+  <img src="./bam.png" width="50%" title="BAM" alt="BAM"/>
+</p>
+
 BAM (Bayesian Atoms Modeling) is an implementation of **Bayesian E(3) Equivariant Machine Learning Potentials (MLPs)** with iterative restratification of many-body message passing (RACE). Our framework enables uncertainty-aware atomistic simulations at scale by combining ab initio-level accuracy with robust uncertainty quantification.
 
 ## Key Features
