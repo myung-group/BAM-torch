@@ -114,7 +114,7 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
     Returns:
         (dict): model predictions tensor for "energy" and "forces".
     """
-    K, B, _, _ = batch.fa_rot.shape
+    K, B, _, _ = batch.fa_rot[1].shape
     K, B_N, _ = batch.fa_pos.shape
     N = int(B_N/B)
 
@@ -135,6 +135,7 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
         # Compute model prediction for each frame
         for i in range(len(batch.fa_pos)):
             batch.pos = batch.fa_pos[i]
+            batch.edge_index = batch.fa_edge_index[i]
             if crystal_task:
                 batch.cell = batch.fa_cell[i]
             # Forward pass
@@ -145,20 +146,20 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
 
             # Force predictions are rotated back to be equivariant
             if preds.get("forces") is not None:
-                #print("fa_rot 1) ", batch.fa_rot.shape)
-                #print("fa_rot i) ", batch.fa_rot[i])
-                #fa_rot = torch.repeat_interleave(batch.fa_rot[i], batch.num_nodes, dim=0)
-                fa_rot = batch.fa_rot[i]
-                #print("fa_rot 2) ", fa_rot.shape)
-                #print("forces 2) ", preds["forces"].shape)
+                # fa_rot = batch.fa_rot[i]
+                hs = batch.fa_rot[0][i]
+                ks = batch.fa_rot[1][i]
                 # Transform forces to guarantee equivariance of FA method
-                g_forces = (
-                    preds["forces"]
-                    .view(B, N, 3)
-                    .bmm(fa_rot.to(preds["forces"].device))
-                    .view(-1, 3)
-                )
-                f_all.append(g_forces)
+                #g_forces = (
+                #    preds["forces"]
+                #    .view(B, N, 3)
+                #    .bmm(ks.to(preds["forces"].device))
+                #    .view(-1, 3)
+                #)
+                forces = preds["forces"].view(B, N, 3)
+                g_forces_rot = torch.bmm(forces, ks.to(preds["forces"].device))
+                g_forces = torch.bmm(hs.to(preds["forces"].device), g_forces_rot)
+                f_all.append(g_forces.view(-1, 3))
 
             # Energy conservation loss
             if preds.get("forces_grad_target") is not None:

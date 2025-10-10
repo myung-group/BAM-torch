@@ -125,9 +125,9 @@ class BaseTrainer:
                     if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
                         torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
                         #self.model.save('model.pt')
-                        torch.save(deepcopy(self.model), 'model.pt')
-                        if self.ddp:
-                            torch.save(deepcopy(self.model.module), 'model.pt')
+                        #torch.save(deepcopy(self.model), 'model.pt')
+                        #if self.ddp:
+                        #    torch.save(deepcopy(self.model.module), 'model.pt')
                         self.l_ckpt_saved = True
                 
                     # Get the last learning rate
@@ -381,7 +381,7 @@ class BaseTrainer:
             if energy_grad_loss:
                 loss["loss"].append(energy_grad_mult * loss["energy_grad_loss"])
         
-        if "stress" in preds and "stress" in data:
+        if "stress" in preds and self.loss_fn['stress_loss'] != None:
             stress_target = data["stress"].flatten()
             loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
             loss["loss"].append(s_lambda * loss["loss_s"])

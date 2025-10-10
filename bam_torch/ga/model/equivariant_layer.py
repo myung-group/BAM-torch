@@ -40,6 +40,27 @@ class VNN(torch.nn.Module):
         assert x.shape == (b, 3, 3)
         return x
 
+    def _permutation_equivariant_rotation_invariant_pool(self, x12, x):
+        b, c, _, n = x.shape
+        assert x.shape == (b, c, 3, n)
+        assert x12.shape == (b, c, 3, n)
+        x, z0 = self.std_feature(x)
+        assert x.shape == (b, c, 3, n)
+        assert z0.shape == (b, 3, 3, n)
+        # rotation invariant pooling
+        x12 = torch.einsum('bijm,bjkm->bikm', x12, z0)
+        assert x12.shape == (b, c, 3, n)
+        x12 = x12.view(b, c*3, n)
+        # max-pooling and broadcasting across nodes
+        x = x.view(b, c*3, n)
+        x = x.max(dim=-1, keepdim=True)[0].expand(x.size())
+        # combine rotation invariant features
+        x = torch.cat((x, x12), dim=1)
+        # map to scalar
+        x = self.head1(x.permute(0, 2, 1)).squeeze(-1)
+        assert x.shape == (b, n)
+        return x
+
     def forward(self, x):
         b, c, _, n = x.shape
         assert x.shape == (b, c, 3, n)
@@ -58,9 +79,55 @@ class VNN(torch.nn.Module):
         x = torch.cat((x, x_mean), 1)
         # Sn x O(3) equivariant until here
         # produce hidden features for group representations by pooling
+        pseudo_hs = self._permutation_equivariant_rotation_invariant_pool(x12, x)
         pseudo_ks = self._permutation_invariant_rotation_equivariant_pool(x1)
-        assert pseudo_ks.shape == (b, 3, 3)
-        return pseudo_ks
+        assert pseudo_hs.shape == (b, n) and pseudo_ks.shape == (b, 3, 3)
+        return pseudo_hs, pseudo_ks
+
+
+class PermutaionMatrixPenalty(nn.Module):
+    def __init__(self): #, n):
+        super().__init__()
+        #self.n = n
+
+    @staticmethod
+    def _normalize(scores, axis, eps=1e-12):
+        normalizer = torch.sum(scores, axis).clamp(min=eps)
+        normalizer = normalizer.unsqueeze(axis)
+        prob = torch.div(scores, normalizer)
+        return prob
+
+    @staticmethod
+    def _entropy(prob, axis):
+        return -torch.sum(prob * prob.log().clamp(min=-100), axis)
+
+    def entropy(self, scores, eps=1e-12):
+        b, k, n, _ = scores.shape
+        # clamp min to avoid zero logarithm
+        scores = scores.clamp(min=eps)
+        # compute columnwise entropy
+        col_prob = self._normalize(scores, axis=2)
+        entropy_col = self._entropy(col_prob, axis=2)
+        # compute rowwise entropy
+        row_prob = self._normalize(scores, axis=3)
+        entropy_row = self._entropy(row_prob, axis=3)
+        # return entropy
+        assert entropy_col.shape == entropy_row.shape == (b, k, n)
+        return entropy_col, entropy_row
+
+    def forward(self, perm_soft):
+        b, k, n, _ = perm_soft.shape
+        #assert n == self.n
+        assert perm_soft.shape == (b, k, n, n)
+        # compute entropy
+        entropy_col, entropy_row = self.entropy(perm_soft)
+        # compute mean over samples
+        loss = entropy_col.mean(1) + entropy_row.mean(1)
+        # compute mean over nodes
+        loss = loss.mean(1)
+        # compute mean over batch
+        loss = loss.mean()
+        return loss
 
 
 class EquivariantInterface(nn.Module):
@@ -91,8 +158,48 @@ class EquivariantInterface(nn.Module):
             n_knn=vnn_k_nearest_neighbors,
             dropout=vnn_dropout
         )
-        # self.compute_entropy_loss = PermutaionMatrixPenalty(n=5)
+        self.compute_entropy_loss = PermutaionMatrixPenalty()
 
+    def _postprocess_permutation(self, pseudo_hs: T, sinkhorn_iter=20):
+        """Obtain permutation component (b, k, n, n) from hidden representation"""
+        scores = pseudo_hs
+        b, k, n = scores.shape
+        # add small noise to break ties
+        # without this, models can exploit the ordering of tied scores
+        scores = scores + torch.zeros_like(scores).uniform_(0, 1e-6)
+        # normalize scores
+        # this does not affect hard permutation, but affects
+        # straight-through gradient from soft permutation matrix
+        scores = F.normalize(scores, p=2.0, dim=-1)
+        # sort scores, result is unique up to permutations of tied scores
+        scores = scores[:, :, :, None]
+        scores_sorted, indices = scores.sort(descending=True, dim=2)
+        scores = scores.expand(b, k, n, n)
+        scores_sorted = scores_sorted.transpose(2, 3).expand(b, k, n, n)
+        # softsort + log sinkhorn operator for computing soft permutation matrix
+        log_perm_soft = (scores - scores_sorted).abs().neg() / self.tau
+        for _ in range(sinkhorn_iter):
+            log_perm_soft = log_perm_soft - torch.logsumexp(log_perm_soft, dim=-1, keepdim=True)
+            log_perm_soft = log_perm_soft - torch.logsumexp(log_perm_soft, dim=-2, keepdim=True)
+        perm_soft = log_perm_soft.exp()
+        hs = perm_soft
+        if self.hard:
+            # argsort for hard permutation matrix
+            with torch.no_grad():
+                perm_hard = torch.zeros_like(perm_soft).scatter(dim=-1, index=indices, value=1)
+                perm_hard = perm_hard.transpose(2, 3)
+                # (optional) test if perm_hard is a permutation matrix
+                assert torch.allclose(perm_hard.sum(-1), torch.ones_like(perm_hard.sum(-1)))
+                assert torch.allclose(perm_hard.sum(-2), torch.ones_like(perm_hard.sum(-2)))
+            # differentiability with straight-through gradient
+            # the estimated gradient is accurate if perm_soft is close to perm_hard
+            # for this, entropy regularization is necessary
+            perm_hard = (perm_hard - perm_soft).detach() + perm_soft
+            hs = perm_hard
+        # compute entropy loss
+        entropy_loss = self.compute_entropy_loss(perm_soft)
+        return hs, entropy_loss
+        
     def _postprocess_rotation(self, pseudo_ks, eps=1e-6):
         """Obtain rotation component (b, k, 3, 3) from hidden representation"""
         # note: this assumes left equivariance, i.e., pseudo_ks: (b, k, 3, C=3)
@@ -150,17 +257,21 @@ class EquivariantInterface(nn.Module):
         # SnxO(3) equivariant procedure that returns hidden representation
         x = x.permute(0, 3, 2, 1).contiguous()
         assert x.shape == (b*k, d_node, 3, n)
-        pseudo_ks = self.vnn_interface(x)
+        ###
+        pseudo_hs, pseudo_ks = self.vnn_interface(x)
+        assert pseudo_hs.shape == (b*k, n)
         assert pseudo_ks.shape == (b*k, 3, 3)  # [b*k, c=3, 3]
         pseudo_ks = pseudo_ks.transpose(1, 2)  # [b*k, 3, c=3]
         pseudo_ks = pseudo_ks.reshape(b, k, 3, 3)
+        pseudo_hs = pseudo_hs.reshape(b, k, n)
         # post-processing for permutation matrix
-        # hs, entropy_loss = self._postprocess_permutation(pseudo_hs)
-        # assert hs.shape == (b, k, n, n)
+        hs, entropy_loss = self._postprocess_permutation(pseudo_hs)
+        assert hs.shape == (b, k, n, n)
         # post-processing for SO(3) or O(3) matrix
         ks = self._postprocess_rotation(pseudo_ks)
         assert ks.shape == (b, k, 3, 3)
-        return ks #entropy_loss
+        gs = (hs, ks)
+        return gs ,entropy_loss
 
     def _forward_unif(self, node_features, idx, k: int):
         b, n, _, _ = node_features.shape
@@ -205,11 +316,11 @@ class EquivariantInterface(nn.Module):
         assert idx.shape == (b,)
         # sample group representation
         if self.interface == 'prob':
-            gs = self._forward_prob(node_features, idx, k)
+            gs, entropy_loss = self._forward_prob(node_features, idx, k)
             #if self.symmetry in ('O3', 'SO3'):
             #    # entropy loss is only for permutation involved groups
             #    entropy_loss = torch.tensor(0, device=node_features.device)
-            return gs
+            return gs, entropy_loss
         if self.interface == 'unif':
             gs = self._forward_unif(node_features, idx, k)
             return gs, torch.tensor(0, device=node_features.device)

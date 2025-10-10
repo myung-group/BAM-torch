@@ -2,7 +2,8 @@ import torch
 
 from bam_torch.ga.group_averaging.transforms import FrameAveraging
 from bam_torch.ga.group_averaging.fa_forward import model_forward, pa_model_forward
-from bam_torch.ga.model.equivariant_layer import EquivariantInterface
+#from bam_torch.ga.model.equivariant_layer import EquivariantInterface
+from bam_torch.ga.model.equivariant_layer_2 import EquivariantInterface
 from bam_torch.utils.utils import get_dataloader
 from .loss import l2_regularization
 from .base_trainer import BaseTrainer
@@ -96,21 +97,25 @@ class GATrainer(BaseTrainer):
         transform = FrameAveraging(frame_averaging, fa_method)
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
+        entropy_loss_list = []
         for i, data in enumerate(data_loader):
             data = self.move_to_device(data, self.device)
             #data.to(self.device)
             #data = self.data_to_dict(data)  # This is for torch.jit compile
             if fa_method == "prob":
+                batch, entropy_loss = transform(data, self.equiv_model, self.json_data.get("nsamples"))
                 preds = pa_model_forward(
-                    batch=transform(data, self.equiv_model, self.json_data.get("nsamples")),  # transform the PyG graph data
+                    batch=batch,  # transform the PyG graph data
                     model=self.model,
                     frame_averaging=frame_averaging, 
                     mode=mode,      
                     crystal_task=pbc, 
                 )
             else:
+                batch = transform(data)
+                entropy_loss = 0.0
                 preds = model_forward(
-                    batch=transform(data),  # transform the PyG graph data
+                    batch=batch,  # transform the PyG graph data
                     model=self.model,
                     frame_averaging=frame_averaging, 
                     mode=mode,      
@@ -127,8 +132,9 @@ class GATrainer(BaseTrainer):
                 #epoch_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
                 val = loss_dict.get(l, torch.nan)
                 epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
-            
-            loss = loss_dict['loss']
+
+            loss = loss_dict['loss'] + 0.1*entropy_loss
+            entropy_loss_list.append(entropy_loss.detach().cpu())
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -142,6 +148,7 @@ class GATrainer(BaseTrainer):
         
         epoch_loss_dict = {key: torch.mean(torch.tensor(value).detach().cpu()) \
                            for key, value in epoch_loss_dict.items()}
+        #print(f" --> entropy_loss: {torch.tensor(entropy_loss).mean()}")
         torch.cuda.empty_cache()
         gc.collect()
         return epoch_loss_dict
@@ -251,7 +258,7 @@ class GATrainer(BaseTrainer):
             )
         if model_config.get("ga_method") == "prob": # Probabilistic symmetrization
             self.equiv_model = EquivariantInterface(
-                symmetry='O3',
+                symmetry='O3',  # 'O3'
                 interface='prob',
                 fixed_noise=False,
                 noise_scale=1,

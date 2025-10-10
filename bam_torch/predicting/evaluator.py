@@ -50,13 +50,19 @@ class Evaluator(BaseTrainer):
                            'loss_e':[],
                            'loss_f':[],
                            } 
-        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift']) # or train_scale_shift?
-        e_corr = e_corr.flatten().mean()
+        ###
+        e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
+        print(e_corr_raw)
+        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift_origin']).flatten().mean()
+        #e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
+        print(e_corr_mean)
+        ###
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             target['energy'] = data['energy']
             species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
+            #e_corr = torch.tensor([e_corr_mean[int(iz)] for iz in species]).sum()
             t1 = time()
             preds = self.model(data, backprop=False)
             print(f'Elapsed time of 1 epoch: {time()-t1}')

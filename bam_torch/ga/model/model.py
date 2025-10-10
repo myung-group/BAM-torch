@@ -276,6 +276,12 @@ class FAENet(BaseModel):
                 rel_pos.norm(dim=-1),
             )
         #torch.set_printoptions(profile="full")
+        #rel_pos = data.rel_pos.view(-1, 3)
+        #distances = torch.linalg.vector_norm(rel_pos, dim=-1)
+        #print(f" --> distances-2: {distances} | {distances.shape}")
+        #nonzero_idx = torch.arange(len(distances), device=distances.device)[distances != 0]
+        #edge_weight = distances[nonzero_idx]
+        #rel_pos = rel_pos[nonzero_idx]
         edge_attr = self.distance_expansion(edge_weight)  # RBF of pairwise distances
         #print("edge_attr ", edge_attr)
         """

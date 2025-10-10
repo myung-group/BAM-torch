@@ -89,16 +89,19 @@ class GAEvaluator(GATrainer):
             data = data.to(self.device)
             t1 = time()
             if fa_method == "prob":
+                batch, entropy_loss = transform(data, self.equiv_model, self.json_data.get("nsamples"))
                 preds = pa_model_forward(
-                    batch=transform(data, self.equiv_model, self.json_data.get("nsamples")),  # transform the PyG graph data
+                    batch=batch,  # transform the PyG graph data
                     model=self.model,
                     frame_averaging=frame_averaging, 
                     mode=mode,      
                     crystal_task=pbc, 
                 )
             else:
+                batch = transform(data)
+                entropy_loss = 0.0
                 preds = model_forward(
-                    batch=transform(data, gs[i]),  # transform the PyG graph data
+                    batch=batch,  # transform the PyG graph data
                     model=self.model,
                     frame_averaging=frame_averaging, 
                     mode="test",      

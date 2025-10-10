@@ -99,8 +99,8 @@ class FrameAveraging(Transform):
             data.fa_rot = None
             return data
         elif self.fa_method == "prob":
-            data.fa_pos, data.fa_cell, data.fa_rot = self.pa_func(data, equiv_model, n_samples, self.fa_method)
-            return data
+            data.fa_pos, data.fa_cell, data.fa_rot, data.fa_edge_index, entropy_loss = self.pa_func(data, equiv_model, n_samples, self.fa_method)
+            return data, entropy_loss
 
         else:
             data.fa_pos, data.fa_cell, data.fa_rot = self.fa_func(

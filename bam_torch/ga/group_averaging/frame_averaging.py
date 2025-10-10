@@ -151,8 +151,7 @@ def probablistic_averaging_3D_(data, gs=None, fa_method="prob", check=False):
 
 def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", check=False):
     pos = data.positions
-
-
+    
     node_features, edge_features, edge_idx, idx = parse_batch(data, device=pos.device)
     b, n, _, d_node = node_features.shape
     b, n, n, d_edge = edge_features.shape
@@ -163,19 +162,17 @@ def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", ch
     assert idx.shape == (b,)
     ## Handle residual component: Translational transform
     #loc_input, loc_center, node_features = parse_translation(node_features)
-
+    K = n_samples
+    B = b
     ## 2) Sample from p(g|x)
-    gs_list = equiv_model(node_features, edge_features, idx, n_samples)
-    #gs_list = equiv_model(data, n_samples)
+    #(hs, gs_list), entropy_loss = equiv_model(node_features, edge_features, idx, n_samples) # (hs, ks)
+    (hs, gs_list), entropy_loss = equiv_model(data, n_samples)
+    #hs = torch.ones(B, K, n, device=gs_list.device)
     # Shape: b, k, 3, 3
-    #pos = data.positions
+    #print(f"\n --> hs: {hs} | {hs.shape}")
+    #print(f"\n --> hs.argmax(dim=-1): {hs.argmax(dim=-1)} | {hs.argmax(dim=-1).shape}")
+    #print(f" ----> edge: {data.edge_index} | {data.edge_index.shape}")
     pos = pos - pos.mean(dim=0, keepdim=True)
-    # Compute fa_pos
-    #gs_list = torch.from_numpy(gs).to(pos.device)
-    
-    all_fa_pos = []
-    all_cell = []
-    all_rots = []
 
     fa_cell = data.cell
     cell = data.cell
@@ -183,36 +180,88 @@ def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", ch
     nbatch, _, _ = cell.shape
     b_n, _ = pos.shape
     n = int(b_n/nbatch)
+
     fa_pos = pos.view(nbatch, n, 3)
-    #print("fa_pos.shape", fa_pos.shape)
-    #print("gs_list", gs_list) 
-    #print("cell", cell.shape)
-    """
-    for b in range(nbatch):
-
-        for gs in gs_list[b]:
-            # Append new graph positions to list
-            rot_pos = fa_pos[b] @ gs.T
-
-            if cell is not None:
-                rot_cell = fa_cell[b] @ gs
-
-            all_fa_pos.append(rot_pos)
-            all_cell.append(rot_cell)
-            all_rots.append(gs.unsqueeze(0))
-    all_fa_pos = torch.cat(all_fa_pos, dim=0)
-    all_cell = torch.cat(all_cell, dim=0)
-    """
     fa_pos_exp = fa_pos[:, None, :, :]  
     fa_cell_exp = fa_cell[:, None, :, :]
     fa_pos_exp = torch.matmul(fa_pos_exp, gs_list.transpose(-1, -2))
     fa_cell_exp = torch.matmul(fa_cell_exp, gs_list.transpose(-1, -2))
+    hs_inv = hs.transpose(2, 3)
+    fa_pos_exp = torch.einsum('bkij,bkjn->bkin', hs_inv, fa_pos_exp) # permute
+
     all_fa_pos = fa_pos_exp.permute(1, 0, 2, 3).contiguous().view(n_samples, b_n, 3)
     all_cell = fa_cell_exp.permute(1, 0, 2, 3).contiguous()
-    all_rots = gs_list.permute(1, 0, 2, 3) #.contiguous().view(n_samples, 3, 3)
+    all_rots = [hs.permute(1, 0, 2, 3), gs_list.permute(1, 0, 2, 3)]#.contiguous().view(n_samples, 3, 3)
     # No need to update distances, they are preserved.
+    all_fa_pos.requires_grad_(True)
     #print(all_fa_pos.shape)
-    return all_fa_pos, all_cell, all_rots
+    ###
+
+    edge_index = data.edge_index
+    edge_index = edge_index.view(2, B, -1).permute(1, 0, 2).contiguous()
+    _, _, E = edge_index.shape # B, 2, E  / 2: (iatoms, jatoms)
+    device = edge_index.device
+    d_edge = edge_features.size(-1)
+
+    perm = hs_inv.argmax(dim=-1)       # (B, K, n) 
+    invperm = perm.argsort(dim=-1)     # (B, K, n) 
+
+    batch_offsets = (torch.arange(B, device=device).view(B, 1) * n)  # (B,1)
+    #print(f"batch_offsets: {batch_offsets} | {batch_offsets.shape}")
+    i_old = edge_index[:, 0, :] - batch_offsets        # (B, E)
+    j_old = edge_index[:, 1, :] - batch_offsets        # (B, E)
+    #print(f"edge_index: {edge_index} | {edge_index.shape}")
+    #print(f"i_old: {i_old} | {i_old.shape}")
+    #print(f"j_old: {j_old} | {j_old.shape}")
+
+    i_new = torch.gather(invperm, 2, i_old.unsqueeze(1).expand(B, K, E))  # (B, K, E)
+    j_new = torch.gather(invperm, 2, j_old.unsqueeze(1).expand(B, K, E))  # (B, K, E)
+    #print(f"i_new: {i_new} | {i_new.shape}")
+    #print(f"j_new: {j_new} | {j_new.shape}")
+
+    i_new_off = i_new + batch_offsets.unsqueeze(1)     # (B, K, E)
+    j_new_off = j_new + batch_offsets.unsqueeze(1)     # (B, K, E)
+
+    edge_index_new = torch.stack([i_new_off, j_new_off], dim=2)  # (B, K, 2, E)
+    #pritn()
+
+    D = fa_pos_exp.size(-1)
+
+    pos_i = fa_pos_exp.gather(2, i_new.unsqueeze(-1).expand(B, K, E, D))  # (B,K,E,D)
+    pos_j = fa_pos_exp.gather(2, j_new.unsqueeze(-1).expand(B, K, E, D))  # (B,K,E,D)
+
+
+    cell_offsets = data["edges"].view(b, -1, 3) # (B, E, 3)
+    b, e_size, _ = cell_offsets.shape
+    expanded_cell = torch.repeat_interleave(cell, repeats=e_size, dim=0)
+    expanded_cell = expanded_cell.reshape(b, e_size, 3, 3)
+    #print(f"cell_offset: {cell_offsets} | {cell_offsets.shape}")
+    offsets = torch.einsum('bei,beij->bej', cell_offsets, expanded_cell)
+    offsets_exp = offsets[:, None, :, :].expand(B, K, E, 3)
+    offsets_exp_rot = torch.matmul(offsets_exp, gs_list.transpose(-1, -2))
+    #print(f"offsets_exp_rot: {offsets_exp_rot} | {offsets_exp_rot.shape}")
+    ###
+    offsets_exp_per = offsets_exp_rot.gather(2, perm.unsqueeze(-1).expand(-1, -1, -1, 3).long())
+    #print(f"offsets_exp_per: {offsets_exp_per} | {offsets_exp_per.shape}")
+
+    offsets_cart = torch.einsum('beq,bkqr->bekr', cell_offsets, fa_cell_exp)  # (B,K,E,3)
+    rel_pos = pos_j - pos_i #+ offsets_exp_per # (B, K, E, D)
+    rel_pos = rel_pos.permute(1, 0, 2, 3).contiguous()  # (K, B, E, D)
+    dist = torch.linalg.vector_norm(rel_pos, dim=-1) # (K, B, E)
+    #print(f"rel_pos {rel_pos} | {rel_pos.shape}")
+    #print(f" --> distances-1: {dist} | {dist.shape}")
+
+    i_new_off = i_new + batch_offsets.unsqueeze(1)               # (B,K,E)
+    j_new_off = j_new + batch_offsets.unsqueeze(1)               # (B,K,E)
+    edge_index_new = torch.stack([i_new_off, j_new_off], dim=2).permute(1, 0, 3, 2).contiguous()  # (K,B,E,2)
+    edge_index_new = edge_index_new.view(K,B*E,2)
+    edge_index_new = edge_index_new.permute(0, 2, 1)
+    #edge_features = edge_features[:, None, :, :, :].expand(B, K, n, n, d_edge)
+    #edge_features = torch.einsum('bhij,bhjlp,bhml->bhimp', hs_inv, edge_features, hs_inv)
+    #distances = edge_features[..., 2:]
+    #print(f" --> distances-2: {distances} | {distances.shape}")
+
+    return all_fa_pos, all_cell, all_rots, edge_index_new, entropy_loss
 
 
 def check_constraints(eigenval, eigenvec, dim=3):
