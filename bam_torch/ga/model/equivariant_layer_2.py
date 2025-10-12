@@ -148,6 +148,7 @@ class RACE(torch.nn.Module):
         self.products = torch.nn.ModuleList()
         self.readouts = torch.nn.ModuleList()
         self.readouts_0e = torch.nn.ModuleList()
+        self.readouts_last = torch.nn.ModuleList()
         target_irreps = o3.Irreps(f"{hidden_irreps.count(o3.Irrep(0, 1))}x0e")
         for i in range(nlayers):
             if i > 0: 
@@ -178,7 +179,7 @@ class RACE(torch.nn.Module):
 
             readout = Linear(
                 hidden_irreps,
-                output_irreps,
+                o3.Irreps("16x0e+3x1o"),
                 internal_weights=True,
                 shared_weights=True,
                 cueq_config=cueq_config,
@@ -193,6 +194,15 @@ class RACE(torch.nn.Module):
                 cueq_config=cueq_config,
             )
             self.readouts_0e.append(readout_0e)
+
+            readout_last = Linear(
+                o3.Irreps("16x0e"),
+                o3.Irreps("1x0e"),
+                internal_weights=True,
+                shared_weights=True,
+                cueq_config=cueq_config,
+            )
+            self.readouts_last.append(readout_last)
 
         #self.emb = torch.nn.Embedding(num_embeddings=num_species, embedding_dim=num_species)
     
@@ -245,8 +255,8 @@ class RACE(torch.nn.Module):
         node_f_logvar = [] 
         node_feats_list = []
         x_node_feats = self.linear_x(node_feats)
-        for interaction, product, readout, readout_0e in zip(
-            self.interactions, self.products, self.readouts, self.readouts_0e
+        for interaction, product, readout, readout_0e, readout_last in zip(
+            self.interactions, self.products, self.readouts, self.readouts_0e, self.readouts_last
         ):
             node_feats, sc = interaction(
                 node_attrs=node_attrs,
@@ -260,14 +270,18 @@ class RACE(torch.nn.Module):
                 node_feats=node_feats,
                 sc=sc, 
             )
-            #l_0_dim = sum([mul for mul, (l, p) in self.hidden_irreps if str(l) == "0"])
-            #l_1_dim = sum([mul for mul, (l, p) in self.hidden_irreps if str(l) == "1"])
+            l_0_dim = sum([mul for mul, (l, p) in o3.Irreps("16x0e+3x1o") if str(l) == "0"])
+            l_1_dim = sum([mul for mul, (l, p) in o3.Irreps("16x0e+3x1o") if str(l) == "1"])
 
             node_ks = readout(node_feats) # [n_nodes, len(heads)]  == [nbatch*num_nodes, "1x0e" or "2x0e"]
-            node_hs = readout_0e(node_feats)
+            node_hs_0 = readout_0e(node_feats)
+            node_hs = readout_last(node_ks[:, :l_0_dim])
+            #print(f"node_hs : {node_hs} | {node_hs.shape}")
+            #print(f"node_hs_0 : {node_hs_0} | {node_hs_0.shape}")
+            node_hs = torch.sum(torch.stack([node_hs, node_hs_0], dim=-1), dim=-1)
             node_feats_list.append(node_feats)
             
-            outputs_ks.append(node_ks)
+            outputs_ks.append(node_ks[:, l_0_dim:])
             outputs_hs.append(node_hs)
 
         # Concatenate node features
@@ -282,7 +296,7 @@ class RACE(torch.nn.Module):
 
         # Global pooling
         outputs_ks = torch.sum(outputs_ks, dim=-1) # [nbatch*num_nodes]  # total_energy
-        pseudo_hs = torch.sum(outputs_hs, dim=-1)
+        pseudo_hs = torch.sum(outputs_hs, dim=-1).view(num_graphs, -1)
         #print(f"node_energy = {node_energy}")
         pseudo_ks = scatter_sum(
                 src=outputs_ks,
@@ -508,7 +522,7 @@ class EquivariantInterface(torch.nn.Module):
             x = x + self.sample_invariant_noise(x, idx)
             p_hs, p_ks = self.vnn_interface(data, x)
             pseudo_ks.append(p_ks)
-            pseudo_hs.append(p_hs.view(b, n)) # (b*n, 1) -> (b, ns)
+            pseudo_hs.append(p_hs) # (b*n, 1) -> (b, ns)
         
         pseudo_ks = torch.cat(pseudo_ks, dim=0) 
         pseudo_hs = torch.cat(pseudo_hs, dim=0) 
@@ -526,6 +540,7 @@ class EquivariantInterface(torch.nn.Module):
         ks = self._postprocess_rotation(pseudo_ks)
         assert ks.shape == (b, k, 3, 3)
         gs = (hs, ks)
+        #print(f"hs: {hs}")
         return gs ,entropy_loss
 
     def _forward_unif(self, node_features, idx, k: int):
