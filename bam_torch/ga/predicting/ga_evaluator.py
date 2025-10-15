@@ -62,8 +62,8 @@ class GAEvaluator(GATrainer):
             # The frame averaging method
             # : {"det", "all", "se3-stochastic", "se3-det", "se3-all", "stochastic"}
             fa_method = "stochastic"
-        elif fa_method == "prob":
-            gs = np.load('test_gs.npy')
+        #elif fa_method == "prob":
+        #    gs = np.load('test_gs.npy')
 
         frame_averaging = self.json_data.get('frame_averaging')
         if frame_averaging == None:
@@ -94,7 +94,7 @@ class GAEvaluator(GATrainer):
                     batch=batch,  # transform the PyG graph data
                     model=self.model,
                     frame_averaging=frame_averaging, 
-                    mode=mode,      
+                    mode="test",      
                     crystal_task=pbc, 
                 )
             else:

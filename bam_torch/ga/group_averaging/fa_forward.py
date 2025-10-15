@@ -150,12 +150,7 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
                 hs = batch.fa_rot[0][i]
                 ks = batch.fa_rot[1][i]
                 # Transform forces to guarantee equivariance of FA method
-                #g_forces = (
-                #    preds["forces"]
-                #    .view(B, N, 3)
-                #    .bmm(ks.to(preds["forces"].device))
-                #    .view(-1, 3)
-                #)
+
                 forces = preds["forces"].view(B, N, 3)
                 g_forces_rot = torch.bmm(forces, ks.to(preds["forces"].device))
                 g_forces = torch.bmm(hs.to(preds["forces"].device), g_forces_rot)
@@ -163,16 +158,13 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
 
             # Energy conservation loss
             if preds.get("forces_grad_target") is not None:
-                if fa_rot is None:
-                    fa_rot = batch.fa_rot[i]
-                # Transform gradients to stay consistent with FA
-                g_grad_target = (
-                    preds["forces_grad_target"]
-                    .view(B, N, 3)
-                    .bmm(fa_rot.to(preds["forces_grad_target"].device))
-                    .view(-1, 3)
-                )
-                gt_all.append(g_grad_target)
+                hs = batch.fa_rot[0][i]
+                ks = batch.fa_rot[1][i]
+
+                g_grad_target = preds["forces_grad_target"].view(B, N, 3)
+                g_grad_target = torch.bmm(g_grad_target, ks.to(preds["forces_grad_target"].device))
+                g_grad_target = torch.bmm(hs.to(preds["forces_grad_target"].device), g_grad_target)
+                gt_all.append(g_grad_target.view(-1, 3))
 
         batch.pos = original_pos
         if crystal_task:
