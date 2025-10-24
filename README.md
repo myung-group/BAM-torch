@@ -186,9 +186,7 @@ bam-torch/
 │   ├── training/        # Training loop, loss computation, and optimization routines
 │   └── utils/           # Common utility functions and helper tools
 ├── examples/
-│   ├── example-qm9/     # QM9 benchmark example
-│   ├── example-md17/    # MD17 benchmark example
-│   └── example-ani/     # ANI-1 benchmark example
+│   ├── example-3BPA/    # QM9 benchmark example
 ├── README.md            # Project documentation
 ├── install_deps.py      # Dependency installation script
 ├── pyproject.toml       # Build configuration
