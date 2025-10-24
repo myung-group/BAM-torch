@@ -67,7 +67,7 @@ Then:
 $ pip install pytorch_warmup torch_geometric
 ```
 
-### Step 5: Install CuEquivariance Library (Optional but Recommended)
+### Step 5: Install CuEquivariance Library (Optional)
 For GPU kernel accelerations:
 ```bash
 $ pip install cuequivariance-torch
