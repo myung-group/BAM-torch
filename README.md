@@ -82,7 +82,7 @@ $ pip install laplace-torch
 
 ### Step 7: Install BAM
 ```bash
-$ git clone https://github.com/yourusername/bam-torch.git
+$ git clone https://github.com/myung-group/BAM-torch
 $ cd bam-torch
 $ pip install -e .
 ```
