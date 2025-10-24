@@ -54,6 +54,42 @@ if CUET_AVAILABLE:
                 yield O3_e3nn(l=l, p=1 * (-1) ** l)
                 yield O3_e3nn(l=l, p=-1 * (-1) ** l)
 
+    class cuetFullTensorProduct (torch.nn.Module):
+
+        def __init__ (
+                self,
+                irreps_in1: cue.Irreps,
+                irreps_in2: cue.Irreps,
+                filter_irreps_out: cue.Irreps = None,
+                *,
+                layout: cue.IrrepsLayout = None,
+                device: torch.device = None
+        ):
+            super().__init__()
+            
+            e = cue.descriptors.full_tensor_product (
+                irreps_in1,
+                irreps_in2,
+                filter_irreps_out
+            )
+            self.irreps_in1 = irreps_in1 
+            self.irreps_in2 = irreps_in2 
+            self.irreps_out = e.operands[-1].irreps 
+
+            self.f = cuet.EquivariantTensorProduct (
+                e,
+                layout=layout,
+                device=device
+            )
+        
+        def forward (
+                self,
+                x1: torch.Tensor,
+                x2: torch.Tensor
+        )-> torch.Tensor:
+            return self.f (x1, x2)
+        
+
 else:
     print(
         "cuequivariance or cuequivariance_torch is not available. Cuequivariance acceleration will be disabled."
@@ -169,43 +205,6 @@ class TensorProduct:
             internal_weights=internal_weights,
         )
 
-
-
-class cuetFullTensorProduct (torch.nn.Module):
-
-    def __init__ (
-            self,
-            irreps_in1: cue.Irreps,
-            irreps_in2: cue.Irreps,
-            filter_irreps_out: cue.Irreps = None,
-            *,
-            layout: cue.IrrepsLayout = None,
-            device: torch.device = None
-    ):
-        super().__init__()
-        
-        e = cue.descriptors.full_tensor_product (
-            irreps_in1,
-            irreps_in2,
-            filter_irreps_out
-        )
-        self.irreps_in1 = irreps_in1 
-        self.irreps_in2 = irreps_in2 
-        self.irreps_out = e.operands[-1].irreps 
-
-        self.f = cuet.EquivariantTensorProduct (
-            e,
-            layout=layout,
-            device=device
-        )
-    
-    def forward (
-            self,
-            x1: torch.Tensor,
-            x2: torch.Tensor
-    )-> torch.Tensor:
-        return self.f (x1, x2)
-    
 
 class FullTensorProduct:
     """ Wrapper around o3\.FullTensorProduct
