@@ -31,61 +31,50 @@ BAM (Bayesian Atoms Modeling) is an implementation of **Bayesian E(3) Equivarian
 ## Installation
 
 ### Prerequisites
+
 - Python 3.11
 - CUDA 12.4+ (for GPU support)
 - PyTorch 2.5.1+
 
 ### Step 1: Create Conda Environment
+
 ```bash
 $ conda create --name bam_torch python=3.11
 $ conda activate bam_torch
 ```
 
 ### Step 2: Install Core Dependencies
+
+As of October 2025, [PyTorch Geometric](https://pyg.org/) supports PyTorch up to version 2.8.0.  
+Check their [wheels page](https://data.pyg.org/whl/) for any updates (near the bottom).  
+We should therefore manually install a version of PyTorch between 2.5.1 and 2.8.0.  
+Running `install_deps.py` will automatically detect the version of CUDA linked to PyTorch before installing the version of PyG compatible with that combination of CUDA and PyTorch.
+
 ```bash
-$ pip install torch==2.4.1+cu121 torchvision==0.19.1+cu121 torchaudio==2.4.1 \
-  --extra-index-url https://download.pytorch.org/whl/cu121
-
-or
-
-$ pip install torch==2.6.0+cu126 torchvision==0.21.0+cu126 torchaudio==2.6.0 \
-  --extra-index-url https://download.pytorch.org/whl/cu126
+$ pip install "torch<=2.8"
+$ python install_deps.py
 ```
 
-### Step 3: Check PyTorch and CUDA Version
-```bash
-$ python -c "import torch; print(torch.__version__)"  
->>> 2.4.1+cu121
-or
->>> 2.6.0+cu126
-```
+### Step 3: Install BAM
 
-### Step 4: Install PyTorch Geometric
-```bash
-$ pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-${TORCH}+${CUDA}.html
-```
-
-For example:
-```bash
-$ pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
-  -f https://data.pyg.org/whl/torch-2.4.1+cu121.html
-```
-
-Then:
-```bash
-$ pip install torch_geometric pytorch_warmup 
-```
-
-### Step 5: Install Laplace Approximation (Optional)
-```bash
-$ pip install laplace-torch
-```
-
-### Step 6: Install BAM
 ```bash
 $ git clone https://github.com/myung-group/BAM-torch
 $ cd BAM-torch
 $ pip install -e .
+```
+
+### Step 4: Install optional components as needed
+
+For low-level acceleration of equivariant neural networks, use [cuEquivariance](https://github.com/NVIDIA/cuEquivariance).
+
+```bash
+$ pip install -e ".[cueq]"
+```
+
+To enable Laplace approximations for neural networks, use [Laplace](https://aleximmer.com/Laplace/).
+
+```bash
+$ pip install -e ".[laplace]"
 ```
 
 ## Quick Start
@@ -206,7 +195,7 @@ bam-torch/
 | RACE-LA       | 4.8         | 18.2        | 15.3        | 51.0        | 60.8         | 171.8        |
 
 #### Table 5: Evaluation results on the oBN25 test dataset using different UQ methods. Values are reported for RMSE and CE of energy and force, and AUROC.
-| Method    | Energy RMSE<br>(ID/OOD) | Force RMSE<br>(ID/OOD)  | Energy CE<br>(ID/OOD) | Force CE<br>(ID/OOD) | AUROC | 
+| Method    | Energy RMSE<br>(ID/OOD) | Force RMSE<br>(ID/OOD)  | Energy CE<br>(ID/OOD) | Force CE<br>(ID/OOD) | AUROC |
 |-----------|:-----------------------:|:-----------------------:|:---------------------:|:--------------------:|:-----:|
 | RACE-MVE  | 0.20/7.39               | 0.62/0.53               | 0.01/0.33             | 0.06×10⁻³/1.25×10⁻²  | 0.54  |
 | RACE-DE   | 0.14/6.94               | 0.53/0.37               | 0.03/0.21             | 8.49×10⁻³/5.17×10⁻²  | 1.00  |
@@ -338,5 +327,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Built upon [e3nn](https://github.com/e3nn/e3nn) for E(3) equivariant operations
-- Main Development Group at [SKKU](https://www.myung.skku.edu/) 
+- Main Development Group at [SKKU](https://www.myung.skku.edu/)
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "BAM-torch"
 version = "0.1.0.dev0"
-description = "Uncertainty Quantification of Bayesian Deep Learning ab initio Potentials"
+description = "uncertainty-aware atomistic simulations at scale"
 authors = [
     {name = "Myung Group", email = "myung.group@gmail.com"}
 ]
@@ -29,7 +29,7 @@ dependencies = [
     "scipy",
     "ase",
     "matscipy",
-    "torch>=2.5.1,<=2.8.0",
+    "torch>=2.5.1",
     "pyg_lib",
     "torch_scatter",
     "torch_sparse",
@@ -37,6 +37,7 @@ dependencies = [
     "torch_spline_conv",
     "e3nn",
     "pytorch_warmup",
+    "torch_geometric",
 ]
 
 [project.optional-dependencies]

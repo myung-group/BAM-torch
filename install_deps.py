@@ -44,8 +44,9 @@ def main():
                 or (cur_cuda[0] == max_cuda[0] and cur_cuda[1] <= max_cuda[1]):
             cuda_ver_supported = True
         else:
-            print("Warning: CUDA version is unsupported by PyG "
-                  f"when used with PyTorch {cur_torch_str}.")
+            print("Warning: This CUDA version "
+                  f"(together with PyTorch {cur_torch_str}) "
+                  "is unsupported by PyG.")
             print("\tCheck the list shown on https://data.pyg.org/whl/ "
                   "for supported PyTorch-CUDA versions.")
             print("\tFalling back to the CPU version of CUDA for now...")
@@ -67,10 +68,10 @@ def main():
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "--find-links", find_links,
-            "pyg-lib", "torch_scatter", "torch_sparse",
+            "pyg_lib", "torch_scatter", "torch_sparse",
             "torch_cluster", "torch_spline_conv"
         ])
-        print("Successfully installed torch_scatter and torch_sparse")
+        print("Successfully installed pyg_lib and dependencies")
     except subprocess.CalledProcessError as e:
         print(f"Error installing packages: {e}")
         print(f"You may need to manually install from: {find_links}")
