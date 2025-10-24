@@ -13,28 +13,39 @@ license = {text = "LGPL-3.0"}
 classifiers = [
     "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
+
+# XXX: torch, pyg_lib, torch_*
+# should have all been installed beforehand via --find-links <URL>
+# (either manually or with install_deps.py)
+# instead of having pip automatically install them based on this TOML file.
+# Those packages are only listed below as checks.
 dependencies = [
     "numpy",
     "scipy",
     "ase",
     "matscipy",
-    "torch",
+    "torch>=2.5.1,<=2.8.0",
+    "pyg_lib",
     "torch_scatter",
     "torch_sparse",
+    "torch_cluster",
+    "torch_spline_conv",
     "e3nn",
     "pytorch_warmup",
 ]
+
+[project.optional-dependencies]
+cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12"]
+laplace = ["laplace-torch"]
 
 [project.urls]
 Homepage = "https://github.com/myung-group/BAM-torch"
 
 [tool.setuptools]
 packages = {find = {}}
+
