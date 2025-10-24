@@ -313,7 +313,6 @@ R: Random samples B: High BALD score samples.
 
 ## Datasets
 
-Supported datasets:
 - **QM9**: Small organic molecules and their quantum properties
 - **rMD17**: Molecular dynamics trajectories of organic molecules
 - **3BPA**: Flexible drug-like molecule at 300–1200 K
