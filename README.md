@@ -67,20 +67,12 @@ Then:
 $ pip install pytorch_warmup torch_geometric
 ```
 
-### Step 5: Install CuEquivariance Library (Optional)
-For GPU kernel accelerations:
-```bash
-$ pip install cuequivariance-torch
-$ pip install cuequivariance
-$ pip install cuequivariance-ops-torch-cu12
-```
-
-### Step 6: Install Laplace Approximation (Optional)
+### Step 5: Install Laplace Approximation (Optional)
 ```bash
 $ pip install laplace-torch
 ```
 
-### Step 7: Install BAM
+### Step 6: Install BAM
 ```bash
 $ git clone https://github.com/myung-group/BAM-torch
 $ cd bam-torch
