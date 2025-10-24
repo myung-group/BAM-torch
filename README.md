@@ -331,9 +331,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Built upon [e3nn](https://github.com/e3nn/e3nn) for E(3) equivariant operations
 - Main Development Group at [SKKU](https://www.myung.skku.edu/) 
 
-%## Contact
-
-%- **Lead Author**: [Your Name] - [email@example.com]
-%- **Project Link**: [https://github.com/myung-group/bam-torch](https://github.com/myung-group/bam-torch)
-%- **Issues**: [GitHub Issues](https://github.com/myung-group/bam-torch/issues)
-%- **Discussions**: [GitHub Discussions](https://github.com/myung-group/bam-torch/discussions)
