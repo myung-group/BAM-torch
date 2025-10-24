@@ -334,6 +334,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 %## Contact
 
 %- **Lead Author**: [Your Name] - [email@example.com]
-%- **Project Link**: [https://github.com/yourusername/bam-torch](https://github.com/yourusername/bam-torch)
-%- **Issues**: [GitHub Issues](https://github.com/yourusername/bam-torch/issues)
-%- **Discussions**: [GitHub Discussions](https://github.com/yourusername/bam-torch/discussions)
+%- **Project Link**: [https://github.com/myung-group/bam-torch](https://github.com/myung-group/bam-torch)
+%- **Issues**: [GitHub Issues](https://github.com/myung-group/bam-torch/issues)
+%- **Discussions**: [GitHub Discussions](https://github.com/myung-group/bam-torch/discussions)
