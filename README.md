@@ -137,7 +137,7 @@ Run on a single node without using a job scheduler, by setting the environment v
 $ CUDA_VISIBLE_DEVICES=0 python main.py
 ```
 
-Alternatively, set "gpu-parallel": false in input.json:
+Alternatively, set `"gpu-parallel": false` in `input.json`:
 ```bash
 $ python main.py
 ```
@@ -148,13 +148,13 @@ Run on a single node with multiple GPUs by setting the environment variables:
 $ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py
 ```
 
-Alternatively, set "gpu-parallel": true in input.json:
+Alternatively, set `"gpu-parallel": true` in `input.json`:
 ```bash
 $ python main.py
 ```
 This automatically detects all available GPUs and utilizes them for distributed computation.
 
-For an example of using multiple nodes and multiple GPUs with the SLURM scheduler, please refer to "examples/example-3BPA_300K-multiGPU"
+For an example of using multiple nodes and multiple GPUs with the SLURM scheduler, please refer to `examples/example-3BPA_300K-multiGPU/`
 
 ### Evaluation
 ```python
