@@ -43,13 +43,21 @@ $ conda activate bam_torch
 
 ### Step 2: Install Core Dependencies
 ```bash
-$ pip install numpy scipy matscipy torch
+$ pip install torch==2.4.1+cu121 torchvision==0.19.1+cu121 torchaudio==2.4.1 \
+  --extra-index-url https://download.pytorch.org/whl/cu121
+
+or
+
+$ pip install torch==2.6.0+cu126 torchvision==0.21.0+cu126 torchaudio==2.6.0 \
+  --extra-index-url https://download.pytorch.org/whl/cu126
 ```
 
 ### Step 3: Check PyTorch and CUDA Version
 ```bash
 $ python -c "import torch; print(torch.__version__)"  
->>> 2.5.1+cu124
+>>> 2.4.1+cu121
+or
+>>> 2.6.0+cu126
 ```
 
 ### Step 4: Install PyTorch Geometric
@@ -59,12 +67,13 @@ $ pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv
 
 For example:
 ```bash
-$ pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.5.1+cu124.html
+$ pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
+  -f https://data.pyg.org/whl/torch-2.4.1+cu121.html
 ```
 
 Then:
 ```bash
-$ pip install pytorch_warmup torch_geometric
+$ pip install torch_geometric pytorch_warmup 
 ```
 
 ### Step 5: Install Laplace Approximation (Optional)
@@ -75,7 +84,7 @@ $ pip install laplace-torch
 ### Step 6: Install BAM
 ```bash
 $ git clone https://github.com/myung-group/BAM-torch
-$ cd bam-torch
+$ cd BAM-torch
 $ pip install -e .
 ```
 
@@ -83,42 +92,39 @@ $ pip install -e .
 
 ### Basic Training Example
 ```python
-from bam import BayesianE3Model
-from bam.losses import JointEnergyForceNLL
-from bam.data import load_dataset
+import os
+import json
 
-# Load configuration
-config = {
-    "model": {
-        "hidden_dim": 128,
-        "num_layers": 4,
-        "uncertainty_method": "ensemble",
-        "race_iterations": 3
-    },
-    "training": {
-        "lr": 1e-3,
-        "epochs": 500,
-        "batch_size": 32
-    }
-}
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
-# Initialize model
-model = BayesianE3Model(**config["model"])
+from bam_torch.training.base_trainer import BaseTrainer
+from bam_torch.utils.utils import find_input_json, date
 
-# Load data
-train_loader, val_loader = load_dataset("qm9", batch_size=32)
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-# Training
-criterion = JointEnergyForceNLL()
-optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["lr"])
+def run(rank, world_size, json_data):
+    setup(rank, world_size)
+    base_trainer = BaseTrainer(json_data, rank, world_size)
+    base_trainer.train()
 
-for epoch in range(config["training"]["epochs"]):
-    for batch in train_loader:
-        energy_pred, force_pred, energy_unc, force_unc = model(batch)
-        loss = criterion(energy_pred, force_pred, batch.energy, batch.force, 
-                        energy_unc, force_unc)
-        loss.backward()
-        optimizer.step()
+if __name__ == '__main__':
+    input_json_path = find_input_json()
+    with open(input_json_path) as f:
+        json_data = json.load(f)
+
+    if not json_data['gpu-parallel'] or json_data['device'] == 'cpu':
+        rank = 0
+        world_size = 1
+        run(rank, world_size, json_data)
+    else:
+        world_size = torch.cuda.device_count()
+        mp.spawn(run, args=(world_size, json_data), nprocs=world_size, join=True)
+        dist.destroy_process_group()
 ```
 
 ## Running Examples
@@ -126,61 +132,67 @@ for epoch in range(config["training"]["epochs"]):
 There are examples in `examples/example-*/`
 
 ### Single-GPU Training
-Using environment variable:
+Run on a single node without using a job scheduler, by setting the environment variable:
 ```bash
 $ CUDA_VISIBLE_DEVICES=0 python main.py
 ```
 
-Or set `"gpu-parallel": false` in `input.json`, then:
+Alternatively, set "gpu-parallel": false in input.json:
 ```bash
 $ python main.py
 ```
 
 ### Multi-GPU Training (DistributedDataParallel)
-Using environment variables:
+Run on a single node with multiple GPUs by setting the environment variables:
 ```bash
 $ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py
 ```
 
-Or set `"gpu-parallel": "data"` (or `true`) in `input.json`, then:
+Alternatively, set "gpu-parallel": true in input.json:
 ```bash
 $ python main.py
 ```
-This automatically detects all available GPUs and uses them for computation.
+This automatically detects all available GPUs and utilizes them for distributed computation.
+
+For an example of using multiple nodes and multiple GPUs with the SLURM scheduler, please refer to "examples/example-3BPA_300K-multiGPU"
 
 ### Evaluation
-```bash
-$ python evaluate.py --checkpoint path/to/checkpoint.pth --dataset test_data
-```
+```python
+import json
+import torch
 
-### Active Learning Pipeline
-```bash
-$ python active_learning.py \
-    --config configs/active_learning.yaml \
-    --acquisition bald \
-    --budget 1000 \
-    --iterations 10
+from bam_torch.predicting.evaluator import Evaluator
+from bam_torch.utils import find_input_json, date
+
+input_json_path = find_input_json()
+with open(input_json_path) as f:
+    json_data = json.load(f)
+
+evaluator = Evaluator(json_data)
+evaluator.evaluate()
 ```
 
 ## Project Structure
 
 ```
 bam-torch/
-├── bam/
-│   ├── models/           # Model architectures (RACE, E3-equivariant layers)
-│   ├── losses/           # Loss functions (Joint Energy-Force NLL, MVE)
-│   ├── uncertainty/      # Uncertainty quantification methods
-│   ├── active_learning/  # BALD and other acquisition strategies
-│   ├── data/            # Dataset loaders and preprocessing
-│   ├── ood/             # Out-of-distribution detection
-│   └── utils/           # Utility functions
+├── bam_torch/
+│   ├── lammps/          # LAMMPS interface for ML potentials
+|   |   ├── README.md    # Installation and usage guide for LAMMPS interface
+│   ├── laplace/         # Laplace approximation and Bayesian inference utilities
+│   ├── model/           # Core neural network architectures (RACE, E(3)-equivariant layers)
+│   ├── predicting/      # Inference and prediction pipelines (Model evaluation)
+│   ├── tase/            # ASE interface for ML potentials
+│   ├── training/        # Training loop, loss computation, and optimization routines
+│   └── utils/           # Common utility functions and helper tools
 ├── examples/
 │   ├── example-qm9/     # QM9 benchmark example
 │   ├── example-md17/    # MD17 benchmark example
 │   └── example-ani/     # ANI-1 benchmark example
-├── configs/             # Configuration files
-├── scripts/             # Training and evaluation scripts
-└── tests/               # Unit tests
+├── README.md            # Project documentation
+├── install_deps.py      # Dependency installation script
+├── pyproject.toml       # Build configuration
+└── LICENSE              # License information
 ```
 
 ## Benchmarks & Results
