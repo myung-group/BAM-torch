@@ -43,12 +43,14 @@ $ conda create --name bam_torch python=3.11
 $ conda activate bam_torch
 ```
 
+Equivalent environments have also been tested with [virtualenv](https://virtualenv.pypa.io/) and [venv](https://docs.python.org/library/venv.html).
+
 ### Step 2: Install Core Dependencies
 
-As of October 2025, [PyTorch Geometric](https://pyg.org/) supports PyTorch up to version 2.8.0.  
+As of October 2025, [PyTorch Geometric](https://pyg.org/) (PyG) supports PyTorch up to version 2.8.0.  
 Check their [wheels page](https://data.pyg.org/whl/) for any updates (near the bottom).  
 We should therefore manually install a version of PyTorch between 2.5.1 and 2.8.0.  
-Running `install_deps.py` will automatically detect the version of CUDA linked to PyTorch before installing the version of PyG compatible with that combination of CUDA and PyTorch.
+Running `install_deps.py` will automatically detect the version of CUDA linked to PyTorch, and then install the version of PyG compatible with that combination of CUDA and PyTorch.
 
 ```bash
 $ pip install "torch<=2.8"
@@ -71,7 +73,7 @@ For low-level acceleration of equivariant neural networks, use [cuEquivariance](
 $ pip install -e ".[cueq]"
 ```
 
-To enable Laplace approximations for neural networks, use [Laplace](https://aleximmer.com/Laplace/).
+To enable Laplace approximations for neural networks, use [laplace-torch](https://aleximmer.com/Laplace/).
 
 ```bash
 $ pip install -e ".[laplace]"
@@ -80,6 +82,7 @@ $ pip install -e ".[laplace]"
 ## Quick Start
 
 ### Basic Training Example
+
 ```python
 import os
 import json
