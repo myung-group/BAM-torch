@@ -1,6 +1,7 @@
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch_geometric.data import Batch as DataBatch
+from torch_ema import ExponentialMovingAverage
 
 from e3nn import o3
 from e3nn.util import jit
@@ -12,6 +13,7 @@ import random
 import atexit
 import pprint
 import numpy as np
+from contextlib import nullcontext
 from copy import deepcopy
 from time import time
 
@@ -19,233 +21,223 @@ from bam_torch.utils.logger import Logger
 from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
 from bam_torch.model.wrapper_ops import CuEquivarianceConfig
+from bam_torch.model import MODEL_REGISTRY
 from .loss import RMSELoss, l2_regularization
 
 
 class BaseTrainer:
     def __init__(self, json_data, rank=0, world_size=1):
-        """ The json_data (dict.) should include the following information
+        """ Base class for training models in BAM.
+
+        Args:
+            json_data (dict): Parsed configuration dictionary (from input.json).
+            rank       (int): Process rank (for DDP).
+            world_size (int): Total number of processes (for DDP).
         ...
         """
+        self.date1 = date()
         self.json_data = json_data
         self.rank = rank
         self.world_size = world_size
-        self.ddp = False
-        if self.world_size > 1:
-            self.ddp = True
-        self.date1 = date()
+        self.ddp = self.world_size > 1
+        self.l_ckpt_saved = False
+        
+        # Run setup routines
+        self.setup()
+    
+    def setup(self):
+        """Configure all core training components.
 
-        ## 1) Reproducibility
-        self.set_random_seed()
-
-        ## 2) Configure device
+        Sets up device, model, optimizer, dataloader, scheduler,
+        loss function, and logger.
+        """
+        self.set_random_seed() # Reproducibility
         self.device = self.configure_device()
-
-        ## 3) Configure model
         self.model, self.n_params, _, self.start_epoch = self.configure_model()
-        #self.model = jit.compile(self.model)
-        #self.model = torch.jit.script(self.model)
-        
-        ## 4) Configure optimizer
         self.optimizer = self.configure_optimizer()
-        
-        ## 5) Configure data_loader
-        self.train_loader, self.valid_loader, self.uniq_element, self.enr_avg_per_element = \
-                                                        self.configure_dataloader()
-        
-        ## 6) Configure scheduler
+        self.train_loader, self.valid_loader, self.uniq_element, self.enr_avg_per_element \
+                       = self.configure_dataloader()
         self.scheduler = self.configure_scheduler()
-
-        ## 7) Configure loss function
-        self.loss_fn, self.loss_config = self.load_loss()
-
-        ## 8) Configure logger
+        self.loss_fn, self.loss_config = self.configure_loss()
         self.log_config, self.log_interval, self.logger = self.configure_logger()
+        self.loss_dict, self.ckpt = self.configure_checkpoint()
+        self.ema = self.configure_exponential_moving_average()
+    
+    def train(self):
+        """Main training loop for BAM models.
+        """
+        # Initial test
+        self.initial_test()
 
-        ## 9) Test train
-        #self.train_one_epoch(mode='compile')
+        # Print logger head
+        if self.rank == 0:
+            self.logger.print_logger_head()
+
+        # Main training loop
+        nepoch = self.json_data['NN']['nepoch']
+        for epoch in range(nepoch):
+            try:
+                self.model.update_criterion_value(epoch+self.start_epoch+1)
+            except:
+                pass
+
+            epoch_loss_train = self.train_one_epoch(mode='train')
+            if self.ddp:
+                torch.distributed.barrier()
+
+            # Validate and record
+            param_context = (
+                self.ema.average_parameters() if self.ema is not None else nullcontext()
+            )
+            with param_context:
+                if (epoch+1)%self.log_interval == 0:
+                    epoch_loss_valid = self.train_one_epoch(mode='valid')
+                    if self.ddp:
+                        torch.distributed.barrier()
+
+                    if self.rank == 0:
+                        # Update check point 
+                        if epoch_loss_valid['loss'] < self.loss_test_min:
+                            self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
+                            self.loss_test_min = epoch_loss_valid['loss']
+                            self.l_ckpt_saved = False
+
+                        # Print epoch loss
+                        self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
+
+                        # Free GPU memory
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        
+                    # Update scheduler (learning rate)
+                    metrics = None
+                    if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
+                        metrics = epoch_loss_valid['loss']
+                    self.scheduler.step(metrics, epoch)
+                
+                # Save check point
+                if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                    torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                    torch.save(self.model, 'model.pt')
+                    self.l_ckpt_saved = True
+
+    def initial_test(self):
+        """Run a preliminary test epoch 
+        and record the initial reference loss (loss_test_min).
+        """
         epoch_loss_test = self.train_one_epoch(mode='test')
         if self.ddp:
             torch.distributed.barrier()
         self.loss_test_min = epoch_loss_test['loss']
-
-        ## 10) Configure check point dictionary
-        self.loss_dict = {'epoch': 0, 'train': [], 'valid': []}
-        self.l_ckpt_saved = False
-        self.ckpt = {
-            'params': self.model.state_dict(),
-            'opt_state': self.optimizer.state_dict(), # param_groups,
-            'uniq_element': self.uniq_element,
-            'enr_avg_per_element': self.enr_avg_per_element,
-            'loss': self.loss_dict,
-            'input.json': self.json_data,
-            'scheduler' : self.scheduler.state_dict(),
-            'train_scale_shift' : [],
-            'valid_scale_shift' : [],
-        }
-        # Save input parameters setting
-        self.save_input_parameters(self.json_data)
-     
-    def train(self):
-        if self.rank == 0:
-            self.logger.print_logger_head()
-        nepoch = self.json_data['NN']['nepoch']
-        ## 11) Main loop
-        for epoch in range(nepoch):
-            self.model.update_criterion_value(epoch)
-            epoch_loss_train = self.train_one_epoch(mode='train')
-            #check_parameter_sync(self.model, self.rank)
-            if self.ddp:
-                torch.distributed.barrier()
-
-            if (epoch+1)%self.log_interval == 0:
-                epoch_loss_valid = self.train_one_epoch(mode='valid')
-                if self.ddp:
-                    torch.distributed.barrier()
-
-                ## 12) Save model to pckl file
-                if self.rank == 0:
-                    if epoch_loss_valid['loss'] < self.loss_test_min:
-                        self.loss_test_min = epoch_loss_valid['loss']
-                        self.loss_dict['epoch'] = epoch+1+self.start_epoch
-                        self.loss_dict['train'] = epoch_loss_train['loss']
-                        self.loss_dict['valid'] = epoch_loss_valid['loss']
-                        state_dict = self.model.state_dict()
-                        if self.ddp:
-                            state_dict = self.model.module.state_dict()
-                        self.ckpt['params'] = state_dict
-                        self.ckpt['opt_state'] = self.optimizer.state_dict()
-                        self.ckpt['scheduler'] = self.scheduler.state_dict()
-                        self.ckpt['loss'] = self.loss_dict
-                        self.l_ckpt_saved = False
-                
-                    # Get the last learning rate
-                    if self.json_data['scheduler'] != "Null":
-                        lr = self.scheduler.get_lr()
-                    
-                    ## 13) Print out epoch loss
-                    step_dict = {
-                        "date": date(),
-                        "epoch": epoch+1+self.start_epoch,
-                    }
-                    self.logger.print_epoch_loss(step_dict, 
-                                                epoch_loss_train, 
-                                                epoch_loss_valid,
-                                                lr)
-                torch.cuda.empty_cache()
-                gc.collect()
-                ## 14) Update scheduler (learning rate)
-                if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
-                    metrics = epoch_loss_valid['loss']
-                else:
-                    metrics = None
-                self.scheduler.step(metrics, epoch)
-            
-            if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                torch.save(deepcopy(self.model), 'model.pt')
-                self.l_ckpt_saved = True
 
     def train_one_epoch(self, mode='train', data_loader=None):
         if mode == 'train':
             self.model.train()
             backprop = True
             loss_log_config = self.log_config['train']
-            if data_loader == None:
+            if data_loader is None:
                 data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = {
-                    k: [] for k in self.enr_avg_per_element.keys()
-            }
-        elif mode == 'compile':
-            backprop = False
-            loss_log_config = self.log_config['valid']
-            if data_loader == None:
-                data = next(iter(self.train_loader)).to(self.device)
-                data = self.data_to_dict(data)
-            self.model = torch.jit.trace(self.model, data)
+            self.ckpt['train_scale_shift'] = []
         else:  # test or valid
             self.model.eval()
             backprop = False
             loss_log_config = self.log_config['valid']
-            if data_loader == None:
+            if data_loader is None:
                 data_loader = self.valid_loader
             if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = {
-                    k: [] for k in self.enr_avg_per_element.keys()
-                }
+                self.ckpt['valid_scale_shift'] = []
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
             data = self.move_to_device(data, self.device)
-            #data = self.data_to_dict(data)  # This is for torch.jit compile
+            # Predict energy, forces, and so on from model
             preds = self.model(data, backprop)
             preds = self.scale_shift(preds, data, mode)
-
-            loss_dict = self.compute_loss(preds, data)
-            for l in loss_log_config:
-                val = loss_dict.get(l, torch.nan)
-                epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
             
+            loss_dict = self.compute_loss(preds, data)
             loss = loss_dict['loss']
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
-                torch.cuda.synchronize()
                 #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
                 torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                 self.optimizer.step()
-            else:
-                torch.cuda.synchronize()
-        
+
+                if self.ema is not None:
+                    self.ema.update()
+
+            for l in loss_log_config:
+                val = loss_dict.get(l, torch.nan)
+                epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
+
+        torch.cuda.synchronize()
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
-                           for key, value in epoch_loss_dict.items()}      
+                           for key, value in epoch_loss_dict.items()}
         return epoch_loss_dict
-    
+
     def scale_shift(self, preds, data, mode):
         energy_target = data["energy"].flatten()
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         preds["energy"] = energy_predict + shift_enr
-        ###
-        node_energy = preds["node_energy"].detach()
-        energy = energy_predict.detach()
-        batch = data["batch"]
-        ratios = node_energy/energy[batch]
-        shift_node_enr = shift_enr * ratios
-        species = data["species"][:len(node_energy)]
-        ###
         if mode == 'train':
-            #self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
-            for i in range(len(species)):
-                self.ckpt['train_scale_shift'][species[i].item()].append(
-                    shift_node_enr[i].detach().cpu())
+            self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
         elif mode == 'valid':
-            #self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
-            for i in range(len(species)):
-                self.ckpt['valid_scale_shift'][species[i].item()].append(
-                    shift_node_enr[i].detach().cpu())
+            self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
         return preds
+
+    def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):       
+        self.loss_dict.update({
+            'epoch': epoch + 1 + self.start_epoch,
+            'train': epoch_loss_train['loss'],
+            'valid': epoch_loss_valid['loss']
+        })
+        state_dict = self.model.state_dict()
+        if self.ddp:
+            state_dict = self.model.module.state_dict()
+        self.ckpt.update({
+            'params': state_dict,
+            'opt_state': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'loss': self.loss_dict
+        })
     
+    def print_logger(self, epoch, epoch_loss_train, epoch_loss_valid):
+        # Get the last learning rate
+        lr = self.scheduler.get_lr() \
+            if self.json_data['scheduler'] != "Null" \
+            else self.json_data['NN']['learning_rate']
+        # Print epoch loss
+        step_dict = {
+            "date": date(),
+            "epoch": epoch+1+self.start_epoch,
+        }
+        self.logger.print_epoch_loss(step_dict, 
+                                    epoch_loss_train, 
+                                    epoch_loss_valid,
+                                    lr)
+
     def configure_dataloader(self):
-        json_data = self.json_data
         train_loader, valid_loader, uniq_element, enr_avg_per_element = \
-                                                        get_dataloader(
-                                                            json_data['fname_traj'],
-                                                            json_data['ntrain'],
-                                                            json_data['nvalid'],
-                                                            json_data['nbatch'],
-                                                            json_data['cutoff'],
-                                                            json_data['NN']['data_seed'],
-                                                            json_data['element'],
-                                                            json_data['regress_forces'],
-                                                            json_data.get('max_neigh'),
-                                                            self.rank,
-                                                            self.world_size
-                                                        )
+            get_dataloader(
+                self.json_data['fname_traj'],
+                self.json_data['ntrain'],
+                self.json_data['nvalid'],
+                self.json_data['nbatch'],
+                self.json_data['cutoff'],
+                self.json_data['NN']['data_seed'],
+                self.json_data['element'],
+                self.json_data['regress_forces'],
+                self.json_data.get('max_neigh'),
+                self.rank,
+                self.world_size
+            )
         return train_loader, valid_loader, uniq_element, enr_avg_per_element
 
     def configure_logger_head(self):
         log_config = self.json_data.get("log_config")
+        
+        # Set a default of log_config
         if log_config == None:
             if self.json_data["regress_forces"]:
                 log_config = {
@@ -264,6 +256,13 @@ class BaseTrainer:
         return log_config
     
     def configure_logger(self):
+        """Logging configuration specification.
+
+        - log_length: 'simple' or 'precise'
+            Controls the detail level of printed logs.
+        - log_interval: int
+            Print logs every N steps during training.
+        """
         log_config = self.configure_logger_head()
 
         log_length = self.json_data.get("log_length")
@@ -278,7 +277,6 @@ class BaseTrainer:
             fname = self.get_unique_filename()
             fout = open(fname, 'w')
             logger = Logger(log_config, self.loss_config, log_length, fout)
-            #logger.print_logger_head()
             separator = logger.get_seperator()
             atexit.register(lambda: on_exit(
                                         fout, 
@@ -291,6 +289,20 @@ class BaseTrainer:
         return log_config, log_interval, logger
     
     def get_unique_filename(self):
+        """Manage log file naming for training and restart (re-training) runs.
+
+        Behavior:
+        - If `fname = "loss_train.out"` and the file already exists in the current directory:
+            - Automatically rename the new log to `loss_train-{n}.out` to avoid overwriting.
+            - `{n}` starts from 2, 3, ... and increases based on the largest existing index.
+        - On restart:
+            - The log file with the largest `{n}` index is treated as the most recent one.
+            - The new log is saved as `loss_train-{n}-re{m}.out`.
+            - `{m}` follows the same increment rule as `{n}`, starting from 2, 3, ...
+              based on existing restart logs
+
+        This mechanism ensures previous logs are never accidentally overwritten.
+        """
         train_config = self.json_data.get('train') 
         fname = train_config.get('fname_log') 
         if fname == None:
@@ -319,7 +331,7 @@ class BaseTrainer:
         self.json_data['train']['fname_log'] = fname
         return fname
 
-    def load_loss(self, reduction='mean'):
+    def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config")
         if loss_config == None:
@@ -363,32 +375,38 @@ class BaseTrainer:
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
-        loss["loss_e"] = self.loss_fn["energy_loss"](preds["energy"].flatten(), energy_target)
+        loss["loss_e"] = self.loss_fn["energy_loss"](
+            preds["energy"].flatten(), energy_target
+        )
         loss["loss"].append(e_lambda * loss["loss_e"])
 
-        if "forces" in preds and self.loss_fn['force_loss'] != None:
+        if "forces" in preds and self.loss_fn.get("force_loss") is not None:
             force_target = data["forces"].flatten()
-            loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(), force_target)
+            loss["loss_f"] = self.loss_fn["force_loss"](
+                preds["forces"].flatten(), force_target
+            )
             loss["loss"].append(f_lambda * loss["loss_f"])
         
-        if "stress" in preds and self.loss_fn['stress_loss'] != None:
+        if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
             stress_target = data["stress"].flatten()
-            if (hasattr(self.model, "training_mode_for_lammps") and self.model.training_mode_for_lammps) or \
-            self.loss_fn.get("stress_loss") is None:
-                loss["loss_s"] = torch.tensor(0.0, device=preds["stress"].device, requires_grad=True)
-            else:
-                loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
+            loss["loss_s"] = self.loss_fn["stress_loss"](
+                preds["stress"].flatten(), stress_target
+            )
             loss["loss"].append(s_lambda * loss["loss_s"])
+        elif (hasattr(self.model, "training_mode_for_lammps") \
+                and self.model.training_mode_for_lammps):
+            loss["loss_s"] = torch.tensor(
+                0.0, device=preds["stress"].device, requires_grad=True
+            )
 
         if lambd != 0:
             params = self.model.parameters()
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
-            
-        ## Sanity check to make sure the compute graph is correct.
-        #for lc in loss["loss"]:
-        #    assert hasattr(lc, "grad_fn")
 
+        # Get loss: 
+        # loss = (e_lambda * loss_e) + (f_lambda * loss_f) 
+        #        + (s_lambda * loss_s) + (lambd * loss_l2)
         loss["loss"] = sum(loss["loss"])
         return loss
 
@@ -469,7 +487,10 @@ class BaseTrainer:
         # Set criterion for direct force training
         criterion = self.json_data.get("criterion")
         criterion_value = self.json_data.get("criterion_value")
-        model.set_criterion(criterion, criterion_value)
+        try:
+            model.set_criterion(criterion, criterion_value)
+        except:
+            pass
 
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
@@ -481,7 +502,11 @@ class BaseTrainer:
             rank = self.rank
             evaluate = False
             self.json_data['predict']['evaluate_tag'] = False
-            model_ckpt = torch.load(model_config["fname_pkl"])
+            model_ckpt = torch.load(
+                model_config["fname_pkl"],
+                map_location=self.device, 
+                weights_only=False
+            )
             start_epoch = model_ckpt['loss']['epoch']
             try:
                 model.load_state_dict(model_ckpt['params'])
@@ -503,7 +528,11 @@ class BaseTrainer:
         if evaluate:  # True or False(None)
             rank = 0
             start_epoch = 0
-            model_ckpt = torch.load(evaluate_config["model"], map_location=self.device)
+            model_ckpt = torch.load(
+                evaluate_config["model"], 
+                map_location=self.device, 
+                weights_only=False
+            )
             model.load_state_dict(model_ckpt['params'])
             model.eval()
             self.msg += f'\n\033[32mevaluating the {evaluate_config["model"]}\033[0m\n'
@@ -520,7 +549,7 @@ class BaseTrainer:
         
         # Check the number of parameters
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        self.msg += f'\nnumber of parameters:\n\033[33m -- model ({self.json_data["model"]})  {n_params}\033[0m\n'
+        self.msg += f'\nnumber of parameters:\n\033[33m -- model ({self.json_data["model"].lower()})  {n_params}\033[0m\n'
         
         if rank == 0:
             print(self.msg)
@@ -532,8 +561,9 @@ class BaseTrainer:
         cutoff = model_config['cutoff']
         avg_num_neighbors = model_config['avg_num_neighbors']
         num_species = model_config['num_species']
-        hidden_irreps = o3.Irreps(model_config['hidden_channels'])
+        
         features_dim = model_config['features_dim']
+        hidden_irreps = o3.Irreps(model_config['hidden_channels'])
         num_basis_func = model_config['num_radial_basis']
         nlayers = model_config['nlayers']
         max_ell = model_config['max_ell']
@@ -570,55 +600,25 @@ class BaseTrainer:
             cueq_config = None
             self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
         
-        model = model_config["model"]
-        if model in ["race", "RACE", "Race"]:
-            from bam_torch.model.models import RACE
-            model = RACE(
-                cutoff=cutoff,
-                avg_num_neighbors=avg_num_neighbors,
-                num_species=num_species,
-                max_ell=max_ell,
-                num_basis_func=num_basis_func,
-                hidden_irreps=hidden_irreps,
-                nlayers=nlayers,
-                features_dim=features_dim,
-                output_irreps=output_irreps,
-                active_fn=active_fn,
-                regress_forces=regress_forces,
-                cueq_config=cueq_config
-                )
-        elif model in ["r_race", "reduced_race", "ReducedRACE", "ReducedRace"]:
-            from bam_torch.model.models import ReducedRACE
-            model = ReducedRACE(
-                cutoff=cutoff,
-                avg_num_neighbors=avg_num_neighbors,
-                num_species=num_species,
-                max_ell=max_ell,
-                num_basis_func=num_basis_func,
-                hidden_irreps=hidden_irreps,
-                nlayers=nlayers,
-                features_dim=features_dim,
-                output_irreps=output_irreps,
-                active_fn=active_fn,
-                regress_forces=regress_forces,
-                cueq_config=cueq_config
-                )
-        elif model in ["mace", "MACE", "Mace"]:
-            from bam_torch.model.models import MACE
-            model = MACE(
-                cutoff=cutoff,
-                avg_num_neighbors=avg_num_neighbors,
-                num_species=num_species,
-                max_ell=max_ell,
-                num_basis_func=num_basis_func,
-                hidden_irreps=hidden_irreps,
-                nlayers=nlayers,
-                features_dim=features_dim,
-                output_irreps=output_irreps,
-                active_fn=active_fn,
-                regress_forces=regress_forces,
-                cueq_config=cueq_config
-                ) 
+        model_name = model_config["model"].lower()
+        model_cls = MODEL_REGISTRY.get(model_name)
+        if model_cls is None:
+            raise ValueError(f"Unknown model type: {cfg['model']}")
+
+        model = model_cls(
+            cutoff=cutoff,
+            avg_num_neighbors=avg_num_neighbors,
+            num_species=num_species,
+            max_ell=max_ell,
+            num_basis_func=num_basis_func,
+            hidden_irreps=hidden_irreps,
+            nlayers=nlayers,
+            features_dim=features_dim,
+            output_irreps=output_irreps,
+            active_fn=active_fn,
+            regress_forces=regress_forces,
+            cueq_config=cueq_config
+        )
         return model
 
     def configure_optimizer(self):
@@ -628,7 +628,11 @@ class BaseTrainer:
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart:
-            model_ckpt = torch.load(model_config["fname_pkl"])
+            model_ckpt = torch.load(
+                model_config["fname_pkl"], 
+                map_location=self.device, 
+                weights_only=False
+            )
             optimizer.load_state_dict(model_ckpt['opt_state'])
         return optimizer
 
@@ -644,12 +648,14 @@ class BaseTrainer:
         if amsgrad == None:
             amsgrad = True
         # We can modify this part
-        optimizer = torch.optim.Adam(self.model.parameters(), 
-                                    lr=lr, 
-                                    weight_decay=weight_decay,
-                                    foreach=None,
-                                    fused=None,
-                                    amsgrad=amsgrad)
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), 
+            lr=lr, 
+            weight_decay=weight_decay,
+            foreach=None,
+            fused=None,
+            amsgrad=amsgrad
+        )
         return optimizer
 
     def configure_scheduler(self):
@@ -657,7 +663,11 @@ class BaseTrainer:
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart:
-            model_ckpt = torch.load(model_config["fname_pkl"])
+            model_ckpt = torch.load(
+                model_config["fname_pkl"], 
+                map_location=self.device, 
+                weights_only=False
+            )
             scheduler.load_state_dict(model_ckpt['scheduler'])
         return scheduler
 
@@ -667,6 +677,32 @@ class BaseTrainer:
         scheduler = LRScheduler(self.optimizer, scheduler_config)
         return scheduler
 
+    def configure_checkpoint(self):
+        """Configure initial checkpoint dictionary for saving training states.
+        """
+        loss_dict = {'epoch': 0, 'train': [], 'valid': []}
+        ckpt = {
+            'loss': loss_dict,
+            'params': self.model.state_dict(),
+            'opt_state': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'uniq_element': self.uniq_element,
+            'enr_avg_per_element': self.enr_avg_per_element,
+            'input.json': self.json_data,
+            'train_scale_shift': [],
+            'valid_scale_shift': [],
+        }
+        return loss_dict, ckpt
+
+    def configure_exponential_moving_average(self):
+        ema = self.json_data["NN"].get("ema", True)
+        ema_decay = self.json_data["NN"].get("ema_decay", 0.999)
+        if ema == True:
+            ema = ExponentialMovingAverage(self.model.parameters(), decay=ema_decay)
+        else:
+            ema = None
+        return ema
+
     def get_params(self):
         return self.n_params
     
@@ -674,14 +710,6 @@ class BaseTrainer:
         for name, param in self.model.named_parameters():
             #print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}, Shape: {param.shape}, Num.: {param.numel()}")
             print(f"Rank {self.rank}, Parameter name: {name}, Shape: {param.shape}, Num.: {param.numel()}")
-
-    def data_to_dict(self, data):
-        data_dict = data.to_dict() if isinstance(data, DataBatch) else data
-        data_dict = {k: (torch.tensor(v) if isinstance(v, int) else v) 
-                     for k, v in data_dict.items()}
-        data_dict = {k: (torch.tensor(v) if isinstance(v, list) else v) 
-                     for k, v in data_dict.items()}
-        return data_dict
     
     def move_to_device(self, data, device):
         if isinstance(data, dict):

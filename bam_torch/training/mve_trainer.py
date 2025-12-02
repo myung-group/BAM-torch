@@ -10,7 +10,7 @@ class MVETrainer(BaseTrainer):
     def __init__(self, json_data, rank, world_size):
         super().__init__(json_data, rank, world_size)
     
-    def load_loss(self, reduction='mean'):
+    def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config")
         if loss_config == None:

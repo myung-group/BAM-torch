@@ -32,7 +32,6 @@ def move_to_device(data, device):
 
 class MPTrainer(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
-        self.time_log = open(f'time_log-{rank}.txt', 'w')
         super().__init__(json_data, rank, world_size)
 
     def configure_dataloader(self):
@@ -70,9 +69,6 @@ class MPTrainer(BaseTrainer):
             loss_log_config = self.log_config['valid']
             data_files = valid_files
 
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for filename in data_files:
             data_loader = self.configure_dataloader_from_pkl(filename, mode=mode)
@@ -80,7 +76,6 @@ class MPTrainer(BaseTrainer):
             for data in data_loader:
                 data.to(self.device)
                 data = self.data_to_dict(data)  # This is for torch.jit compile
-                start.record()
                 preds = self.model(data, backprop)
                 preds = self.scale_shift(preds, data, mode)
 
@@ -89,25 +84,23 @@ class MPTrainer(BaseTrainer):
                 if backprop:
                     self.optimizer.zero_grad()
                     loss.backward()
-                    end.record()
-                    torch.cuda.synchronize()
                     #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                     self.optimizer.step()
-                else:
-                    end.record()
-                    torch.cuda.synchronize()
-                elapsed_time = start.elapsed_time(end)
-                print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True)
-        
+
+                    if self.ema is not None:
+                        self.ema.update()
+
                 for l in loss_log_config:
-                    epoch_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+                    val = loss_dict.get(l, torch.nan)
+                    epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
 
                 data.clear()
                 del data, preds, loss_dict
                 torch.cuda.empty_cache()
                 gc.collect()
 
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect()
             del data_loader
@@ -172,7 +165,6 @@ class MPTrainer(BaseTrainer):
             if not isinstance(data, list):
                 data = [data]
             data_loader = self.get_dataloader_from_data(data)
-            print(f'[RANK {self.rank}] Dataset path: {sampled_dataset_file_path} | Elapsed time {(time()-t1)/1000:.6f} sec', file=self.time_log, flush=True)
         else:
             t1 = time()
             os.makedirs(sampled_dataset_save_folder, exist_ok=True)
@@ -211,8 +203,6 @@ class MPTrainer(BaseTrainer):
                 if mode == 'train':
                     test_data = [data[i] for i in idx_test]
                     data = [data[i] for i in idx_train]
-                    print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)                    
-                    print(f"[Rank {self.rank}] Number of Data: {len(test_data)} | Mode: test ", file=self.time_log, flush=True)
                     sampled_test_dataset_save_folder = Path(f"./test_datasets-{self.rank}")
                     sampled_test_dataset_file_name = f"test-{file_number}.pkl"
                     sampled_test_dataset_file_path = sampled_test_dataset_save_folder / sampled_test_dataset_file_name
@@ -220,10 +210,8 @@ class MPTrainer(BaseTrainer):
                         pickle.dump(test_data, f)
                 else:
                     data = [data[i] for i in idx_valid]
-                    print(f"[Rank {self.rank}] Number of Data: {len(data)} | Mode: {mode} ", file=self.time_log, flush=True)
             
             if mode != 'test':
-                print(f'[RANK {self.rank}] Dataset path: {file_path} | Elapsed time {(time()-t1)/1000:.6f} sec', file=self.time_log, flush=True)
                 with open(sampled_dataset_file_path, "wb") as f:
                     pickle.dump(data, f)
 
@@ -253,7 +241,7 @@ class MPTrainer(BaseTrainer):
         )
         return data_loader
     
-    def load_loss(self, reduction='mean'):
+    def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config")
         if loss_config == None:
@@ -322,10 +310,6 @@ class MPTrainer(BaseTrainer):
             params = self.model.parameters()
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
-            
-        ## Sanity check to make sure the compute graph is correct.
-        #for lc in loss["loss"]:
-        #    assert hasattr(lc, "grad_fn")
 
         loss["loss"] = sum(loss["loss"])
         return loss
@@ -346,10 +330,6 @@ def collate_identity(x):
 
 class MPTrainer_V2(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
-        # git version
-        print('\n *** MPTrainer_V2 ***')
-        self.time_log = open(f'time_log-{rank}.txt', 'w')
-        
         # multi-node version
         # Get node and local rank info from SLURM env vars
         node_id = os.environ.get('SLURM_NODEID', 'unknown')
@@ -459,19 +439,14 @@ class MPTrainer_V2(BaseTrainer):
             loss_log_config = self.log_config['train']
             self.ckpt['scale_shift'] = []
             # data_files = train_files
-            folder_path = self.json_data["ntrain"]
-            print(f"\n ----------- train ------------", file=self.gpu_test_log)        
+            folder_path = self.json_data["ntrain"]       
         else:
             self.model.eval()
             backprop = False
             loss_log_config = self.log_config['valid']
             folder_path = self.json_data["nvalid"]
-            print(f"\n ----------- valid ------------", file=self.gpu_test_log)
 
         self.gpu_test_log.flush()
-
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
 
@@ -533,8 +508,6 @@ class MPTrainer_V2(BaseTrainer):
             for data in tqdm(data_loader, desc="🚀 Training" if mode == 'train' else "🔍 Evaluating", leave=False, dynamic_ncols=True):
                 data.to(self.device)
                 data = self.data_to_dict(data)  # This is for torch.jit compile
-                print(f"RANK {self.rank} Epoch {self.epoch} | Data: {data['num_nodes']}\n", file=self.gpu_test_log)
-                start.record()
                 self.gpu_test_log.flush()
 
                 preds = self.model(data, backprop)
@@ -546,15 +519,11 @@ class MPTrainer_V2(BaseTrainer):
                 if backprop:
                     self.optimizer.zero_grad()
                     loss.backward()
-                    end.record()
-                    torch.cuda.synchronize()
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                     self.optimizer.step()
-                else:
-                    end.record()
-                    torch.cuda.synchronize()
-                elapsed_time = start.elapsed_time(end)
-                print(f"[Rank {self.rank}] Number of Atoms: {data['num_nodes']:<6} | Number of Edges: {sum(data['num_edges']):<6} | Elapsed Time: {elapsed_time/1000:.6f} sec ", file=self.time_log, flush=True)
+                    
+                    if self.ema is not None:
+                        self.ema.update()
 
                 for l in loss_log_config:
                     epoch_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
@@ -563,10 +532,12 @@ class MPTrainer_V2(BaseTrainer):
                 del data, preds, loss_dict
                 torch.cuda.empty_cache()
                 gc.collect()
+
             data_batch.clear()
             del data_batch, dataset, data_loader
             if 'data_sampler' in locals() and data_sampler is not None:
                 del data_sampler
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -612,7 +583,7 @@ class MPTrainer_V2(BaseTrainer):
     
         return final_epoch_loss_dict
 
-    def load_loss(self, reduction='mean'):
+    def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config")
         if loss_config == None:
@@ -680,10 +651,6 @@ class MPTrainer_V2(BaseTrainer):
             params = self.model.parameters()
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
-
-        ## Sanity check to make sure the compute graph is correct.
-        #for lc in loss["loss"]:
-        #    assert hasattr(lc, "grad_fn")
 
         loss["loss"] = sum(loss["loss"])
         return loss

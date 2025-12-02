@@ -59,7 +59,7 @@ $ source /opt/intel/oneapi/setvars.sh
 
 Install libtorch (same as on the GPU)
 ```
-$ wget https://download.pytorch.org/libtorch/cu121/libtorch-shared-with-deps-2.2.0%2Bcu121.zip
+$ wget https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.2.0%2Bcpu.zip
 $ unzip libtorch-shared-with-deps-2.2.0+cu121.zip
 $ rm libtorch-shared-with-deps-2.2.0+cu121.zip
 ```

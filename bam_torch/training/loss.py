@@ -18,6 +18,7 @@ def l2_regularization(params):
     wgt = torch.cat([p.view(-1) for p in params if p.requires_grad])
     return (wgt * wgt).mean()
 
+
 def is_ddp_enabled():
     return dist.is_initialized() and dist.get_world_size() > 1
 

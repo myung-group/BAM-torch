@@ -31,19 +31,13 @@ from bam_torch.utils.irreps_tools import (
     tp_out_irreps_with_instructions,
 )
 from bam_torch.utils.scatter import scatter_sum
-from bam_torch.model.tensor_product_from_jax import (
-    TensorProductTorch, 
-    tensor_irreps_array_product,
+from bam_torch.model.concatenate import (
+    TensorRegroupByIrreps,
+    ConcatenateIrrepsTensor,
     TensorIrrepsArrayProduct
 )
-from bam_torch.model.concatenate import (
-    irreps_filter,
-    concatenate_irreps_tensor,
-    tensor_regroup_by_irreps,
-    TensorRegroupByIrreps,
-    ConcatenateIrrepsTensor
-)
 from time import time
+
 
 _SIMPLIFY_REGISTRY = set()
 def simplify_if_compile(module: torch.nn.Module) -> torch.nn.Module:
@@ -81,13 +75,8 @@ class LinearNodeEmbeddingBlock(torch.nn.Module):
         self,
         node_attrs: torch.Tensor,
     ) -> torch.Tensor:  # [n_nodes, irreps]
-        #print('node_attrs =+--> ', node_attrs.device)
-        #print(self.linear.tp_path_weight.device)
-
-        #for name, param in self.linear.named_parameters():
-            #print(f"{name}: shape={param.shape}, device={param.device}")
-            #print(list(self.params_dict.keys()))
         return self.linear(node_attrs)
+
 
 @compile_mode("script")
 class RadialEmbeddingBlock(torch.nn.Module):
@@ -187,102 +176,7 @@ class InteractionBlock(torch.nn.Module):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-
 nonlinearities = {1: torch.nn.functional.silu, -1: torch.tanh}
-
-
-@compile_mode("script")
-class RealAgnosticInteractionBlock(InteractionBlock): 
-    """
-    MACE's default interaction block
-    """
-    def _setup(self) -> None:
-        if not hasattr(self, "cueq_config"):
-            self.cueq_config = None
-        # First linear
-        self.linear_up = Linear(
-            self.node_feats_irreps,
-            self.node_feats_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        # TensorProduct
-        irreps_mid, instructions = tp_out_irreps_with_instructions(
-            self.node_feats_irreps,
-            self.edge_attrs_irreps,
-            self.target_irreps,
-        )
-
-        self.conv_tp = TensorProduct(
-            self.node_feats_irreps,
-            self.edge_attrs_irreps,
-            irreps_mid,
-            instructions=instructions,
-            shared_weights=False,
-            internal_weights=False,
-            cueq_config=self.cueq_config,
-        )
-
-        # Convolution weights
-        input_dim = self.edge_feats_irreps.num_irreps
-        self.conv_tp_weights = nn.FullyConnectedNet(
-            [input_dim] + self.radial_MLP + [self.conv_tp.weight_numel],
-            torch.nn.functional.silu,
-        )
-
-        # Linear
-        self.irreps_out = self.target_irreps
-        self.linear = Linear(
-            irreps_mid,
-            self.irreps_out,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-
-        # Selector TensorProduct
-        self.skip_tp = FullyConnectedTensorProduct(
-            self.irreps_out,
-            self.node_attrs_irreps,
-            self.irreps_out,
-            cueq_config=self.cueq_config,
-        )
-        self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, None]:
-        """
-        node_attrs: to_one_hot(species)
-        node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors) 
-                    == spherical harmonics(Rab)
-        edge_feats: radial_embedding(lengths)
-        edge_index: torch.Tensor([senders, receivers])
-        """
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        num_nodes = node_feats.shape[0]
-        node_feats = self.linear_up(node_feats)
-        tp_weights = self.conv_tp_weights(edge_feats)
-        mji = self.conv_tp(
-            node_feats[sender], edge_attrs, tp_weights
-        )  # [n_edges, irreps]
-        message = scatter_sum(
-            src=mji, index=receiver, dim=0, dim_size=num_nodes
-        )  # [n_nodes, irreps]
-        message = self.linear(message) / self.avg_num_neighbors
-        message = self.skip_tp(message, node_attrs)
-        return (
-            self.reshape(message),
-            None,
-        )  # [n_nodes, channels, (lmax + 1)**2]
 
 
 @compile_mode("script")
@@ -314,14 +208,12 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
             internal_weights=False,
             cueq_config=self.cueq_config,
         )
-
         # Convolution weights
         input_dim = self.edge_feats_irreps.num_irreps
         self.conv_tp_weights = nn.FullyConnectedNet(
             [input_dim] + self.radial_MLP + [self.conv_tp.weight_numel],
             torch.nn.functional.silu,
         )
-
         # Linear
         irreps_mid = irreps_mid.simplify()
         self.irreps_out = linear_out_irreps(irreps_mid, self.target_irreps)
@@ -333,7 +225,6 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
             shared_weights=True,
             cueq_config=self.cueq_config,
         )
-
         # Selector TensorProduct
         self.skip_tp = FullyConnectedTensorProduct(
             self.node_feats_irreps,
@@ -341,9 +232,7 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
             self.irreps_out,
             cueq_config=self.cueq_config,
         )
-        ###
         self.reshape = reshape_irreps(self.irreps_out, cueq_config=self.cueq_config)
-        ###
 
     def forward(
         self,
@@ -372,206 +261,9 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
 
 
 @compile_mode("script")
-class RaceInteractionBlockBasis(InteractionBlock): 
-    """
-    RACE's default interaction block
-    """
-    def _setup(self) -> None:
-        if not hasattr(self, "cueq_config"):
-            self.cueq_config = None
-
-        # For skip connection
-        self.skip_tp_node = FullyConnectedTensorProduct(
-            self.node_feats_irreps,
-            self.node_attrs_irreps,
-            self.hidden_irreps,
-            cueq_config=self.cueq_config,
-        )
-        # First linear
-        self.linear_up = Linear(
-            self.node_feats_irreps,
-            self.target_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        # TensorProduct
-        irreps_mid, instructions = tp_out_irreps_with_instructions(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            self.hidden_irreps,   # target_irreps?
-        )
-        self.conv_tp = TensorProduct(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            irreps_mid,
-            instructions=instructions,
-            shared_weights=False,
-            internal_weights=False,
-            cueq_config=self.cueq_config,
-        )
-        # Convolution weights
-        input_dim = self.edge_feats_irreps.num_irreps
-        self.conv_tp_weights = nn.FullyConnectedNet(
-            [input_dim] + self.radial_MLP + [self.conv_tp.weight_numel],
-            torch.nn.functional.silu,
-            out_act=False
-        )
-        # Linear
-        self.irreps_out = self.target_irreps
-        # Selector TensorProduct
-        """
-        self.skip_tp_msg = FullyConnectedTensorProduct(
-            self.irreps_out,
-            self.node_attrs_irreps,
-            self.irreps_out,
-            cueq_config=self.cueq_config,
-        )
-        """
-        # Last linear
-        self.linear_down = Linear(
-            irreps_mid.simplify(),
-            self.hidden_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        node_attrs: to_one_hot(species)
-        node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors) 
-                    == spherical harmonics(Rab)
-        edge_feats: radial_embedding(lengths)
-        edge_index: torch.Tensor([senders, receivers])
-        """
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        num_nodes = node_feats.shape[0]
-        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
-
-        skip = self.skip_tp_node(node_feats, node_attrs)
-        node_feats = self.linear_up(node_feats)
-        tp_weights = self.conv_tp_weights(edge_feats)
-        mji = self.conv_tp(
-            node_feats[sender], edge_attrs, tp_weights
-        )  # [n_edges, irreps]
-        message = scatter_sum(
-            src=mji, index=receiver, dim=0, dim_size=num_nodes
-        )  # [n_nodes, irreps]
-        message = message / torch.sqrt(avg_num_neighbors)
-        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
-
-        return (
-            message,
-            skip
-        )  # [n_nodes, channels, (lmax + 1)**2
-
-
-@compile_mode("script")
-class RaceInteractionBlock(InteractionBlock): 
-    """
-    RACE's updating interaction block
-    # TODO: 2) CuEquiv. ver. update 
-    """
-    def _setup(self) -> None:
-        if not hasattr(self, "cueq_config"):
-            self.cueq_config = None
-        # For skip connection
-        self.skip_tp_node = FullyConnectedTensorProduct(
-            self.node_feats_irreps,
-            self.node_attrs_irreps,
-            self.hidden_irreps,
-            cueq_config=self.cueq_config,
-        )
-        # First linear
-        self.linear_up = Linear(
-            self.node_feats_irreps,
-            self.node_feats_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        # TensorProduct
-        irreps_mid, _ = tp_out_irreps_with_instructions(
-            self.node_feats_irreps,
-            self.edge_attrs_irreps,
-            self.target_irreps,
-        )
-        self.irreps_out = irreps_mid.simplify()
-        self.conv_tp = TensorProductTorch(
-            self.node_feats_irreps,
-            self.edge_attrs_irreps,
-            self.irreps_out,
-        )
-        # Convolution weights
-        input_dim = self.edge_feats_irreps.num_irreps
-        self.conv_tp_weights = nn.FullyConnectedNet(
-            [input_dim] + self.radial_MLP + [self.irreps_out.num_irreps],
-            torch.nn.functional.silu,
-            out_act=False
-        )
-        # Last linear
-        self.linear_down = Linear(
-            irreps_mid.simplify(),
-            self.hidden_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        node_attrs: to_one_hot(species)
-        node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors) 
-                    == spherical harmonics(Rab)
-        edge_feats: radial_embedding(lengths)
-        edge_index: torch.Tensor([senders, receivers])
-        """
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        num_nodes = node_feats.shape[0]
-        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
-
-        skip = self.skip_tp_node(node_feats, node_attrs)
-        node_feats = self.linear_up(node_feats)
-        mix = self.conv_tp_weights(edge_feats)  # tp_weights
-        mji = self.conv_tp(
-            node_feats[sender], edge_attrs
-        ) # messages in BAM-jax
-        mji = tensor_irreps_array_product(mix, mji, self.irreps_out) # mix * messages
-        message = scatter_sum(
-            src=mji, index=receiver, dim=0, dim_size=num_nodes
-        )  # [n_nodes, irreps]
-        message = message / torch.sqrt(avg_num_neighbors)
-        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
-
-        return (
-            message,
-            skip
-        )  # [n_nodes, channels, (lmax + 1)**2]
-
-
-@compile_mode("script")
 class ConcatenateRaceInteractionBlock(InteractionBlock): 
     """
-    RACE's updating interaction block
+    RACE's default interaction block
     # TODO: 1) CuEquiv. ver. update 
     """
     def _setup(self) -> None:
@@ -600,13 +292,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         )
         #self.irreps_out = irreps_mid.simplify()
         self.irreps_mid = irreps_mid.simplify()
-        """
-        self.conv_tp = TensorProductTorch(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            self.irreps_mid,
-        )
-        """
+
         self.conv_tp = FullTensorProduct(
             self.target_irreps,
             self.edge_attrs_irreps,
@@ -636,7 +322,6 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         concatenated_irreps = self.concatenate_irreps_tensor.get_concatenated_irreps()
         self.tensor_regroup_by_irreps = TensorRegroupByIrreps(concatenated_irreps)
         
-
     def forward(
         self,
         node_attrs: torch.Tensor,
@@ -675,154 +360,6 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         )  # [n_nodes, irreps]
         message = message / torch.sqrt(avg_num_neighbors)
         message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
-
-        return (
-            message,
-            skip
-        )  # [n_nodes, channels, (lmax + 1)**2]
-
-
-@compile_mode("script")
-class ConcatenateRaceInteractionBlock_debug(InteractionBlock): 
-    """
-    RACE's updating interaction block
-    # TODO: 1) CuEquiv. ver. update 
-    """
-    def _setup(self) -> None:
-        if not hasattr(self, "cueq_config"):
-            self.cueq_config = None
-        # For skip connection
-        self.skip_tp_node = FullyConnectedTensorProduct(
-            self.node_feats_irreps,
-            self.node_attrs_irreps,
-            self.hidden_irreps,
-            cueq_config=self.cueq_config,
-        )
-        # First linear
-        self.linear_up = Linear(
-            self.node_feats_irreps,
-            self.target_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        # TensorProduct
-        irreps_mid, instructions = tp_out_irreps_with_instructions(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            self.hidden_irreps,
-        )
-        #self.irreps_out = irreps_mid.simplify()
-        self.irreps_mid = irreps_mid.simplify()
-        self.conv_tp = TensorProductTorch(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            self.irreps_mid,
-        )
-        self.conv_tp_1 = TensorProduct(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            irreps_mid,
-            instructions=instructions,
-            shared_weights=False,
-            internal_weights=False,
-            cueq_config=self.cueq_config,
-        )
-        self.irreps_out = (self.irreps_mid 
-                           + self.target_irreps).sort().irreps.simplify()
-        # Convolution weights
-        input_dim = self.edge_feats_irreps.num_irreps
-        self.conv_tp_weights = nn.FullyConnectedNet(
-            [input_dim] + self.radial_MLP + [self.irreps_out.num_irreps],
-            torch.nn.functional.silu,
-            out_act=False
-        )
-        self.conv_tp_weights_1 = nn.FullyConnectedNet(
-            [input_dim] + self.radial_MLP + [self.conv_tp_1.weight_numel],
-            torch.nn.functional.silu,
-            out_act=False
-        )
-        # Last linear
-        self.linear_down = Linear(
-            self.irreps_out,
-            self.hidden_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        self.tensor_irreps_array_product = TensorIrrepsArrayProduct(self.irreps_out)
-        self.concatenate_irreps_tensor = ConcatenateIrrepsTensor(
-            [self.target_irreps,self.irreps_mid]
-        )
-        concatenated_irreps = self.concatenate_irreps_tensor.get_concatenated_irreps()
-        self.tensor_regroup_by_irreps = TensorRegroupByIrreps(concatenated_irreps)
-        
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        node_attrs: to_one_hot(species)
-        node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors) 
-                    == spherical harmonics(Rab)
-        edge_feats: radial_embedding(lengths)
-        edge_index: torch.Tensor([senders, receivers])
-        """
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        num_nodes = node_feats.shape[0]
-        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
-        
-        mix_1 = self.conv_tp_weights_1(edge_feats)
-
-        t1 = time()
-        skip = self.skip_tp_node(node_feats, node_attrs)
-        t2 = time()
-        node_feats = self.linear_up(node_feats)
-        t3 = time()
-        mix = self.conv_tp_weights(edge_feats)  # tp_weights
-        t4 = time()
-        mji = self.conv_tp(
-            node_feats[sender], edge_attrs
-        ) # messages in BAM-jax
-        t4_2 = time()
-        mji_1 = self.conv_tp_1(node_feats[sender], edge_attrs, mix_1)
-        t5 = time()
-        mji = self.concatenate_irreps_tensor(
-            tensors=[node_feats[sender], mji],
-            axis=-1
-        )
-        t6 = time()
-        mji, simplified_irreps = self.tensor_regroup_by_irreps(mji)
-        t7 = time()
-        assert self.irreps_out == simplified_irreps
-
-        mji = self.tensor_irreps_array_product(mix, mji) # mix * messages
-        t8 = time()
-        message = scatter_sum(
-            src=mji, index=receiver, dim=0, dim_size=num_nodes
-        )  # [n_nodes, irreps]
-        t9 = time()
-        message = message / torch.sqrt(avg_num_neighbors)
-        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
-        t10 = time()
-        
-        print(f"\n ==+--> skip_tp_node   (skip): {t2-t1} sec")
-        print(f" ==+--> linear_up(node_feats): {t3-t2} sec")
-        print(f" ==+--> conv_tp_weights (mix): {t4-t3} sec")
-        print(f" ==+--> conv_tp         (mji): {t4_2-t4} sec")
-        print(f" ==+--> conv_tp_original(mji): {t5-t4_2} sec")
-        print(f" ==+--> concatenate     (mji): {t6-t5} sec")
-        print(f" ==+--> regroup         (mji): {t7-t6} sec")
-        print(f" ==+--> product   (mji * mix): {t8-t7} sec")
-        print(f" ==+--> scatter_sum     (mji): {t9-t8} sec")
-        print(f" ==+--> linear_down     (mji): {t10-t9} sec")
 
         return (
             message,
@@ -873,41 +410,6 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         if self.use_sc and sc is not None:
             return self.linear(node_feats) + sc
         return self.linear(node_feats)
-
-
-@compile_mode("script")
-class ReducedRaceEquivariantBlock(torch.nn.Module):
-    """
-    ReducedRACE's default equivariant product block
-    """
-    def __init__(
-        self,
-        node_feats_irreps_1: o3.Irreps,  # x_node_feats
-        node_feats_irreps_2: o3.Irreps,  # node_feats
-        output_irreps: o3.Irreps,      # hidden_irreps
-        use_sc: bool = True,
-        cueq_config: Optional[CuEquivarianceConfig] = None,
-    ) -> None:
-        super().__init__()
-
-        self.conv_tp = o3.FullTensorProduct (
-            node_feats_irreps_1,
-            node_feats_irreps_2
-        )
-        self.use_sc = use_sc
-        
-    def forward(
-        self,
-        x_node_feats: torch.Tensor,
-        node_feats: torch.Tensor,
-        sc: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        
-        node_feats = self.conv_tp(x_node_feats, node_feats, None)
-        if self.use_sc and sc is not None:
-            return node_feats + sc 
-        
-        return node_feats
 
 
 @compile_mode("script")
@@ -985,7 +487,7 @@ class LinearForceDecoderBlock(torch.nn.Module):
         cueq_config: Optional[CuEquivarianceConfig] = None,
     ):
         super().__init__()
-        self.linear_1 = Linear(
+        self.linear = Linear(
             irreps_in=irreps_in, irreps_out=irrep_out, cueq_config=cueq_config
         )
     def forward(
@@ -993,16 +495,11 @@ class LinearForceDecoderBlock(torch.nn.Module):
         x: torch.Tensor,
         heads: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
     ) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
-        x = self.linear_1(x)
-        #x = self.linear_2(x)
-        #x = self.non_linearity(x)
-        #x = self.linear_3(x)
-        return x  # [n_nodes, 1]
+        return self.linear(x)  # [n_nodes, 1]
 
 
 @simplify_if_compile
 @compile_mode("script")
-
 class NonLinearReadoutBlock(torch.nn.Module):
     def __init__(
         self,
@@ -1039,6 +536,7 @@ class NonLinearReadoutBlock(torch.nn.Module):
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
         return self.linear_2(x)
+
 
 class NonLinearForceReadoutBlock(torch.nn.Module):
     def __init__(

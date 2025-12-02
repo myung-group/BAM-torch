@@ -50,7 +50,7 @@ class LAMMPS_BAM(torch.nn.Module):
         self, 
         data: Dict[str, torch.Tensor], 
         local_or_ghost: torch.Tensor, 
-        compute_virials: bool = False
+        compute_virials: bool = True
     ) -> Dict[str, Optional[torch.Tensor]]:
         
         num_graphs = data["ptr"].numel() - 1
@@ -58,32 +58,23 @@ class LAMMPS_BAM(torch.nn.Module):
         data["num_nodes"] = torch.tensor(data["positions"].shape[0], 
                                          dtype=torch.long, 
                                          device=data["positions"].device)
-
-        out = self.model(data, backprop=False)
-        """
-        if "energy" not in out or out["energy"] is None:
-            return {
-                "total_energy_local": None,
-                "node_energy": None,
-                "forces": None,
-                "virials": None,
-            }
-        """
-        #assert energy is not None, "Energy should not be None"
-        """
-        node_enr_avg = scatter_sum(
-            src=node_avg_energies,
-            index=data["batch"],
-            dim=0,
-            dim_size=num_graphs,
-        )
-        energy = energy + node_enr_avg + self.e_corr
-        """
+        compute_displacement = False
+        if compute_virials:
+            compute_displacement = True
+        out = self.model(data, backprop=False, compute_displacement=compute_displacement)
 
         node_energy = out["node_energy"]
         assert node_energy is not None
-        forces = out["forces"]
+        forces_local = out["forces"]
+        assert forces_local is not None
+        # print(f"forces_local:{len(forces_local)}")
+
+        # n_local = local_or_ghost.sum().item()
+        # n_total = local_or_ghost.shape[0]
         
+        # print(f"Rank {torch.cuda.current_device()}: n_local={n_local}, n_total={n_total}, forces_shape={forces_local.shape}")
+
+
         species = data["species"]
         local_species = species[local_or_ghost]
         local_node_avg_energies = self.enr_avg_per_element[local_species]
@@ -101,17 +92,9 @@ class LAMMPS_BAM(torch.nn.Module):
             node_energy[local_or_ghost] = node_energy[local_or_ghost] + e_corr_per_local
             energy = energy + (e_corr_per_local * local_count)
 
-        """
-        if hasattr(self.model, 'training_mode_for_lammps') and self.model.training_mode_for_lammps:
-            if "shifts" in data:
-                self.lammps_shifts = data["shifts"]
-            if "cell" in data:
-                self.lammps_displacement = torch.zeros(
-                    (data["cell"].shape[0], 3, 3), 
-                    dtype=energy.dtype, 
-                    device=energy.device
-                )
-        """
+        positions = data["positions"] 
+        displacement = out["displacement"]
+
         node_energy_local = node_energy * local_or_ghost
         total_energy_local = scatter_sum(
             src=node_energy_local,
@@ -120,11 +103,47 @@ class LAMMPS_BAM(torch.nn.Module):
             dim_size=num_graphs,
         )
 
-        virials = torch.zeros((1, 3, 3), dtype=energy.dtype, device=energy.device)
+
+        grad_outputs: List[Optional[torch.Tensor]] = [
+                    torch.ones_like(total_energy_local)
+                ]
+        if compute_virials and displacement is not None:
+            forces, virials = torch.autograd.grad(
+                outputs=[total_energy_local],
+                inputs=[positions, displacement],
+                grad_outputs=grad_outputs,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True,
+            )
+            if forces is not None:
+                forces = -1 * forces
+                # print(f"forces:{forces[:5]}")
+            else:
+                forces = torch.zeros_like(positions)
+            if virials is not None:
+                virials = -1 * virials
+                # print(f"virials:{virials}")
+            else:
+                virials = torch.zeros_like(displacement)
+        else:
+            forces = torch.autograd.grad(
+                outputs=[total_energy_local],
+                inputs=[data["positions"]],
+                grad_outputs=grad_outputs,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True,
+            )[0]
+            if forces is not None:
+                forces = -1 * forces
+            else:
+                forces = torch.zeros_like(positions)
+            virials = None
 
         return {
             "total_energy_local": total_energy_local,
             "node_energy": node_energy,
-            "forces": forces,
+            "forces": forces_local,
             "virials": virials,
         }

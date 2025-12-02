@@ -1,14 +1,13 @@
 import os
-
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
-from bam_torch.utils.utils import find_input_json, extract_species
 import json
 import torch
 from e3nn.util import jit
 from bam_torch.model import models as bam_models
 from bam_torch.model.models import get_edge_relative_vectors_with_pbc_lammps
 from bam_torch.lammps.lammps_bam import LAMMPS_BAM
+from bam_torch.utils.utils import find_input_json, extract_species
 
 def main():
     input_json_path = find_input_json()
@@ -34,7 +33,7 @@ def main():
     model = torch.load("model.pt", weights_only=False)
     model.eval()
     
-    species = extract_species("train_300K.xyz")
+    species = extract_species(json_data["fname_traj"])
     model.atomic_numbers = species.clone().detach()
     model.num_interactions = torch.tensor(nlayers)
     model.r_max = torch.tensor(cutoff)

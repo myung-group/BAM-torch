@@ -11,198 +11,92 @@ from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit, get_
 import numpy as np
 
 class Evaluator(BaseTrainer):
-    def __init__(self, json_data):
+    def __init__(self, json_data, rank=0, world_size=1):
         self.json_data = json_data
         self.json_data['NN']['restart'] = False
         self.json_data["predict"]["evaluate_tag"] = True
         self.json_data["nbatch"] = 1
         self.rank = 0
         self.world_size = 0
-        self.date1 = date()
-        self.ddp = False
+        super().__init__(self.json_data, self.rank, self.world_size)
 
-        ## 1) Reproducibility
-        self.set_random_seed()
+    def setup(self):
+        """Configure all core training components.
 
-        ## 2) Configure device
+        Sets up device, model, optimizer, dataloader, scheduler,
+        loss function, and logger.
+        """
+        self.set_random_seed() # Reproducibility
         self.device = self.configure_device()
-
-        ## 3) Configure model
         self.model, self.n_params, self.model_ckpt, self.start_epoch = self.configure_model()
-
-        ## 4) Configure data_loader   
-        self.data_loader, self.uniq_element, self.enr_avg_per_element = \
-                                                        self.configure_dataloader()
-        #print(self.enr_avg_per_element)
-        #self.enr_avg_per_element = {0: -654.0902527295206,
-        # 5: -654.0902527295206, 6: -654.0902527295206, 7: -654.0902527295206}
-        ## 5) Configure loss function
-        self.loss_fn, self.loss_config = self.load_loss()
-
-        ## 6) Configure logger
+        self.optimizer = self.configure_optimizer()
+        self.data_loader, self.uniq_element, self.enr_avg_per_element = self.configure_dataloader()
+        self.loss_fn, self.loss_config = self.configure_loss()
         self.log_config, self.log_interval, self.logger, self.fout = self.configure_logger()
 
-        # Save input parameters setting
-        self.save_input_parameters()
-    
     def evaluate(self):
         self.logger.print_logger_head()
         target = {}
-        total_loss_dict = {'loss':[],
+        eval_loss_dict = {'loss':[],
                            'loss_e':[],
                            'loss_f':[],
                            } 
-        ###
-        e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
-        e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
-        ###
+        e_corr = torch.tensor(
+            self.model_ckpt['valid_scale_shift']
+        ).mean()
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
-            target['energy'] = data['energy']
+            # Get node_enr_avg
             species = data['species']
             node_enr_avg = torch.tensor(
                 [self.enr_avg_per_element[int(iz)] for iz in species],
-                ).sum()
-            e_corr = torch.tensor(
-                [e_corr_mean[int(iz)] for iz in species]
-                ).sum()
+            ).sum()
+            # Predict energy, forces, and so on
             preds = self.model(data, backprop=False)
+            # Correct the energy
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             loss_dict = self.compute_loss(preds, data)
-            for l in total_loss_dict.keys(): # predict part
-                total_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+
+            for l in eval_loss_dict.keys():
+                eval_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+
+            # Print evaluation loss and predicted vs. exact energies.
+            step_dict = {
+                    "date": date(),
+                    "data": i,
+                }
             loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
             del loss_dict['loss']
-
-            step_dict = {
-                    "date": date(),
-                    "data": i,
-                }
+            target['energy'] = data['energy']
             self.logger.print_epoch_loss(step_dict, 
                                          loss_dict, 
                                          target,
                                          lr=None)
-            data.clear()
+            # Free memory
             del data, preds, loss_dict
             torch.cuda.empty_cache()
-            gc.collect()
-        total_loss_dict = {key: torch.mean(torch.tensor(value)) \
-                        for key, value in total_loss_dict.items()}
+            if i % 100 == 0:
+                gc.collect()
+
+        eval_loss_dict = {key: torch.mean(torch.tensor(value)) \
+                        for key, value in eval_loss_dict.items()}
         
         separator = self.logger.get_seperator()
         print(separator, file=self.fout)
         print(separator)
-        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}")
-        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
-        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
-
-    def _evaluate(self):
-        target = {}
-        total_loss_dict = {'loss':[],
-                           'loss_e':[],
-                           'loss_f':[],
-                           } 
-        keys = list(total_loss_dict.keys())
-        prd_enr_ls = []
-        prd_frc_ls = []
-        ext_enr_ls = []
-        E_EXACT, F_EXACT = self.get_exact()
-        for i, data in enumerate(self.data_loader):
-            data = data.to(self.device)
-            tgt_enr = data['energy']
-            target['energy'] = tgt_enr
-            ext_enr_ls += [tgt_enr]
-            species = data['species']
-            node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
-            preds = self.model(deepcopy(data), backprop=False)
-            energy = preds["energy"]
-            #e_corr = E_EXACT.mean() - energy.mean()
-            #print(energy, e_corr, node_enr_avg)
-            energy = energy + node_enr_avg
-            preds['energy'] = energy
-            prd_enr_ls += [energy]
-            prd_frc_ls += [preds['forces']]
-            loss_dict = self.compute_loss(preds, deepcopy(data))
-            for l in total_loss_dict.keys(): # predict part
-                total_loss_dict[l].append(loss_dict.get(l, torch.nan))
-            loss_dict['energy'] = float(preds['energy'][0])
-            del loss_dict['loss']
-
-            step_dict = {
-                    "date": date(),
-                    "data": i,
-                }
-            self.logger.print_epoch_loss(step_dict, 
-                                         loss_dict, 
-                                         target,
-                                         lr=None)
-        total_loss_dict = {key: torch.mean(torch.tensor(value)) \
-                        for key, value in total_loss_dict.items()}
-        
-        separator = self.logger.get_seperator()
-        print(separator, file=self.fout)
-        print(separator)
-        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}")
-        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
-        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
-        
-        e_corr = E_EXACT.mean() - torch.tensor(prd_enr_ls).mean()
-        prd_enr_ls = torch.tensor(prd_enr_ls, device=self.device) + e_corr
-        target = {}
-        total_loss_dict = {'loss':[],
-                           'loss_e':[],
-                           'loss_f':[],
-                           }
-        
-        print("\n\nSCALE SHIFT", file=self.fout)
-        print("\n\nSCALE SHIFT")
-        print(separator, file=self.fout)
-        print(separator)
-        for i, data in enumerate(self.data_loader):
-            tgt_enr = ext_enr_ls[i]
-            data = data.to(self.device)
-            target['energy'] = tgt_enr
-            prd_enr = prd_enr_ls[i]
-            preds['energy'] = torch.tensor([prd_enr], device=self.device)
-            preds['forces'] = torch.tensor(prd_frc_ls[i], device=self.device)
-            loss_dict = self.compute_loss(preds, deepcopy(data))
-            for l in total_loss_dict.keys(): # predict part
-                total_loss_dict[l].append(loss_dict.get(l, torch.nan))
-            loss_dict['energy'] = float(preds['energy'][0])
-            del loss_dict['loss']
-
-            step_dict = {
-                    "date": date(),
-                    "data": i,
-                }
-            self.logger.print_epoch_loss(step_dict, 
-                                         loss_dict, 
-                                         target,
-                                         lr=None)
-        total_loss_dict = {key: torch.mean(torch.tensor(value)) \
-                        for key, value in total_loss_dict.items()}
-
-        separator = self.logger.get_seperator()
-        print(separator, file=self.fout)
-        print(separator)
-        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}")
-        print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
-        print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
+        print(f"MEAN_LOSS: {eval_loss_dict['loss']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}", file=self.fout)
+        print(f"MEAN_LOSS: {eval_loss_dict['loss']:<11.5g}")
+        print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}")
+        print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}\n")
     
-    def save_input_parameters(self):
-        train_config = self.json_data.get('predict') 
-        fname = train_config.get('fname_plog') 
+    def save_input_parameters(self, input_json, fname=None):
+        predict_config = self.json_data.get('predict') 
         if fname == None:
-            fname = "predict.out"
+            fname = predict_config.get('fname_plog') 
+            if fname == None:
+                fname = "predict.out"
         fname_ls = fname.rsplit('.', 1)
         fname = f'input_json_of_{fname_ls[0]}_{fname_ls[1]}.txt'
         fout = open(fname, 'w')
@@ -211,14 +105,14 @@ class Evaluator(BaseTrainer):
     def configure_dataloader(self):
         json_data = self.json_data
         data_loader, uniq_element, enr_avg_per_element = \
-                                                get_dataloader_to_predict(
-                                                    json_data["predict"]['fname_traj'],
-                                                    json_data["predict"]['ndata'],
-                                                    1,  # nbatch
-                                                    json_data['cutoff'],
-                                                    self.model_ckpt,
-                                                    json_data['regress_forces']
-                                                )
+            get_dataloader_to_predict(
+                json_data["predict"]['fname_traj'],
+                json_data["predict"]['ndata'],
+                1,  # nbatch
+                json_data['cutoff'],
+                self.model_ckpt,
+                json_data['regress_forces']
+        )
         return data_loader, uniq_element, enr_avg_per_element
 
     def configure_logger_head(self):
@@ -263,30 +157,3 @@ class Evaluator(BaseTrainer):
                                 )
                         )
         return log_config, log_interval, logger, fout
-
-    def get_exact(self):
-        exact_enr = []
-        exact_frc = []
-        json_data = self.json_data
-        _, self.valid_loader, _, _ = \
-                                get_dataloader(
-                                    json_data['fname_traj'],
-                                    json_data['ntrain'],
-                                    json_data['ntest'],
-                                    json_data['nbatch'],
-                                    json_data['cutoff'],
-                                    json_data['NN']['data_seed'],
-                                    json_data['element'],
-                                    json_data['regress_forces'],
-                                    self.rank,
-                                    self.world_size
-                                )
-        for data in self.valid_loader:
-            species = data['species']
-            node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
-
-            # if not active_fn in ['relu', 'silu', 'no']:
-            exact_enr += list(data['energy'].flatten() + node_enr_avg)            
-            exact_frc += list(data['forces'].flatten())
-
-        return torch.tensor(exact_enr, device=self.device), torch.tensor(exact_frc, device=self.device)

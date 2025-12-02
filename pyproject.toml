@@ -38,6 +38,7 @@ dependencies = [
     "e3nn",
     "pytorch_warmup",
     "torch_geometric",
+    "torch-ema"
 ]
 
 [project.optional-dependencies]
