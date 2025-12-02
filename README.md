@@ -53,6 +53,8 @@ We should therefore manually install a version of PyTorch between 2.5.1 and 2.8.
 Running `install_deps.py` will automatically detect the version of CUDA linked to PyTorch, and then install the version of PyG compatible with that combination of CUDA and PyTorch.
 
 ```bash
+$ git clone https://github.com/myung-group/BAM-torch
+$ cd BAM-torch
 $ pip install "torch<=2.8"
 $ python install_deps.py
 ```
@@ -60,8 +62,6 @@ $ python install_deps.py
 ### Step 3: Install BAM
 
 ```bash
-$ git clone https://github.com/myung-group/BAM-torch
-$ cd BAM-torch
 $ pip install -e .
 ```
 
