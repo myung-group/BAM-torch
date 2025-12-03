@@ -112,18 +112,18 @@ $ lmp -h | grep bam
 
 ## Quick Start
 
-If you only have "model.pkl" and not "model.pt", please follow the instructions below to generate "model.pt" from the existing checkpoint, "model.pkl".
+If you only have ```model.pkl``` and not ```model.pt```, please follow the instructions below to generate "model.pt" from the existing checkpoint, ```model.pkl```.
 If model.pt is already available, you can safely skip this step.
 ```
 $ python make_pt.py
 ```
 
-Once "model.pt" is prepared, generate the RACE model for LAMMPS ("model-lammps.pt") using the process described below.
+Once ```model.pt``` is prepared, generate the RACE model for LAMMPS (```model-lammps.pt```) using the process described below.
 ```
 $ python create_lammps.py
 ```
 
-Then, you can configure the LAMMPS input files (e.g.,"race.in") to use the RACE-based Machine Learning Potential as shown below.
+Then, you can configure the LAMMPS input files (e.g.,```race.in```) to use the RACE-based Machine Learning Potential as shown below.
 ```
 units metal
 newton on
