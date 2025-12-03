@@ -1,5 +1,3 @@
-## This is a version under development. 
-
 ## Installation for GPU
 Load modules
 ```
@@ -109,4 +107,51 @@ export PATH=/your_path/lammps/build:$PATH
 ```
 $ source ~/.bashrc
 $ lmp -h | grep bam
+```
+
+
+## Quick Start
+
+If you only have "model.pkl" and not "model.pt", please follow the instructions below to generate "model.pt" from the existing checkpoint, "model.pkl".
+If model.pt is already available, you can safely skip this step.
+```
+$ python make_pt.py
+```
+
+Once "model.pt" is prepared, generate the RACE model for LAMMPS ("model-lammps.pt") using the process described below.
+```
+$ python create_lammps.py
+```
+
+Then, you can configure the LAMMPS input files (e.g.,"race.in") to use the RACE-based Machine Learning Potential as shown below.
+```
+units metal
+newton on
+atom_style atomic
+atom_modify map yes
+
+read_data     3bpa_300K.data
+timestep 0.0005  # 1 fs
+
+pair_style bam #no_domain_decomposition
+pair_coeff    * * model-lammps.pt C H N O
+
+dump myDump all custom 1 dump.lammpstrj id type element x y z fx fy fz
+dump_modify myDump element C H N O
+thermo 1
+thermo_style custom step temp pe ke etotal press
+
+mass 1 1.008   # H
+mass 2 12.011  # C
+mass 3 14.007  # N
+mass 4 15.999  # O
+
+# MD run
+fix 1 all nvt temp 300.0 300.0 100.0
+run 1000
+```
+
+After that, you can run LAMMPS with the RACE-MLP.
+```
+$ lmp -in race.in
 ```

@@ -68,6 +68,7 @@ class RACE(torch.nn.Module):
         self.output_irreps = o3.Irreps(output_irreps)
         hidden_irreps = hidden_irreps.sort().irreps
         self.hidden_irreps = hidden_irreps
+        self.nlayers = nlayers
         
         ## 1) Embedding
         # Node embedding
@@ -164,8 +165,8 @@ class RACE(torch.nn.Module):
                     cueq_config=cueq_config,
                 )
             else:
-                force_decoder = None
-                stress_decoder = None
+                force_decoder = torch.nn.Identity() 
+                stress_decoder = torch.nn.Identity() 
             self.force_decoders.append(force_decoder)
             self.stress_decoders.append(stress_decoder)
 
@@ -225,8 +226,8 @@ class RACE(torch.nn.Module):
         node_f_logvar = [] 
         node_feats_list = []
         for interaction, product, readout, force_decoder, stress_decoder in zip(
-            self.interactions, self.products, self.readouts, self.force_decoders, self.stress_decoders
-        ):
+                self.interactions, self.products, self.readouts, self.force_decoders, self.stress_decoders
+            ):
             node_feats, sc = interaction(
                 node_attrs=node_attrs,
                 node_feats=node_feats,
@@ -240,7 +241,7 @@ class RACE(torch.nn.Module):
                 sc=sc, 
             )
             node_energies = readout(node_feats) # [n_nodes, len(heads)]  == [nbatch*num_nodes, "1x0e" or "2x0e"]
-            
+
             if "direct" in self.regress_forces:
                 l_0_dim = 0
                 l_1_dim = 0
@@ -264,7 +265,7 @@ class RACE(torch.nn.Module):
             elif str(self.output_irreps) == "8x0e":
                 node_logvar.append(node_energies[:,1])
                 node_f_logvar.append(node_energies[:,2:])
-        
+
         # Sum over energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
         node_energy = self.act_fn(node_energy)
