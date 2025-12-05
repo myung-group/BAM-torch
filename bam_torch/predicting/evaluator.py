@@ -53,9 +53,9 @@ class Evaluator(BaseTrainer):
         ###
         e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
         print(e_corr_raw)
-        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift_origin']).flatten().mean()
+        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift']).flatten().mean()
         #e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
-        print(e_corr_mean)
+        #print(e_corr_mean)
         ###
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
@@ -82,9 +82,10 @@ class Evaluator(BaseTrainer):
                                          loss_dict, 
                                          target,
                                          lr=None)
-            data.clear()
-            del data, preds, loss_dict
-            torch.cuda.empty_cache()
+            if (i+1) % 50 == 0:                         
+                data.clear()
+                del data, preds, loss_dict
+                torch.cuda.empty_cache()
             if (i+1) % 500 == 0:
                 gc.collect()
         total_loss_dict = {key: torch.mean(torch.tensor(value)) \

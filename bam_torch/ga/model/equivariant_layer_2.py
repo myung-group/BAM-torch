@@ -399,7 +399,7 @@ class EquivariantInterface(torch.nn.Module):
             interaction_cls = ConcatenateRaceInteractionBlock,
             cutoff = 6.0, 
             avg_num_neighbors = 27, 
-            num_species = 4, 
+            num_species = 5, 
             max_ell = 3,
             num_basis_func = 8,
             hidden_irreps = o3.Irreps("16x0e+8x1o+4x2e"),

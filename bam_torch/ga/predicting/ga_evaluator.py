@@ -73,8 +73,10 @@ class GAEvaluator(GATrainer):
         if pbc == None:
             pbc = True
         transform = FrameAveraging(frame_averaging, fa_method)
-        e_corr = torch.tensor(self.model_ckpt['valid_scale_shift']) # or train_scale_shift?
-        e_corr = e_corr.flatten().mean()
+        e_corr_1 = torch.tensor(self.model_ckpt['valid_scale_shift']) # or train_scale_shift?
+        e_corr_1 = e_corr_1.flatten().mean()
+        #e_corr_mean = self.model_ckpt['valid_scale_shift']
+        #print(e_corr_mean)
         test_values = {
             'energy': [],
             'force_x': [],
@@ -85,6 +87,7 @@ class GAEvaluator(GATrainer):
             'exact_force_y': [],
             'exact_force_z': [],
         }
+        #print(self.enr_avg_per_element)
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             t1 = time()
@@ -115,8 +118,13 @@ class GAEvaluator(GATrainer):
             
             species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
-            preds['energy'] = preds["energy"] + node_enr_avg + e_corr
+            #e_corr = torch.tensor(
+            #    [e_corr_mean[int(iz)] for iz in species]
+            #).sum()
             
+            #print(node_enr_avg, e_corr)
+            preds['energy'] = preds["energy"] + node_enr_avg + e_corr_1
+
             test_values['energy'].append(preds['energy'].detach().cpu())
             test_values['force_x'].append(preds['forces'][:,0].detach().cpu())
             test_values['force_y'].append(preds['forces'][:,1].detach().cpu())
@@ -146,9 +154,10 @@ class GAEvaluator(GATrainer):
                                          loss_dict, 
                                          target,
                                          lr=None)
-            data.clear()
-            del data, preds, loss_dict
-            torch.cuda.empty_cache()
+            if (i+1) % 50 == 0:                         
+                data.clear()
+                del data, preds, loss_dict
+                torch.cuda.empty_cache()
             if (i+1) % 500 == 0:
                 gc.collect()
         total_loss_dict = {key: torch.mean(torch.tensor(value).detach().cpu()) \

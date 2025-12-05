@@ -83,6 +83,7 @@ class BaseTrainer:
             'scheduler' : self.scheduler.state_dict(),
             'train_scale_shift' : [],
             'valid_scale_shift' : [],
+            'valid_scale_shift_origin' : [],
         }
         # Save input parameters setting
         self.save_input_parameters(self.json_data)
@@ -121,14 +122,6 @@ class BaseTrainer:
                         self.ckpt['scheduler'] = self.scheduler.state_dict()
                         self.ckpt['loss'] = self.loss_dict
                         self.l_ckpt_saved = False
-
-                    if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                        torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                        #self.model.save('model.pt')
-                        #torch.save(deepcopy(self.model), 'model.pt')
-                        #if self.ddp:
-                        #    torch.save(deepcopy(self.model.module), 'model.pt')
-                        self.l_ckpt_saved = True
                 
                     # Get the last learning rate
                     if self.json_data['scheduler'] != "Null":
@@ -152,6 +145,21 @@ class BaseTrainer:
                     metrics = None
                 self.scheduler.step(metrics, epoch)
 
+            if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                if self.rank == 0:
+                    self.ckpt['train_scale_shift'] = {
+                        k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
+                            for k, v in self.ckpt['train_scale_shift'].items()
+                    }
+                    self.ckpt['valid_scale_shift'] = {
+                        k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
+                            for k, v in self.ckpt['valid_scale_shift'].items()
+                    }
+                    torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                    # torch.save(deepcopy(self.model), 'model.pt')
+                    # torch.save(self.model, 'model.pt')
+                    self.l_ckpt_saved = True
+
     def train_one_epoch(self, mode='train', data_loader=None):
         if mode == 'train':
             self.model.train()
@@ -159,7 +167,9 @@ class BaseTrainer:
             loss_log_config = self.log_config['train']
             if data_loader == None:
                 data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
         elif mode == 'compile':
             backprop = False
             loss_log_config = self.log_config['valid']
@@ -174,7 +184,10 @@ class BaseTrainer:
             if data_loader == None:
                 data_loader = self.valid_loader
             if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = []
+                self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
+                self.ckpt['valid_scale_shift_origin'] = []
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -218,10 +231,26 @@ class BaseTrainer:
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         preds["energy"] = energy_predict + shift_enr
+        ###
+        node_energy = preds["node_energy"].detach().squeeze()
+        energy = energy_predict.detach()
+        batch = data["batch"]
+        ratios = node_energy/energy[batch]
+        shift_node_enr = shift_enr * ratios
+        species = data["species"][:len(node_energy)]
+        ###
         if mode == 'train':
-            self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+            #self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+            #print("shift part", self.ckpt['train_scale_shift'])
+            for i in range(len(species)):
+                self.ckpt['train_scale_shift'][species[i].item()].append(
+                    shift_node_enr[i].detach().cpu())
         elif mode == 'valid':
-            self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
+            #self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
+            for i in range(len(species)):
+                self.ckpt['valid_scale_shift'][species[i].item()].append(
+                    shift_node_enr[i].detach().cpu())
+                self.ckpt['valid_scale_shift_origin'].append(shift_enr.detach().cpu())
         return preds
     
     def configure_dataloader(self):

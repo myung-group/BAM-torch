@@ -42,9 +42,14 @@ def model_forward(batch, model, frame_averaging, mode="train", crystal_task=True
             if crystal_task:
                 batch.cell = batch.fa_cell[i]
             # Forward pass
-            preds = model(deepcopy(batch), mode=mode)
+            try:
+                preds = model(batch, mode=mode)
+            except:
+                preds = model(batch)
+            #preds = model(deepcopy(batch), mode=mode)
             e_all.append(preds["energy"])
             fa_rot = None
+            
 
             # Force predictions are rotated back to be equivariant
             if preds.get("forces") is not None:
@@ -140,7 +145,10 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
                 batch.cell = batch.fa_cell[i]
             # Forward pass
             #preds = model(deepcopy(batch), mode=mode)
-            preds = model(batch, mode=mode)
+            try:
+                preds = model(batch, mode=mode)
+            except:
+                preds = model(batch)
             e_all.append(preds["energy"])
             fa_rot = None
 

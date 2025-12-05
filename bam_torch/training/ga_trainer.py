@@ -12,6 +12,8 @@ from time import time
 import os
 import gc
 import numpy as np
+from e3nn import o3
+from bam_torch.model.wrapper_ops import CuEquivarianceConfig
 #os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
@@ -63,7 +65,9 @@ class GATrainer(BaseTrainer):
             loss_log_config = self.log_config['train']
             if data_loader == None:
                 data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
         elif mode == 'compile':
             backprop = False
             loss_log_config = self.log_config['valid']
@@ -78,7 +82,10 @@ class GATrainer(BaseTrainer):
             if data_loader == None:
                 data_loader = self.valid_loader
             if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = []
+                self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
+                self.ckpt['valid_scale_shift_origin'] = []
 
         fa_method = self.json_data.get('ga_method')
         gs = [None] * len(data_loader)
@@ -134,7 +141,7 @@ class GATrainer(BaseTrainer):
                 epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
 
             loss = loss_dict['loss'] + 0.1*entropy_loss
-            entropy_loss_list.append(entropy_loss.detach().cpu())
+            #entropy_loss_list.append(entropy_loss.detach().cpu())
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -193,7 +200,7 @@ class GATrainer(BaseTrainer):
             if energy_grad_loss:
                 loss["loss"].append(energy_grad_mult * loss["loss_grad"])
         
-        if "stress" in preds and "stress" in data:
+        if "stress" in preds and self.loss_fn['stress_loss'] != None:
             stress_target = data["stress"].flatten()
             loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
             loss["loss"].append(s_lambda * loss["loss_s"])
@@ -256,6 +263,60 @@ class GATrainer(BaseTrainer):
                 num_interactions=nlayers,         # default = 4
                 num_gaussians=num_radial_basis,   # default = 50 for Gaussian
             )
+        elif model in ["transformer"]:
+            from bam_torch.ga.model.transformer import Transformer
+            model = Transformer(
+                d_model=64,
+                dim_feedforward=64,
+                nhead=8,
+                num_encoder_layers=4,
+                dropout=0.5,
+                activation=torch.nn.functional.gelu,
+                regress_forces=regress_forces,
+                num_species=num_species,
+                nlayers=nlayers
+            )
+        elif model in ["race", "RACE"]:
+            max_ell = model_config['max_ell']
+            hidden_irreps = o3.Irreps(model_config['hidden_channels'])
+            output_irreps = model_config.get('output_channels')
+            if output_irreps == None:
+                output_irreps = "1x0e"
+            cueq_config = model_config.get('cueq_config')  # true or false
+            if cueq_config == None or cueq_config:
+                try:
+                    import cuequivariance as cue
+                    import cuequivariance_torch as cuet
+                    CUET_AVAILABLE = True
+                except ImportError:
+                    CUET_AVAILABLE = False
+                if CUET_AVAILABLE:
+                    cueq_config = CuEquivarianceConfig(
+                        enabled=True,
+                        layout="ir_mul",
+                        group="O3_e3nn",
+                        optimize_all=True,
+                    )
+                    self.msg += f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m\n'
+            else:
+                cueq_config = None
+                self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
+            from bam_torch.model.models import RACE
+            model = RACE(
+                cutoff=cutoff,
+                avg_num_neighbors=avg_num_neighbors,
+                num_species=num_species,
+                max_ell=max_ell,
+                num_basis_func=num_radial_basis,
+                hidden_irreps=hidden_irreps,
+                nlayers=nlayers,
+                features_dim=features_dim,
+                output_irreps=output_irreps,
+                active_fn=active_fn,
+                regress_forces=regress_forces,
+                cueq_config=cueq_config
+                )
+
         if model_config.get("ga_method") == "prob": # Probabilistic symmetrization
             self.equiv_model = EquivariantInterface(
                 symmetry='O3',  # 'O3'

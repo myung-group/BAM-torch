@@ -322,7 +322,7 @@ class FAENet(BaseModel):
             energy_skip_co.append(h)
             h = self.act(self.mlp_skip_co(torch.cat(energy_skip_co, dim=1)))
         #print("h 2 ", h)
-        energy = self.output_block(h, edge_index, edge_weight, batch, alpha)
+        energy, node_energy = self.output_block(h, edge_index, edge_weight, batch, alpha)
         #print("energy ",energy)
         # Skip-connection   
         energy_skip_co.append(energy)
@@ -332,5 +332,6 @@ class FAENet(BaseModel):
             energy = sum(energy_skip_co)
 
         preds = {"energy": energy, "hidden_state": h}
+        preds["node_energy"] = node_energy
 
         return preds

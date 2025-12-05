@@ -361,7 +361,8 @@ class OutputBlock(nn.Module):
             h = h * alpha
 
         # Global pooling
+        node_energy = h
         out = scatter(h, batch, dim=0, reduce="add")
 
-        return out
+        return out, node_energy
 
