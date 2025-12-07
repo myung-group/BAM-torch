@@ -32,6 +32,67 @@ from bam_torch.utils.output_utils import (
 @compile_mode("script")
 class RACE(torch.nn.Module):
     """Restratification Atomic Cluster Expansion (RACE) model
+
+    Args:
+        cutoff (float):
+            Maximum distance cutoff for neighbor interactions.
+            Only atoms within this radius contribute to local environment features.
+
+        avg_num_neighbors (int):
+            Estimated average number of neighboring atoms inside the cutoff.
+
+        num_species (int):
+            Number of atomic species in the system.
+            Example: O and H -> 2 species.
+
+        max_ell (int):
+            Maximum angular momentum "l" used in spherical harmonics expansion.
+
+        num_basis_func (int):
+            Number of radial basis functions used to represent the radial dependence
+            of atomic interactions.
+
+        hidden_irreps (e3nn.o3.Irreps):
+            Irreducible representation specification for hidden features
+            within the interaction/message passing layers.
+            Example: "32x0e+32x1o+32x2e" indicates "l" = 0, 1, 2 channels included.
+
+        nlayers (int):
+            Number of "Restratification" or interaction layers in the model.
+
+        features_dim (int):
+            Feature dimensionality for atomic descriptors.
+
+        output_irreps (e3nn.o3.Irreps):
+            Irreducible representation for the final model output.
+            The default "1x0e" corresponds to a scalar (e.g., total energy).
+
+        active_fn (str):
+            Activation function used in last section for node_energy
+            (e.g., "swish", "relu", "tanh").
+
+        radial_MLP (Optional[List[int]]):
+            Layer sizes for the MLP applied to radial basis functions.
+
+        MLP_irreps (e3nn.o3.Irreps):
+            Irreducible representation specification for the readout MLP.
+
+        gate (Optional[Callable]):
+            Gating activation function (e.g., torch.nn.SiLU()) to modulate
+            equivariant feature channels.
+
+        cueq_config (Optional[Dict[str, Any]]):
+            Configuration dictionary for additional equivariance or
+            CuEquiv-related settings.
+
+        regress_forces (str or bool):
+            Force regression strategy:
+            - "direct": forces predicted directly by the model
+            - "auto" or True: forces computed as auto-gradients of predicted energy
+            - False: forces not computed
+
+        compute_stress (bool):
+            Whether to compute stress tensor components in addition to energy/forces.
     """
     def __init__(
         self, 
@@ -46,7 +107,7 @@ class RACE(torch.nn.Module):
         output_irreps: e3nn.o3.Irreps = o3.Irreps("1x0e"),
         active_fn: str = "swish",
         radial_MLP: Optional[List[int]] = [64, 64],
-        MLP_irreps: e3nn.o3.Irreps = o3.Irreps("16x0e"),
+        MLP_irreps: e3nn.o3.Irreps = o3.Irreps("64x0e"),
         gate: Optional[Callable] = torch.nn.SiLU(),
         cueq_config: Optional[Dict[str, Any]] = None,
         regress_forces: str = "direct",
@@ -107,8 +168,6 @@ class RACE(torch.nn.Module):
             shared_weights=True,
             cueq_config=cueq_config,
         ) # x_node_feats
-        if radial_MLP is None:
-            radial_MLP = [64, 64]
 
         self.interactions = torch.nn.ModuleList()
         self.products = torch.nn.ModuleList()
@@ -146,7 +205,7 @@ class RACE(torch.nn.Module):
 
             readout = NonLinearReadoutBlock(
                 irreps_in=hidden_irreps,
-                MLP_irreps="64x0e",
+                MLP_irreps=MLP_irreps,
                 gate=gate,
                 irrep_out=output_irreps,
                 cueq_config=cueq_config,

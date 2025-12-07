@@ -44,6 +44,7 @@ dependencies = [
 [project.optional-dependencies]
 cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12"]
 laplace = ["laplace-torch"]
+group_averaging = ["mendeleev", "pandas"]
 
 [project.urls]
 Homepage = "https://github.com/myung-group/BAM-torch"

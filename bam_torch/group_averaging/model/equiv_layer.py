@@ -1,0 +1,555 @@
+import torch
+import torch.nn.init as init
+from torch import nn, Tensor as T
+from torch.nn import functional as F
+from torch.jit import annotate
+
+import e3nn
+from e3nn import o3, nn
+from e3nn.util.jit import compile_mode
+
+from typing import Any, Callable, Dict, List, Optional, Type, Union, Tuple
+
+from bam_torch.model.blocks import (
+    LinearNodeEmbeddingBlock,
+    ConcatenateRaceInteractionBlock,
+    RaceEquivariantBlock,
+    LinearReadoutBlock,
+    NonLinearReadoutBlock,
+    RadialEmbeddingBlock,
+)
+from bam_torch.model.wrapper_ops import Linear
+from bam_torch.utils.scatter import scatter_sum, scatter_mean
+from bam_torch.utils.output_utils import get_outputs, get_symmetric_displacement
+from bam_torch.group_averaging.utils.ga_utils import batched_gram_schmidt_3d
+from bam_torch.group_averaging.model import ACTIVE_FN_REGISTRY
+
+def to_one_hot(indices: torch.Tensor, num_classes: int) -> torch.Tensor:
+    """
+    Generates one-hot encoding with <num_classes> classes from <indices>
+    :param indices: (N x 1) tensor
+    :param num_classes: number of classes
+    :param device: torch device
+    :return: (N x num_classes) tensor
+    """
+    #shape = indices.shape[:-1] + (num_classes,)
+    shape: List[int] = list(indices.shape[:-1]) + [num_classes]
+    oh = torch.zeros(shape, device=indices.device) #.view(shape)
+
+    # scatter_ is the in-place version of scatter
+    #oh.scatter_(dim=-1, index=indices, value=1)
+    return oh.scatter_(-1, indices, 1.0)
+
+
+@compile_mode("script")
+class RACE(torch.nn.Module):
+    """Small equivariant (Race) model for probabilistic sampling of group representations
+    """
+    def __init__(
+            self, 
+            cutoff: float = 6.0, 
+            avg_num_neighbors: int = 40, 
+            num_species: int = 1, 
+            max_ell: int = 3,
+            num_basis_func: int = 8,
+            hidden_irreps: e3nn.o3.Irreps = o3.Irreps("32x0e+32x1o+32x2e"),
+            nlayers: int = 3,
+            features_dim: int = 32,  # hidden_irreps.count(o3.Irrep(0, 1))
+            output_irreps: e3nn.o3.Irreps = o3.Irreps("3x1o"),
+            active_fn: str = "identity",
+            radial_MLP: Optional[List[int]] = [64, 64],
+            MLP_irreps: e3nn.o3.Irreps = o3.Irreps("16x0e"),
+            gate: Optional[Callable] = torch.nn.SiLU(),
+            cueq_config: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__()
+    
+        if active_fn in ["swish", "silu", "SiLU"]:
+            self.act_fn = torch.nn.SiLU()
+        elif active_fn in ["relu", "ReLU"]:
+            self.act_fn = torch.nn.ReLU()
+        elif active_fn in ["identity", None]:
+            self.act_fn = torch.nn.Identity()  # Need to modify later
+        
+        self.cutoff = cutoff
+        self.num_species = num_species
+        self.output_irreps = o3.Irreps(output_irreps)
+        self.hidden_irreps = hidden_irreps
+
+        ## 1) Embedding
+        # Node embedding
+        node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
+        node_feats_irreps = o3.Irreps([(features_dim, (0, 1))])
+        x_node_feats_irreps = node_feats_irreps
+
+        self.node_embedding = LinearNodeEmbeddingBlock(
+            irreps_in=node_attr_irreps,
+            irreps_out=node_feats_irreps,
+            cueq_config=cueq_config,
+        ) # [n_nodes, irreps]
+
+        # Radial embedding
+        self.radial_embedding = RadialEmbeddingBlock(
+            r_max=1.0,
+            num_bessel=num_basis_func,
+            num_polynomial_cutoff=2,   # default of BAM-jax
+            radial_type="bessel",
+            distance_transform=None,
+        )
+        # Edge embedding
+        edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
+        sh_irreps = o3.Irreps.spherical_harmonics(max_ell) # interaction_irreps in JAX
+        num_features = hidden_irreps.count(o3.Irrep(0, 1))
+        interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
+        self.spherical_harmonics = o3.SphericalHarmonics(sh_irreps, 
+                                                         normalize=True,
+                                                         normalization="component")
+        
+        ## 2) Interaction layer  # RealAgnosticInteractionBlock
+        self.linear_x = Linear(
+            x_node_feats_irreps,
+            x_node_feats_irreps,
+            internal_weights=True,
+            shared_weights=True,
+            cueq_config=cueq_config,
+        ) # x_node_feats
+
+        self.interactions = torch.nn.ModuleList()
+        self.products = torch.nn.ModuleList()
+        self.readouts = torch.nn.ModuleList()
+        self.readouts_0e = torch.nn.ModuleList()
+        self.readouts_last = torch.nn.ModuleList()
+        target_irreps = o3.Irreps(f"{hidden_irreps.count(o3.Irrep(0, 1))}x0e")
+        for i in range(nlayers):
+            if i > 0: 
+                node_feats_irreps = hidden_irreps
+                target_irreps = hidden_irreps
+
+            inter = ConcatenateRaceInteractionBlock(
+                node_attrs_irreps=node_attr_irreps,
+                node_feats_irreps=node_feats_irreps,
+                edge_attrs_irreps=sh_irreps,
+                edge_feats_irreps=edge_feats_irreps,
+                target_irreps=target_irreps,  # interaction_irreps
+                hidden_irreps=hidden_irreps,
+                avg_num_neighbors=avg_num_neighbors,
+                radial_MLP=radial_MLP,
+                cueq_config=cueq_config,
+            )
+            self.interactions.append(inter)
+
+            prod = RaceEquivariantBlock(
+                node_feats_irreps_1=x_node_feats_irreps,  # x_node_feats
+                node_feats_irreps_2=hidden_irreps,  # node_feats
+                output_irreps=hidden_irreps,      # hidden_irreps
+                use_sc=True,
+                cueq_config=cueq_config,
+            )
+            self.products.append(prod)
+
+            readout = Linear(
+                hidden_irreps,
+                o3.Irreps("16x0e+3x1o"),
+                internal_weights=True,
+                shared_weights=True,
+                cueq_config=cueq_config,
+            ) 
+            self.readouts.append(readout) # [n_nodes, output_irreps.count(o3.Irrep(0, 1))]
+
+            readout_0e = Linear(
+                hidden_irreps,
+                o3.Irreps("1x0e"),
+                internal_weights=True,
+                shared_weights=True,
+                cueq_config=cueq_config,
+            )
+            self.readouts_0e.append(readout_0e)
+
+            readout_last = Linear(
+                o3.Irreps("16x0e"),
+                o3.Irreps("1x0e"),
+                internal_weights=True,
+                shared_weights=True,
+                cueq_config=cueq_config,
+            )
+            self.readouts_last.append(readout_last)
+
+        #self.emb = torch.nn.Embedding(num_embeddings=num_species, embedding_dim=num_species)
+    
+    def forward(
+            self, 
+            data, 
+            pos,
+            backprop=False
+    ):
+        # assert Rij.ndim == 2 and Rij.shape[1] == 3
+        # iatoms ==> senders     # edge_index[0]
+        # jatoms ==> receivers   # edge_index[1]
+
+        Rij = get_edge_relative_vectors_with_pbc(data, pos)
+        Rij = Rij / self.cutoff
+        node_heads = (
+            data["head"][data["batch"]]
+            if "head" in data
+            else torch.zeros_like(data["batch"])
+        )
+        num_graphs = data["ptr"].numel() - 1  # nbatch
+
+        # Embedding
+        if "node_attrs" in data:
+            node_attrs = data["node_attrs"]  # Pre-calculated in C++
+            species = data["species"]
+        else:
+            species = data["species"]
+            node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
+        #node_feats = self.emb(species)
+        node_feats = self.node_embedding(node_attrs)
+
+        edge_index = data["edge_index"]
+        lengths = torch.norm(Rij, dim=1)
+
+        nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
+        Rij = Rij[nonzero_idx]
+        lengths = lengths[nonzero_idx]
+        edge_index = edge_index[:, nonzero_idx]
+        # R = R[nonzero_idx]
+        
+        edge_attrs = self.spherical_harmonics(Rij)
+        edge_feats = self.radial_embedding(lengths.unsqueeze(1), 
+                                           node_attrs,
+                                           data["edge_index"],
+                                           species)
+        outputs_ks = []
+        outputs_hs = []
+        node_logvar = [] 
+        node_f_logvar = [] 
+        node_feats_list = []
+        x_node_feats = self.linear_x(node_feats)
+        for interaction, product, readout, readout_0e, readout_last in zip(
+            self.interactions, self.products, self.readouts, self.readouts_0e, self.readouts_last
+        ):
+            node_feats, sc = interaction(
+                node_attrs=node_attrs,
+                node_feats=node_feats,
+                edge_attrs=edge_attrs,
+                edge_feats=edge_feats,
+                edge_index=edge_index,
+            )
+            node_feats = product(
+                x_node_feats=x_node_feats,
+                node_feats=node_feats,
+                sc=sc, 
+            )
+            l_0_dim = sum([mul for mul, (l, p) in o3.Irreps("16x0e+3x1o") if str(l) == "0"])
+            l_1_dim = sum([mul for mul, (l, p) in o3.Irreps("16x0e+3x1o") if str(l) == "1"])
+
+            node_ks = readout(node_feats) # [n_nodes, len(heads)]  == [nbatch*num_nodes, "1x0e" or "2x0e"]
+            node_hs_0 = readout_0e(node_feats)
+            node_hs = readout_last(node_ks[:, :l_0_dim])
+            #print(f"node_hs : {node_hs} | {node_hs.shape}")
+            #print(f"node_hs_0 : {node_hs_0} | {node_hs_0.shape}")
+            node_hs = torch.sum(torch.stack([node_hs, node_hs_0], dim=-1), dim=-1)
+            node_feats_list.append(node_feats)
+            
+            outputs_ks.append(node_ks[:, l_0_dim:])
+            outputs_hs.append(node_hs)
+
+        # Concatenate node features
+        #node_feats_out = torch.cat(node_feats_list, dim=-1)
+
+        # Sum over contributions
+        outputs_ks = torch.stack(outputs_ks, dim=-1) # [nbatch*num_nodes, nlayers]
+        outputs_ks = self.act_fn(outputs_ks)
+
+        outputs_hs = torch.stack(outputs_hs, dim=-1) # [nbatch*num_nodes, nlayers]
+        outputs_hs = self.act_fn(outputs_hs)
+
+        # Global pooling
+        outputs_ks = torch.sum(outputs_ks, dim=-1) # [nbatch*num_nodes]  # total_energy
+        pseudo_hs = torch.sum(outputs_hs, dim=-1).view(num_graphs, -1)
+        #print(f"node_energy = {node_energy}")
+        pseudo_ks = scatter_sum(
+                src=outputs_ks,
+                index=data["batch"],
+                dim=0,
+                dim_size=num_graphs,
+            )
+        pseudo_ks = pseudo_ks.view(num_graphs, 3, 3)
+
+        return pseudo_hs, pseudo_ks
+      
+
+def get_edge_relative_vectors_with_pbc(data: Dict[str, torch.Tensor], R):
+    # iatoms ==> senders
+    # jatoms ==> receivers
+    #R = data["positions"]
+    cell = data["cell"]
+    iatoms = data["edge_index"][0]  # shape = (b * n_edges)
+    jatoms = data["edge_index"][1]  # shape = (b * n_edges) 
+    Sij = data["edges"]   # shape = (b * n_edges, 3)
+    n_edges: List[int] = data["num_edges"].tolist()
+    
+    Sij = torch.split(Sij, n_edges, dim=0)
+    shift_v = torch.cat(
+        [torch.einsum('ni,ij->nj', s, c)
+            for s, c in zip(Sij, cell)], dim=0
+    )
+    _R = R[jatoms] - R[iatoms] 
+    Rij = _R + shift_v
+
+    return Rij # (num_edges, 3)
+
+class PermutaionMatrixPenalty(torch.nn.Module):
+    def __init__(self): #, n):
+        super().__init__()
+        #self.n = n
+
+    @staticmethod
+    def _normalize(scores, axis, eps=1e-12):
+        normalizer = torch.sum(scores, axis).clamp(min=eps)
+        normalizer = normalizer.unsqueeze(axis)
+        prob = torch.div(scores, normalizer)
+        return prob
+
+    @staticmethod
+    def _entropy(prob, axis):
+        return -torch.sum(prob * prob.log().clamp(min=-100), axis)
+
+    def entropy(self, scores, eps=1e-12):
+        b, k, n, _ = scores.shape
+        # clamp min to avoid zero logarithm
+        scores = scores.clamp(min=eps)
+        # compute columnwise entropy
+        col_prob = self._normalize(scores, axis=2)
+        entropy_col = self._entropy(col_prob, axis=2)
+        # compute rowwise entropy
+        row_prob = self._normalize(scores, axis=3)
+        entropy_row = self._entropy(row_prob, axis=3)
+        # return entropy
+        assert entropy_col.shape == entropy_row.shape == (b, k, n)
+        return entropy_col, entropy_row
+
+    def forward(self, perm_soft):
+        b, k, n, _ = perm_soft.shape
+        #assert n == self.n
+        assert perm_soft.shape == (b, k, n, n)
+        # compute entropy
+        entropy_col, entropy_row = self.entropy(perm_soft)
+        # compute mean over samples
+        loss = entropy_col.mean(1) + entropy_row.mean(1)
+        # compute mean over nodes
+        loss = loss.mean(1)
+        # compute mean over batch
+        loss = loss.mean()
+        return loss
+
+class EquivariantInterface(torch.nn.Module):
+    def __init__(
+        self,
+        symmetry='SO3',
+        interface='prob',
+        fixed_noise=False,
+        noise_scale=0.1,
+        tau=0.01,
+        hard=True,
+        **kwargs
+    ):
+        super().__init__()
+        assert symmetry in ['SO3', 'O3']
+        assert interface in ['prob', 'unif']
+        self.symmetry = symmetry
+        self.interface = interface
+        self.fixed_noise = fixed_noise
+        self.noise_scale = noise_scale
+        self.tau = tau
+        self.hard = hard
+        self.equiv_interface = RACE(
+            cutoff = kwargs.get('cutoff'), 
+            avg_num_neighbors = kwargs.get('avg_num_neighbors'), 
+            num_species = kwargs.get('num_species'), 
+            max_ell = kwargs.get('max_ell'),
+            num_basis_func = kwargs.get('num_basis_func'),
+            hidden_irreps = o3.Irreps(kwargs.get('hidden_irreps')),
+            nlayers= kwargs.get('nlayers'), # 3
+            features_dim = kwargs.get('features_dim'),  # hidden_irreps.count(o3.Irrep(0, 1))
+            output_irreps = o3.Irreps(kwargs.get('output_irreps')),
+            active_fn = kwargs.get('active_fn'),
+            radial_MLP = kwargs.get('radial_MLP'),
+            MLP_irreps = o3.Irreps(kwargs.get('MLP_irreps')),
+            gate = ACTIVE_FN_REGISTRY.get(kwargs.get('gate')),
+            cueq_config = kwargs.get('cueq_config'),
+        )
+        self.compute_entropy_loss = PermutaionMatrixPenalty()
+
+    def _postprocess_permutation(self, pseudo_hs: T, sinkhorn_iter=20):
+        """Obtain permutation component (b, k, n, n) from hidden representation"""
+        scores = pseudo_hs
+        b, k, n = scores.shape
+        # add small noise to break ties
+        # without this, models can exploit the ordering of tied scores
+        scores = scores + torch.zeros_like(scores).uniform_(0, 1e-6)
+        # normalize scores
+        # this does not affect hard permutation, but affects
+        # straight-through gradient from soft permutation matrix
+        scores = F.normalize(scores, p=2.0, dim=-1)
+        # sort scores, result is unique up to permutations of tied scores
+        scores = scores[:, :, :, None]
+        scores_sorted, indices = scores.sort(descending=True, dim=2)
+        scores = scores.expand(b, k, n, n)
+        scores_sorted = scores_sorted.transpose(2, 3).expand(b, k, n, n)
+        # softsort + log sinkhorn operator for computing soft permutation matrix
+        log_perm_soft = (scores - scores_sorted).abs().neg() / self.tau
+        for _ in range(sinkhorn_iter):
+            log_perm_soft = log_perm_soft - torch.logsumexp(log_perm_soft, dim=-1, keepdim=True)
+            log_perm_soft = log_perm_soft - torch.logsumexp(log_perm_soft, dim=-2, keepdim=True)
+        perm_soft = log_perm_soft.exp()
+        hs = perm_soft
+        if self.hard:
+            # argsort for hard permutation matrix
+            with torch.no_grad():
+                perm_hard = torch.zeros_like(perm_soft).scatter(dim=-1, index=indices, value=1)
+                perm_hard = perm_hard.transpose(2, 3)
+                # (optional) test if perm_hard is a permutation matrix
+                assert torch.allclose(perm_hard.sum(-1), torch.ones_like(perm_hard.sum(-1)))
+                assert torch.allclose(perm_hard.sum(-2), torch.ones_like(perm_hard.sum(-2)))
+            # differentiability with straight-through gradient
+            # the estimated gradient is accurate if perm_soft is close to perm_hard
+            # for this, entropy regularization is necessary
+            perm_hard = (perm_hard - perm_soft).detach() + perm_soft
+            hs = perm_hard
+        # compute entropy loss
+        entropy_loss = self.compute_entropy_loss(perm_soft)
+        return hs, entropy_loss
+
+    def _postprocess_rotation(self, pseudo_ks, eps=1e-6):
+        """Obtain rotation component (b, k, 3, 3) from hidden representation"""
+        # note: this assumes left equivariance, i.e., pseudo_ks: (b, k, 3, C=3)
+        # pseudo_ks: GL(N)
+        device = pseudo_ks.device
+        b, k, _, _ = pseudo_ks.shape
+        assert pseudo_ks.shape == (b, k, 3, 3)
+        # add small noise to prevent rank collapse
+        pseudo_ks = pseudo_ks + eps * torch.randn_like(pseudo_ks, device=device)
+        pseudo_ks = pseudo_ks.view(b*k, 3, 3)
+        # use gram-schmidt to obtain orthogonal matrix
+        ks = batched_gram_schmidt_3d(pseudo_ks)  # O(3)
+        assert ks.shape == (b*k, 3, 3)
+
+        if self.symmetry in ('SnxSO3', 'SO3'):
+            # SO(3) equivariant map that maps O(3) matrix to SO(3) matrix
+            # determinant are +- 1
+            deter_ks = torch.linalg.det(ks)
+            assert deter_ks.shape == (b*k,)
+            # multiply the first column
+            sign_arr = torch.ones(b*k, 3, device=device)
+            #sign_arr = sign_arr.clone()
+            sign_arr[:, 0] = deter_ks
+            #sign_arr = torch.cat([deter_ks.unsqueeze(1), sign_arr[:, 1:]], dim=1)
+            sign_arr = sign_arr[:, None, :].expand(b*k, 3, 3)
+            # elementwise multiplication
+            ks = ks * sign_arr
+
+        ks = ks.reshape(b, k, 3, 3)
+        return ks
+
+    def sample_invariant_noise(self, x, idx):
+        n, _ = x.shape
+        if self.fixed_noise:
+            zs = []
+            for i in idx.tolist():
+                seed = torch.seed()
+                torch.manual_seed(i)
+                z = torch.zeros(n, 3, device=x.device, dtype=x.dtype)
+                z = z.normal_(0, self.noise_scale)
+                zs.append(z)
+                torch.manual_seed(seed)
+            z = torch.stack(zs, dim=0)
+        else:
+            z = torch.zeros_like(x).normal_(0, self.noise_scale)
+        return z
+
+    def _forward_prob(self, data, k: int):
+        # k is the number of interface samples
+        #data["cell"].requires_grad_(True)
+        data["positions"].requires_grad_(True)
+        x = data.positions
+        x = x - x.mean(dim=0, keepdim=True)
+        num_edges = data.num_edges
+        b = num_edges.shape[0]
+        b_n, _ = x.shape
+        n = int(b_n / b)
+        idx = torch.tensor([i for i in range(b)], device=x.device)
+       
+        pseudo_ks = []
+        pseudo_hs = []
+        for i in range(k):
+            # add noise
+            x = x + self.sample_invariant_noise(x, idx)
+            p_hs, p_ks = self.equiv_interface(data, x)
+            pseudo_ks.append(p_ks)
+            pseudo_hs.append(p_hs) # (b*n, 1) -> (b, ns)
+        
+        pseudo_ks = torch.cat(pseudo_ks, dim=0) 
+        pseudo_hs = torch.cat(pseudo_hs, dim=0) 
+
+        assert pseudo_ks.shape == (b*k, 3, 3)  # [b*k, c=3, 3]
+        assert pseudo_hs.shape == (b*k, n)  # [b*k, n]
+
+        pseudo_ks = pseudo_ks.transpose(1, 2)  # [b*k, 3, c=3]
+        pseudo_ks = pseudo_ks.reshape(b, k, 3, 3)
+        pseudo_hs = pseudo_hs.reshape(b, k, n)
+        # post-processing for permutation matrix
+        hs, entropy_loss = self._postprocess_permutation(pseudo_hs)
+        assert hs.shape == (b, k, n, n)
+        # post-processing for SO(3) or O(3) matrix
+        ks = self._postprocess_rotation(pseudo_ks)
+        assert ks.shape == (b, k, 3, 3)
+        gs = (hs, ks)
+        #print(f"hs: {hs}")
+        return gs ,entropy_loss
+
+    def _forward_unif(self, node_features, idx, k: int):
+        b, n, _, _ = node_features.shape
+        device = node_features.device
+        # sample Sn representation
+        assert self.hard
+        if self.fixed_noise:
+            raise NotImplementedError
+        indices = torch.randn(b*k, n, device=device).argsort(dim=-1)
+        # sample O(3) or SO(3) representation
+        if self.symmetry in ('O3'):
+            ks = torch.randn(b*k, 3, 3, device=device)
+            ks = batched_gram_schmidt_3d(ks)
+            ks = ks.reshape(b, k, 3, 3)
+        elif self.symmetry in ('SO3'):
+            ks = torch.randn(b*k, 3, 3, device=device)
+            ks = batched_gram_schmidt_3d(ks)
+            # SO(3) equivariant map that maps O(3) matrix to SO(3) matrix
+            # determinant are +- 1
+            deter_ks = torch.linalg.det(ks)
+            assert deter_ks.shape == (b*k,)
+            # multiply the first column
+            sign_arr = torch.ones(b*k, 3, device=device)
+            #sign_arr = sign_arr.clone()
+            sign_arr[:, 0] = deter_ks
+            #sign_arr = torch.cat([deter_ks.unsqueeze(1), sign_arr[:, 1:]], dim=1)
+            sign_arr = sign_arr[:, None, :].expand(b*k, 3, 3)
+            ks = ks * sign_arr
+            ks = ks.reshape(b, k, 3, 3)
+        else:
+            raise NotImplementedError
+        ks
+        return ks
+
+    
+    def forward(self, data, k):
+        # k is the number of interface samples
+
+
+        gs = self._forward_prob(data, k)
+        #if self.symmetry in ('O3', 'SO3'):
+        #    # entropy loss is only for permutation involved groups
+        #    entropy_loss = torch.tensor(0, device=node_features.device)
+        return gs
+
+

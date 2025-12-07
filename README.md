@@ -79,6 +79,12 @@ To enable Laplace approximations for neural networks, use [laplace-torch](https:
 $ pip install -e ".[laplace]"
 ```
 
+To enable group averaging for graph neural networks, use [mendeleev](https://github.com/lmmentel/mendeleev).
+
+```bash
+$ pip install -e ".[group_averaging]"
+```
+
 ## Quick Start
 
 ### Basic Training Example
@@ -172,6 +178,7 @@ bam-torch/
 │   ├── lammps/          # LAMMPS interface for ML potentials
 |   |   ├── README.md    # Installation and usage guide for LAMMPS interface
 │   ├── laplace/         # Laplace approximation and Bayesian inference utilities
+|   ├── group_averaging/ # Group averaging methods such as a probabilistic symmetrization
 │   ├── model/           # Core neural network architectures (RACE, E(3)-equivariant layers)
 │   ├── predicting/      # Inference and prediction pipelines (Model evaluation)
 │   ├── tase/            # ASE interface for ML potentials

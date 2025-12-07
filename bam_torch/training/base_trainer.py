@@ -118,7 +118,7 @@ class BaseTrainer:
                 # Save check point
                 if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
                     torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                    torch.save(self.model, 'model.pt')
+                    #torch.save(self.model, 'model.pt')
                     self.l_ckpt_saved = True
 
     def initial_test(self):
@@ -357,21 +357,14 @@ class BaseTrainer:
 
     def compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
-        e_lambda = lambda_config.get('enr_lambda')
-        f_lambda = lambda_config.get('frc_lambda')
-        s_lambda = lambda_config.get('str_lambda')
-        lambd = lambda_config.get('l2_lambda')
-        if e_lambda == None:
-            e_lambda = 1
-        if f_lambda == None:
-            f_lambda = 1
-        if s_lambda == None:
-            s_lambda = 1
-        if lambd == None:
-            lambd == 0
-        cosine_sim = lambda_config.get('cosine_sim')
-        energy_grad_mult = lambda_config.get('energy_grad_mult')
-        energy_grad_loss = lambda_config.get('energy_grad_loss')
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 100)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
+
+        cosine_sim = lambda_config.get('cosine_sim', False)
+        energy_grad_mult = lambda_config.get('energy_grad_mult', 10)
+        energy_grad_loss = lambda_config.get('energy_grad_loss', False)
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
@@ -558,23 +551,22 @@ class BaseTrainer:
         
     def set_model(self):
         model_config = self.json_data
-        cutoff = model_config['cutoff']
-        avg_num_neighbors = model_config['avg_num_neighbors']
-        num_species = model_config['num_species']
+
+        cutoff = model_config.get('cutoff', 6.0)
+        num_species = model_config.get('num_species', 4)
+        avg_num_neighbors = model_config.get('avg_num_neighbors', 30)
+
+        hidden_irreps = o3.Irreps(
+            model_config.get('hidden_channels', "64x0e+64x1o+64x2e")
+        )
+        features_dim = model_config.get('features_dim', 64)
+        num_basis_func = model_config.get('num_radial_basis', 8)
+        nlayers = model_config.get('nlayers', 3)
+        max_ell = model_config.get('max_ell', 3)
         
-        features_dim = model_config['features_dim']
-        hidden_irreps = o3.Irreps(model_config['hidden_channels'])
-        num_basis_func = model_config['num_radial_basis']
-        nlayers = model_config['nlayers']
-        max_ell = model_config['max_ell']
-        
-        output_irreps = model_config.get('output_channels')
-        if output_irreps == None:
-            output_irreps = "1x0e"
-        active_fn = model_config.get('active_fn')
-        if active_fn == None:
-            active_fn = "identity"
-        regress_forces = model_config.get('regress_forces')
+        output_irreps = model_config.get('output_channels', "1x0e")
+        active_fn = model_config.get('active_fn', "identity")
+        regress_forces = model_config.get('regress_forces', "auto")
         if regress_forces == True:
             regress_forces = "autograd"
         elif regress_forces == False:
