@@ -34,11 +34,11 @@ class RACECalculator(Calculator, BaseTrainer):
         self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
         try:
             self.e_corr = torch.tensor(
-                self.model_ckpt['valid_scale_shift']
+                model_ckpt['valid_scale_shift']
             ).mean()
             self.element_wise = False
         except:
-            e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
+            e_corr_raw = model_ckpt['valid_scale_shift'] # or train_scale_shift?
             self.e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
             self.element_wise = True
 
@@ -65,7 +65,7 @@ class RACECalculator(Calculator, BaseTrainer):
 
         self.results['energy'] = float(energy)
         self.results['forces'] = np.array(preds['forces'].detach().cpu())
-        self.results['stress'] = np.array(preds['stress'].detach().cpu())
+        self.results['stress'] = np.array(preds['stress'][0].detach().cpu())
 
     
     

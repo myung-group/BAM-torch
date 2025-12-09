@@ -194,12 +194,12 @@ def get_dataloader(fname, ntrain, nvalid,
         graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
                                 regress_forces, max_neigh)
-        pad_nodes_to = 0 # nbatch * max_nodes 
-        pad_edges_to = 0 # nbatch * max_edges
-        for graph in graphset:
-            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-            pad_edges_to = max(graph.num_edges, pad_edges_to)
-        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+        #pad_nodes_to = 0 # nbatch * max_nodes 
+        #pad_edges_to = 0 # nbatch * max_edges
+        #for graph in graphset:
+        #    pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+        #    pad_edges_to = max(graph.num_edges, pad_edges_to)
+        #graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:
