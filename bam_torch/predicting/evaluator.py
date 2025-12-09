@@ -41,9 +41,16 @@ class Evaluator(BaseTrainer):
                            'loss_e':[],
                            'loss_f':[],
                            } 
-        e_corr = torch.tensor(
-            self.model_ckpt['valid_scale_shift']
-        ).mean()
+        try:
+            e_corr = torch.tensor(
+                self.model_ckpt['valid_scale_shift']
+            ).mean()
+            element_wise = False
+        except:
+            e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
+            e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
+            element_wise = True
+
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             # Get node_enr_avg
@@ -54,6 +61,10 @@ class Evaluator(BaseTrainer):
             # Predict energy, forces, and so on
             preds = self.model(data, backprop=False)
             # Correct the energy
+            if element_wise:
+                e_corr = torch.tensor(
+                    [e_corr_mean[int(iz)] for iz in species]
+                ).sum()
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             loss_dict = self.compute_loss(preds, data)
 
