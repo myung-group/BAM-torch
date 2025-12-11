@@ -2,7 +2,7 @@
     "device" : "gpu",
     "model" : "race",
     "gpu-parallel" : true,
-    "trainer" : "base",
+    "trainer" : "mp",
     "fname_traj" : "train_data",
     "ntrain" : "train_data",
     "nvalid" : "valid_data",

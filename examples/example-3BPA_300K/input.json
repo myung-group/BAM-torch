@@ -4,6 +4,7 @@
     "model" : "race",
     "cueq_config" : false,
     "regress_forces" : true,
+    "trainer" : "base",
     "fname_traj" : "../dataset/train_300K.xyz",
     "ntrain" : 450,
     "nvalid" : 50,

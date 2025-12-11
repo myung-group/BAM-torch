@@ -11,24 +11,46 @@ from bam_torch.utils.utils import get_graphset_to_predict
 class RACECalculator(Calculator, BaseTrainer):
     implemented_properties = ['energy', 'forces', 'stress']
 
-    def __init__(self, json_data, model=None):
-        """ Model is a trained-model's pckl file
+    def __init__(self, json_data=None, model=None, device=None):
+        """ 
+        To use the RACECalculator, specify one of the following inputs:
+            - Load configuration from JSON:
+                json_data = json.load(open('/path/to/your/input.json'))
+                calc = RACECalculator(json_data)
+            - Or provide directly a pre-trained model file with device:
+                model = '/path/to/your/model.pkl'
+                calc = RACECalculator(model=model, device='cuda')
         """
         Calculator.__init__(self)
 
-        self.json_data = json_data
-        self.json_data['NN']['restart'] = False
-        self.json_data["predict"]["evaluate_tag"] = True
         self.ddp = False
         self.world_size = 1
+        self.msg = ''
+        self.json_data = json_data
+        self.device = self.configure_device(device)
 
-        ## 1) Reproducibility
-        self.set_random_seed()
-
-        ## 2) Configure device
-        self.device = self.configure_device()
+        if model is not None and json_data is None:
+            model_ckpt = torch.load(
+                model, 
+                map_location=self.device, 
+                weights_only=False
+            )
+            self.json_data = model_ckpt['input.json']
+        elif model is None and json_data is None:
+            raise ValueError(
+                "\033[31mTo use the RACECalculator, specify one of the following inputs:\n"
+                "\033[33m - Load configuration from JSON:\n"
+                "       json_data = json.load(open('/path/to/your/input.json'))\n"
+                "       calc = RACECalculator(json_data)\n"
+                " - Or provide a pre-trained model file:\n"
+                "       model = '/path/to/your/model.pkl'\n"
+                "       calc = RACECalculator(model)\033[0m\n"
+            )
+            
+        self.json_data['NN']['restart'] = False
+        self.json_data["predict"]["evaluate_tag"] = True
     
-        ## 3) Configure model
+        # Configure model
         self.model, self.n_params, model_ckpt, _ = self.configure_model()
         self.uniq_element = model_ckpt['uniq_element']
         self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
@@ -38,7 +60,7 @@ class RACECalculator(Calculator, BaseTrainer):
             ).mean()
             self.element_wise = False
         except:
-            e_corr_raw = model_ckpt['valid_scale_shift'] # or train_scale_shift?
+            e_corr_raw = model_ckpt['valid_scale_shift']
             self.e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
             self.element_wise = True
 
@@ -67,5 +89,39 @@ class RACECalculator(Calculator, BaseTrainer):
         self.results['forces'] = np.array(preds['forces'].detach().cpu())
         self.results['stress'] = np.array(preds['stress'][0].detach().cpu())
 
-    
-    
+    def configure_device(self, device=None):
+        if device is None and self.json_data is not None:
+            device_config = self.json_data['device']
+        elif device is not None:
+            device_config = device
+        else: 
+            device_config = 'cpu'
+
+        if device_config == 'cpu':
+            device = 'cpu'
+            self.msg += f'\ndevice:\n\033[33m -- {device}\n'
+            try:
+                from mpi4py import MPI
+                self.rank = MPI.COMM_WORLD.Get_rank()
+                size = MPI.COMM_WORLD.Get_size()
+                self.msg += f' -- number of cpu  {size}\n\033[0m\n'
+            except:
+                self.msg += f' -- number of cpu  {torch.get_num_threads()}\033[0m\n'
+        else:
+            if torch.cuda.is_available():
+                if self.ddp:
+                    # Use local rank for device in multi-node setup
+                    local_rank = self.rank % torch.cuda.device_count()
+                    torch.cuda.set_device(local_rank)
+                    device = torch.device(f"cuda:{local_rank}")
+                    self.msg += f'\ndevice:\n\033[33m -- {device} (local_rank: {local_rank})\n'
+                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
+                else:
+                    device = torch.device("cuda")
+                    self.msg += f'\ndevice:\n\033[33m -- {device}\n'
+                    self.msg += f' -- number of gpu  {self.world_size}\033[0m\n'
+            else:
+                device = torch.device("cpu")
+                self.msg += f'\ndevice:\n -- {device}\n'
+
+        return device

@@ -41,7 +41,8 @@ class BaseTrainer:
         self.world_size = world_size
         self.ddp = self.world_size > 1
         self.l_ckpt_saved = False
-        
+        self.msg = ''
+
         # Run setup routines
         self.setup()
     
@@ -337,17 +338,12 @@ class BaseTrainer:
 
     def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
-        loss_config = nn_config.get("loss_config")
-        if loss_config == None:
-            if self.json_data["regress_forces"]:
-                loss_config = {'energy_loss': 'mse', 'force_loss': 'mse'}
-            else:
-                loss_config = {'energy_loss': 'mse'}
+        loss_config = nn_config.get("loss_config", {})
         
         loss_fn = {}
-        loss_fn['energy_loss'] = loss_config.get('energy_loss')
-        loss_fn['force_loss'] = loss_config.get('force_loss')
-        loss_fn['stress_loss'] = loss_config.get('stress_loss')
+        loss_fn['energy_loss'] = loss_config.get('energy_loss', 'mse')
+        loss_fn['force_loss'] = loss_config.get('force_loss', 'mse')
+        loss_fn['stress_loss'] = loss_config.get('stress_loss', 'mse')
         
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:
@@ -365,10 +361,6 @@ class BaseTrainer:
         f_lambda = lambda_config.get('frc_lambda', 1)
         s_lambda = lambda_config.get('str_lambda', 1)
         lambd = lambda_config.get('l2_lambda', 0)
-
-        cosine_sim = lambda_config.get('cosine_sim', False)
-        energy_grad_mult = lambda_config.get('energy_grad_mult', 1)
-        energy_grad_loss = lambda_config.get('energy_grad_loss', False)
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
@@ -426,7 +418,6 @@ class BaseTrainer:
 
     def configure_device(self):
         device_config = self.json_data['device']
-        self.msg = ''
         if device_config == 'cpu':
             device = 'cpu'
             self.msg += f'\ndevice:\n\033[33m -- {device}\n'
@@ -532,7 +523,7 @@ class BaseTrainer:
             )
             model.load_state_dict(model_ckpt['params'])
             model.eval()
-            self.msg += f'\n\033[32mevaluating the {evaluate_config["model"]}\033[0m\n'
+            self.msg += f'\n\033[32musing the {evaluate_config["model"]}\033[0m\n'
 
         if not restart and not evaluate: # initial train case
             rank = self.rank

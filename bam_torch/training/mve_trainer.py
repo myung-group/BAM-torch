@@ -39,18 +39,10 @@ class MVETrainer(BaseTrainer):
     def compute_loss(self, preds, data):
         if 'nll' in self.loss_config.values() or 'NLL' in self.loss_config.values():
             lambda_config = self.json_data["NN"]
-            e_lambda = lambda_config.get('enr_lambda')
-            f_lambda = lambda_config.get('frc_lambda')
-            s_lambda = lambda_config.get('str_lambda')
-            lambd = lambda_config.get('l2_lambda')
-            if e_lambda == None:
-                e_lambda = 1
-            if f_lambda == None:
-                f_lambda = 1
-            if s_lambda == None:
-                s_lambda = 1
-            if lambd == None:
-                lambd == 0
+            e_lambda = lambda_config.get('enr_lambda', 1)
+            f_lambda = lambda_config.get('frc_lambda', 1)
+            s_lambda = lambda_config.get('str_lambda', 1)
+            lambd = lambda_config.get('l2_lambda', 0)
 
             loss = {"loss": []}
             loss_enr = self.loss_fn["energy_loss"](preds, data, tag="energy")
@@ -60,22 +52,28 @@ class MVETrainer(BaseTrainer):
             loss['log_e'] = loss_enr['log_e']
             loss['enr_var'] = loss_enr['enr_var']
 
-            if "forces" in preds:
+            if "forces" in preds and self.loss_fn.get("force_loss") is not None:
                 loss_frc = self.loss_fn["force_loss"](preds, data, tag="force")
                 loss["loss"].append(f_lambda * loss_frc["loss_f"])
                 loss['loss'].append(loss_frc['log_f'])
                 loss['loss_f'] = loss_frc['loss_f']
                 loss['log_f'] = loss_frc['log_f']
                 loss['frc_var'] = loss_frc['frc_var']
-            if "stress" in preds:
+            if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
                 loss['loss_s'] = self.loss_fn["stress_loss"](preds['stress'].flatten(), 
                                                              data['stress'].flatten())
                 loss["loss"].append(s_lambda * loss["loss_s"])
-
-            params = self.model.parameters()
-            loss["loss_l2"] = l2_regularization(params)
-            loss["loss"].append(lambd * loss["loss_l2"])
-            loss["loss"] = sum(loss["loss"])
+            elif (hasattr(self.model, "training_mode_for_lammps") \
+                    and self.model.training_mode_for_lammps):
+                loss["loss_s"] = torch.tensor(
+                    0.0, device=preds["stress"].device, requires_grad=True
+                )
+            
+            if lambd != 0:
+                params = self.model.parameters()
+                loss["loss_l2"] = l2_regularization(params)
+                loss["loss"].append(lambd * loss["loss_l2"])
+                loss["loss"] = sum(loss["loss"])
 
         else:
             loss = self._compute_loss(preds, data)
@@ -84,56 +82,42 @@ class MVETrainer(BaseTrainer):
 
     def _compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
-        e_lambda = lambda_config.get('enr_lambda')
-        f_lambda = lambda_config.get('frc_lambda')
-        s_lambda = lambda_config.get('str_lambda')
-        lambd = lambda_config.get('l2_lambda')
-        if e_lambda == None:
-            e_lambda = 1
-        if f_lambda == None:
-            f_lambda = 1
-        if s_lambda == None:
-            s_lambda = 1
-        if lambd == None:
-            lambd == 0
-        cosine_sim = lambda_config.get('cosine_sim')
-        energy_grad_mult = lambda_config.get('energy_grad_mult')
-        energy_grad_loss = lambda_config.get('energy_grad_loss')
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 1)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
-        loss["loss_e"] = self.loss_fn["energy_loss"](preds["energy"].flatten(), energy_target)
+        loss["loss_e"] = self.loss_fn["energy_loss"](
+            preds["energy"].flatten(), energy_target
+        )
         loss["loss"].append(e_lambda * loss["loss_e"])
 
-        if "forces" in preds:
+        if "forces" in preds and self.loss_fn.get("force_loss") is not None:
             force_target = data["forces"].flatten()
-            loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(), force_target)
+            loss["loss_f"] = self.loss_fn["force_loss"](
+                preds["forces"].flatten(), force_target
+            )
             loss["loss"].append(f_lambda * loss["loss_f"])
-                
-        # This is for frame-averaging or probabilistic-symmetrization
-        if "forces_grad_target" in preds:
-            grad_target = preds["forces_grad_target"]
-            if cosine_sim:
-                cos = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
-                loss["energy_grad_loss"] = -torch.mean(cos(preds["forces"], grad_target))
-            else:
-                loss["energy_grad_loss"] = self.loss_fn["force_loss"](preds["forces"], grad_target)
         
-            if energy_grad_loss:
-                loss["loss"].append(energy_grad_mult * loss["energy_grad_loss"])
-        
-        if "stress" in preds:
+        if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
             stress_target = data["stress"].flatten()
-            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), stress_target)
+            loss["loss_s"] = self.loss_fn["stress_loss"](
+                preds["stress"].flatten(), stress_target
+            )
             loss["loss"].append(s_lambda * loss["loss_s"])
+        elif (hasattr(self.model, "training_mode_for_lammps") \
+                and self.model.training_mode_for_lammps):
+            loss["loss_s"] = torch.tensor(
+                0.0, device=preds["stress"].device, requires_grad=True
+            )
 
-        params = self.model.parameters()
-        loss["loss_l2"] = l2_regularization(params)
-        loss["loss"].append(lambd * loss["loss_l2"])
+        if lambd != 0:
+            params = self.model.parameters()
+            loss["loss_l2"] = l2_regularization(params)
+            loss["loss"].append(lambd * loss["loss_l2"])
             
-        ## Sanity check to make sure the compute graph is correct.
-        #for lc in loss["loss"]:
-        #    assert hasattr(lc, "grad_fn")
         loss["loss"] = sum(loss["loss"])
         if "energy_var" in preds:
             loss["enr_var"] = preds["energy_var"].mean()

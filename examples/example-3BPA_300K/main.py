@@ -5,7 +5,7 @@ import torch.multiprocessing as mp
 import os
 import json
 
-from bam_torch.training.base_trainer import BaseTrainer
+from bam_torch.training import TRAINER_REGISTRY
 from bam_torch.utils.utils import find_input_json, date
 
 
@@ -17,8 +17,10 @@ def setup(rank, world_size):
 
 def run(rank, world_size, json_data):
     setup(rank, world_size)
-    base_trainer = BaseTrainer(json_data, rank, world_size)
-    base_trainer.train()
+    trainer_name = json_data.get("trainer", "base")
+    trainer_cls = TRAINER_REGISTRY.get(trainer_name)
+    trainer = trainer_cls(json_data, rank, world_size)
+    trainer.train()
     
     
 if __name__ == '__main__':

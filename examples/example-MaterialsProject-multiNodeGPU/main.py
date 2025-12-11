@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from bam_torch.training.mp_trainer import MPTrainer_V2 as MPTrainer
+from bam_torch.training import TRAINER_REGISTRY
 from bam_torch.utils.utils import find_input_json, date
 
 
@@ -24,7 +24,9 @@ def run(rank, world_size, json_data):
     setup(rank, world_size)
     # Each process now knows its rank and the total world size.
     # Ensure the MPTrainer uses the correct device (handled by setup and MPTrainer init)
-    trainer = MPTrainer(json_data, rank, world_size)
+    trainer_name = json_data.get("trainer", "mp")
+    trainer_cls = TRAINER_REGISTRY.get(trainer_name)
+    trainer = trainer_cls(json_data, rank, world_size)
     trainer.train()
     #base_trainer.check_parameter_sync()
     dist.destroy_process_group() # Clean up the process group

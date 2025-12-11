@@ -1,7 +1,7 @@
 import json
 from ase import Atoms
 from ase import units
-from ase.io import read
+from ase.io import read, Trajectory
 from ase.md import MDLogger
 from ase.md.langevin import Langevin
 
@@ -11,9 +11,16 @@ from bam_torch.tase.base_calculator import RACECalculator
 atoms = read("../dataset/test_300K.xyz", index=slice(None))[0]  
 
 # Set calculator
+model = 'model.pkl'
+atoms.calc = RACECalculator(model=model, device='cuda')
+"""
+Or, 
 with open('input.json') as f:
     json_data = json.load(f)
-atoms.calc = RACECalculator(json_data)
+atoms.calc = RACECalculator(json_data)  
+Or, 
+atoms.calc = RACECalculator(json_data, device='cuda')  
+"""
 
 # Set parameters
 T = 300
