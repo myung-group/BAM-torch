@@ -16,6 +16,20 @@
       William C Witt (University of Cambridge)
 ------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------
+   Modified by: WonWoong-Choi
+   Affiliation: Department of Energy Science, Sungkyunkwan University, Suwon, 16419, Republic of Korea
+   Date: 2025-12-11
+   Contact: wonoong5385@skku.edu
+
+   Modifications:
+   - Added support for custom potential parameters
+   - Optimized force and virial calculation loop for better performance
+   - Fixed memory leak in neighbor list allocation
+------------------------------------------------------------------------- */
+
+/* pair_bam.h : BAM-torch(RACE); LAMMPS pair_style */
+
 #ifdef PAIR_CLASS
 // clang-format off
 PairStyle(bam,PairBAM);

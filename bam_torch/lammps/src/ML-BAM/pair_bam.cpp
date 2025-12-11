@@ -11,6 +11,18 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------------
+   Modified by: WonWoong-Choi
+   Affiliation: Department of Energy Science, Sungkyunkwan University, Suwon, 16419, Republic of Korea
+   Date: 2025-12-11
+   Contact: wonoong5385@skku.edu
+
+   Modifications:
+   - Added support for custom potential parameters
+   - Optimized force and virial calculation loop for better performance
+   - Fixed memory leak in neighbor list allocation
+------------------------------------------------------------------------- */
+
 /* pair_bam.cpp : BAM-torch(RACE); LAMMPS pair_style */
 
 #include "pair_bam.h" 
