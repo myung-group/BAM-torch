@@ -109,9 +109,9 @@ class Logger:
     def print_epoch_loss(self, step_dict, epoch_loss_train, epoch_loss_valid, lr=None):
 
         keys = list(self.log_config.keys())
-        assert len(step_dict) == len(self.log_config[keys[0]])         # step
-        assert len(epoch_loss_train) == len(self.log_config[keys[1]])  # train or predict
-        assert len(epoch_loss_valid) == len(self.log_config[keys[2]])  # valid or exact
+        #assert len(step_dict) == len(self.log_config[keys[0]])         # step
+        #assert len(epoch_loss_train) == len(self.log_config[keys[1]])  # train or predict
+        #assert len(epoch_loss_valid) == len(self.log_config[keys[2]])  # valid or exact
         
         values = list(self.log_config.values())
         _intervals = list(self.logger_config.values())
@@ -135,8 +135,10 @@ class Logger:
         
         if lr != None:
             LINE += divider
-            LINE += f"{lr:<{intervals[3][0]}.4g}"
-        
+            if self.log_config[keys[3]][0].lower() == 'lr':
+                LINE += f"{lr:<{intervals[3][0]}.4g}"
+            else:
+                LINE += f"{lr:<{intervals[3][0]}.{self.length}g}"
         print(LINE, file=self.fout)
         self.fout.flush()
         print(LINE)

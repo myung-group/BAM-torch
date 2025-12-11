@@ -161,7 +161,7 @@ class CurvatureInterface:
                     grads.append(grad_reshaped)
             Js[name] = torch.cat(grads, dim=0).view(batch_size, output_dim, *param_shape)
         f = out
-        #print(" Js_autograd: ", Js)
+
         # Concatenate over flattened parameters
         Js = [
             j.flatten(start_dim=-p.dim())
@@ -432,8 +432,6 @@ class GGNInterface(CurvatureInterface):
         """Approximate the Fisher's middle matrix (expected outer product of the functional gradient)
         using MC integral with `self.num_samples` many samples.
         """
-        print(f'\n ==+--> stochastic: {self.stochastic}')
-        print(f' ===+--->> Fisher MC integral\n')
         F = 0
 
         for _ in range(self.num_samples):
@@ -456,8 +454,6 @@ class GGNInterface(CurvatureInterface):
         return F
 
     def _get_functional_hessian(self, f: torch.Tensor) -> torch.Tensor | None:
-        print(f'\n ==+--> stochastic: {self.stochastic}')
-        print(f' ===+--->> GGN\n')
         if self.likelihood == "regression":
             return None
         else:

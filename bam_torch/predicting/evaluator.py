@@ -7,8 +7,14 @@ from copy import deepcopy
 
 from bam_torch.utils.logger import Logger
 from bam_torch.training.base_trainer import BaseTrainer
-from bam_torch.utils.utils import get_dataloader_to_predict, date, on_exit, get_dataloader
+from bam_torch.utils.utils import (
+    get_dataloader_to_predict, 
+    date, 
+    on_exit, 
+    get_dataloader
+)
 import numpy as np
+
 
 class Evaluator(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
@@ -17,7 +23,7 @@ class Evaluator(BaseTrainer):
         self.json_data["predict"]["evaluate_tag"] = True
         self.json_data["nbatch"] = 1
         self.rank = 0
-        self.world_size = 0
+        self.world_size = 1
         
         pd_config = self.json_data.get("predict", {})
         if pd_config.get("loss_config") is not None:

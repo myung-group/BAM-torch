@@ -1,13 +1,14 @@
 import numpy as np
 import torch
-from .bam_laplace import Laplace
-from .bam_curvlinops import CurvlinopsGGN
+from bam_torch.laplace.bam_laplace import Laplace
+from bam_torch.laplace.bam_curvlinops import CurvlinopsGGN
 
 from bam_torch.predicting.evaluator import Evaluator
-from bam_torch.utils.utils import get_dataloader
+from bam_torch.utils.utils import get_dataloader, date
 from time import time
 
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 
 class PostHocLaplace(Evaluator):
@@ -17,18 +18,18 @@ class PostHocLaplace(Evaluator):
     def get_train_loader(self):
         json_data = self.json_data
         train_loader, valid_loader, uniq_element, enr_avg_per_element = \
-                                                        get_dataloader(
-                                                            json_data['fname_traj'],
-                                                            json_data['ntrain'],
-                                                            json_data['nvalid'],
-                                                            json_data['nbatch'],
-                                                            json_data['cutoff'],
-                                                            json_data['NN']['data_seed'],
-                                                            json_data['element'],
-                                                            json_data['regress_forces'],
-                                                            self.rank,
-                                                            self.world_size
-                                                        )
+            get_dataloader(
+                json_data['fname_traj'],
+                json_data['ntrain'],
+                json_data['nvalid'],
+                json_data['nbatch'],
+                json_data['cutoff'],
+                json_data['NN']['data_seed'],
+                json_data['element'],
+                json_data['regress_forces'],
+                self.rank,
+                self.world_size
+        )
         return train_loader, valid_loader, uniq_element, enr_avg_per_element
     
     def laplace_approximate(self, dict_key_y='energy'):
@@ -43,7 +44,7 @@ class PostHocLaplace(Evaluator):
             'e_corr': e_corr,
             'enr_avg_per_element': self.enr_avg_per_element
         }
-        stochastic = False         # True: Fischer MC integral with 'num_samples'
+        stochastic = False        # True: Fischer MC integral with 'num_samples'
                                   # False: GGN (default)
         num_samples = 10          # default=1
         backend_kwargs = {
@@ -67,15 +68,13 @@ class PostHocLaplace(Evaluator):
             torch.ones(1, requires_grad=True),
         )
         hyper_optimizer = torch.optim.Adam([log_prior, log_sigma], lr=1e-1)
-        #nepoch = self.json_data['NN']['nepoch']
-        print('start_epoch:', self.start_epoch)
+
         t1 = time()
         for i in range(self.start_epoch):
             hyper_optimizer.zero_grad()
             neg_marglik = -la.log_marginal_likelihood(log_prior.exp(), log_sigma.exp())
             neg_marglik.backward()
             hyper_optimizer.step()
-        print(f"===+--> Elapsed time of hyperparams tuning: {time()-t1}")
         state_dict = la.state_dict()
         torch.save(state_dict, "state_dict.bin")
         la.load_state_dict(torch.load("state_dict.bin"))
@@ -85,26 +84,32 @@ class PostHocLaplace(Evaluator):
             f"prior precision={la.prior_precision.item():.2f}",
         )
 
-        #x = X_test.flatten().cpu().numpy()
         data_points = []
         y_train = []
-        #x = [] # test 
         f_mu_list = []
         pred_std_list = []
         elapsed_time = []
+        self.logger.print_logger_head()
         for i, data in enumerate(self.data_loader):
             data_points.append(i)
-            y_train.append(data['energy'])
+            
+            if dict_key_y == "forces_x":
+                dict_key = dict_key_y.split("_")[0]
+                y_train.append(data[dict_key][:,0])
+            elif dict_key_y == "forces_y":
+                dict_key = dict_key_y.split("_")[0]
+                y_train.append(data[dict_key][:,1])
+            elif dict_key_y == "forces_z":
+                dict_key = dict_key_y.split("_")[0]
+                y_train.append(data[dict_key][:,2])
+            else:
+                y_train.append(data[dict_key_y])
 
             t1 = time()
             data.to(self.device)
             f_mu, f_var = la(data)
             f_mu_joint, f_cov = la(data, joint=True)
-            print(f"\n =======+------ {i}-th Data -------+=======")
-            print(f"f_mu = {f_mu}")
-            print(f"f_var = {f_var}") 
-            print(f"f_mu_joint = {f_mu_joint}")
-            print(f"f_cov = {f_cov}")
+
             assert torch.allclose(f_mu.flatten(), f_mu_joint)
             #assert torch.allclose(f_var.flatten(), f_cov.diag())
 
@@ -115,24 +120,58 @@ class PostHocLaplace(Evaluator):
             pred_std_list.append(pred_std)
             elapsed_time.append(time()-t1)
 
-            print(f"==+-> f_mu = {f_mu}")
-            print(f"==+-> f_sigma = {f_sigma}")
-            print(f"==+-> pred_std = {pred_std}\n")
-            print(f"===+--> Elapsed time: {time()-t1}")
-        print(f"\n====+---> Total Elapsed time: {sum(elapsed_time)}\n")
+            # Raw model prediction
+            preds = self.model(data)
+            species = data['species']
+            node_enr_avg = torch.tensor(
+                [self.enr_avg_per_element[int(iz)] for iz in species],
+            ).sum()
+            pred_enr = preds['energy'].detach().cpu().item()+e_corr+node_enr_avg 
+            preds['energy'] = pred_enr
+            # True value
+            true_enr = data[dict_key_y].item()
+
+            step_dict = {
+                    "date": date(),
+                    "data": i,
+                }
+            data['energy'] = data['energy'].cpu()
+            loss_dict_raw_model = self.compute_loss(preds, data)
+            loss_dict_raw_model['energy'] = pred_enr
+            del loss_dict_raw_model['loss']
+
+            preds["energy"] = torch.tensor(f_mu)
+            loss_dict_laplace = self.compute_loss(preds, data)
+            loss_dict_laplace['energy'] = torch.tensor(f_mu)
+            del loss_dict_laplace['loss']
+
+            self.logger.print_epoch_loss(step_dict, 
+                                         loss_dict_raw_model, 
+                                         loss_dict_laplace,
+                                         true_enr)
+   
         plot_regression(
             torch.tensor(data_points), 
             torch.tensor(y_train), 
             torch.tensor(data_points),
-            torch.tensor(f_mu_list), #.flatten()?
+            torch.tensor(np.array(f_mu_list)), #.flatten()?
             torch.tensor(pred_std_list), 
             file_name="regression_example-energy", 
-            plot=True
+            plot_show=True
         )
+        return f_mu_list, pred_std_list
 
+    def configure_logger_head(self):
+        log_config = {
+            'step': ['date', 'data'],
+            'raw_model_pred': ['energy', 'loss_e'],
+            'laplace_pred': ['energy', 'loss_e'],
+            'exact': ['exact_energy']
+            }
+        return log_config
 
 def plot_regression(
-    X_train, y_train, X_test, f_test, y_std, plot=True, file_name="regression_example"
+    X_train, y_train, X_test, f_test, y_std, plot_show=True, file_name="regression_example"
 ):
     fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, sharey=True, figsize=(4.5, 2.8))
     ax1.set_title("MAP")
@@ -159,10 +198,9 @@ def plot_regression(
     ax1.set_xlabel("$x$")
     ax2.set_xlabel("$x$")
     plt.tight_layout()
-    if plot:
+    plt.savefig(f"{file_name}.png")
+    if plot_show:
         plt.show()
-    else:
-        plt.savefig(f"{file_name}.png")
 
 
 from bam_torch.utils.utils import find_input_json, date
@@ -179,6 +217,6 @@ if __name__ == '__main__':
 
         approximator = PostHocLaplace(json_data)
         dict_key_y = 'energy' # 'energy' or 'forces_x' or 'forces_y' or 'forces_z' 
-        approximator.laplace_approximate(dict_key_y)
+        f_mu_list, pred_std_list = approximator.laplace_approximate(dict_key_y)
 
     print(date())
