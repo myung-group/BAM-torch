@@ -343,7 +343,7 @@ class BaseTrainer:
         loss_fn = {}
         loss_fn['energy_loss'] = loss_config.get('energy_loss', 'mse')
         loss_fn['force_loss'] = loss_config.get('force_loss', 'mse')
-        loss_fn['stress_loss'] = loss_config.get('stress_loss', 'mse')
+        loss_fn['stress_loss'] = loss_config.get('stress_loss', None)
         
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:

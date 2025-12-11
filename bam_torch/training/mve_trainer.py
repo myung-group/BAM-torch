@@ -15,7 +15,11 @@ class MVETrainer(BaseTrainer):
         loss_config = nn_config.get("loss_config")
         if loss_config == None:
             if self.json_data["regress_forces"]:
-                loss_config = {'energy_loss': 'nll', 'force_loss': 'nll', 'stress_loss': 'mse'}
+                loss_config = {
+                    'energy_loss': 'nll', 
+                    'force_loss': 'nll', 
+                    'stress_loss': 'mse'
+                }
             else:
                 loss_config = {'energy_loss': 'nll'}
         
