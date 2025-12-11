@@ -61,6 +61,7 @@
     },
     "predict" : {
             "evaluate_tag" : false,
+	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
             "fname_traj" : "test.traj",
             "ndata" : "test.traj",
             "model" : "model.pkl",

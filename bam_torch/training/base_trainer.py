@@ -53,7 +53,7 @@ class BaseTrainer:
         """
         self.set_random_seed() # Reproducibility
         self.device = self.configure_device()
-        self.model, self.n_params, _, self.start_epoch = self.configure_model()
+        self.model, self.n_params, self.model_ckpt, self.start_epoch = self.configure_model()
         self.optimizer = self.configure_optimizer()
         self.train_loader, self.valid_loader, self.uniq_element, self.enr_avg_per_element \
                        = self.configure_dataloader()
@@ -195,11 +195,15 @@ class BaseTrainer:
         state_dict = self.model.state_dict()
         if self.ddp:
             state_dict = self.model.module.state_dict()
+        ema_state = None
+        if self.ema is not None:
+            ema_state = self.ema.state_dict()
         self.ckpt.update({
             'params': state_dict,
             'opt_state': self.optimizer.state_dict(),
             'scheduler': self.scheduler.state_dict(),
-            'loss': self.loss_dict
+            'loss': self.loss_dict,
+            'ema_state': ema_state
         })
     
     def print_logger(self, epoch, epoch_loss_train, epoch_loss_valid):
@@ -358,12 +362,12 @@ class BaseTrainer:
     def compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
         e_lambda = lambda_config.get('enr_lambda', 1)
-        f_lambda = lambda_config.get('frc_lambda', 100)
+        f_lambda = lambda_config.get('frc_lambda', 1)
         s_lambda = lambda_config.get('str_lambda', 1)
         lambd = lambda_config.get('l2_lambda', 0)
 
         cosine_sim = lambda_config.get('cosine_sim', False)
-        energy_grad_mult = lambda_config.get('energy_grad_mult', 10)
+        energy_grad_mult = lambda_config.get('energy_grad_mult', 1)
         energy_grad_loss = lambda_config.get('energy_grad_loss', False)
 
         loss = {"loss": []}
@@ -620,12 +624,7 @@ class BaseTrainer:
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart:
-            model_ckpt = torch.load(
-                model_config["fname_pkl"], 
-                map_location=self.device, 
-                weights_only=False
-            )
-            optimizer.load_state_dict(model_ckpt['opt_state'])
+            optimizer.load_state_dict(self.model_ckpt['opt_state'])
         return optimizer
 
     def set_optimizer(self):
@@ -655,12 +654,7 @@ class BaseTrainer:
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart:
-            model_ckpt = torch.load(
-                model_config["fname_pkl"], 
-                map_location=self.device, 
-                weights_only=False
-            )
-            scheduler.load_state_dict(model_ckpt['scheduler'])
+            scheduler.load_state_dict(self.model_ckpt['scheduler'])
         return scheduler
 
     def set_scheduler(self):
@@ -683,6 +677,7 @@ class BaseTrainer:
             'input.json': self.json_data,
             'train_scale_shift': [],
             'valid_scale_shift': [],
+            'ema_state': None
         }
         return loss_dict, ckpt
 
@@ -693,6 +688,10 @@ class BaseTrainer:
             ema = ExponentialMovingAverage(self.model.parameters(), decay=ema_decay)
         else:
             ema = None
+        model_config = self.json_data['NN']
+        restart = model_config.get('restart')
+        if restart:
+            ema.load_state_dict(self.model_ckpt['ema_state'])
         return ema
 
     def get_params(self):

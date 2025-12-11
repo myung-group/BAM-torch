@@ -2,6 +2,7 @@ import numpy as np
 from ase.io import read
 from scipy.optimize import minimize
 from matscipy.neighbours import neighbour_list
+from tqdm import tqdm
 
 import torch
 from torch import vmap
@@ -47,10 +48,66 @@ def get_enr_avg_per_element (traj, element):
     return enr_avg_per_element, uniq_element, np.var(tgt_enr)
 
 
+def get_enr_avg_per_element_with_ztable(traj, element, uniq_element, foundation_enr_avg):
+    """
+    Compute per-element E0s using the foundation model's z_table (MACE-style)
+    
+    Args:
+        traj: List of atomic structures
+        element: List of atomic numbers belonging to this head (e.g., [3, 15, 16, 17])
+        uniq_element: Foundation z_table mapping {1: 0, 2: 1, 3: 2, ...}
+        foundation_enr_avg: Foundation E0s dictionary {0: -3.66, 1: -1.34, ...}
+    
+    Returns:
+        enr_avg_per_element: Updated E0s based on the foundation z_table
+        enr_var: Variance of target energies
+    """
+    tgt_enr = np.array([atoms.get_potential_energy() for atoms in traj])
+    
+    # Retrieve species indices for the elements of this head
+    species_indices = []
+    for z in element:
+        if z in uniq_element:
+            species_indices.append(uniq_element[z])
+        else:
+            raise ValueError(f"Element {z} not in foundation z_table!")
+    
+    # Count occurrences of each element across the trajectory (indexed by foundation z_table)
+    element_counts = {}
+    for z in element:
+        species_idx = uniq_element[z]
+        element_counts[species_idx] = np.array([
+            (atoms.numbers == z).sum() for atoms in traj
+        ])
+    
+    # Optimization: compute E0s for the elements of this head
+    c0 = np.array([element_counts[idx] for idx in species_indices])
+    m0 = tgt_enr.sum() / c0.sum() if c0.sum() > 0 else 0.0
+    w0 = np.array([m0 for _ in element], dtype=np.float64)
+    
+    def loss_fn(weight, count):
+        prd_enr = np.einsum('i,ij->j', weight, count)
+        diff = tgt_enr - prd_enr
+        return (diff * diff).mean()
+    
+    results = minimize(loss_fn, x0=w0, args=(c0,), method='BFGS')
+    optimized_weights = results.x
+    
+    # Copy foundation E0s and update only the elements belonging to this head
+    enr_avg_per_element = dict(foundation_enr_avg)
+    for i, z in enumerate(element):
+        species_idx = uniq_element[z]
+        enr_avg_per_element[species_idx] = optimized_weights[i]
+    
+    return enr_avg_per_element, np.var(tgt_enr)
+    
+
 def get_graphset(data, cutoff, uniq_element, enr_avg_per_element, 
-                 enr_var, regress_forces=True, max_neigh=None):
+                 enr_var, regress_forces=True, max_neigh=None, 
+                 show_progress=False, desc="Converting"):
     graph_list = []
-    for atoms in data:
+    iterator = tqdm(data, desc=desc, leave=False) if show_progress else data
+    for atoms in iterator:
         crds = atoms.get_positions()
         node_enr_avg = np.array([enr_avg_per_element[uniq_element[iz]]
                                   for iz in atoms.numbers])
@@ -194,11 +251,11 @@ def get_dataloader(fname, ntrain, nvalid,
         graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
                                 regress_forces, max_neigh)
-        #pad_nodes_to = 0 # nbatch * max_nodes 
-        #pad_edges_to = 0 # nbatch * max_edges
-        #for graph in graphset:
-        #    pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-        #    pad_edges_to = max(graph.num_edges, pad_edges_to)
+        pad_nodes_to = 0 # nbatch * max_nodes 
+        pad_edges_to = 0 # nbatch * max_edges
+        for graph in graphset:
+            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+            pad_edges_to = max(graph.num_edges, pad_edges_to)
         #graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
         data_sampler = None
@@ -217,6 +274,153 @@ def get_dataloader(fname, ntrain, nvalid,
         loaders.append(loader)
         # train_loader, test_loader
     return loaders[0], loaders[1], uniq_element, enr_avg_per_element  
+
+
+def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=True,
+                              max_neigh=None, foundation_enr_avg=None, 
+                              foundation_uniq_element=None, rank=0, world_size=1,
+                              smoke_config=None):
+    """
+    Create dataloaders for multi-head training
+    
+    Args:
+        datasets_config: list of dicts with keys:
+            - name: head name
+            - ntrain: train data path
+            - nvalid: valid data path
+            - loss_weight: weight for this head's loss
+            - use_foundation_e0s: if True, use foundation model's enr_avg_per_element
+        cutoff: cutoff radius
+        nbatch: batch size
+        regress_forces: whether to regress forces
+        max_neigh: max neighbors
+        foundation_enr_avg: foundation model's enr_avg_per_element (for replay)
+        foundation_uniq_element: foundation model's uniq_element (for replay)
+        rank: process rank
+        world_size: number of processes
+        smoke_config: smoke test config (enabled, max_samples)
+    
+    Returns:
+        train_loader, valid_loader, uniq_element, enr_avg_per_element
+    """
+    from ase.io import read
+    import random
+    
+    # Smoke test config
+    smoke_enabled = smoke_config.get('enabled', False) if smoke_config else False
+    smoke_max_samples = smoke_config.get('max_samples', 100) if smoke_config else 100
+    
+    if rank == 0 and smoke_enabled:
+        print(f"\n⚠️ SMOKE TEST: Limiting data to {smoke_max_samples} samples per dataset")
+    
+    all_train_graphs = []
+    all_valid_graphs = []
+    global_uniq_element = None
+    global_enr_avg_per_element = None
+    
+    for head_idx, ds_config in enumerate(datasets_config):
+        head_name = ds_config.get("name", f"head_{head_idx}")
+        train_path = ds_config.get("ntrain")
+        valid_path = ds_config.get("nvalid")
+        loss_weight = ds_config.get("loss_weight", 1.0)
+        use_foundation_e0s = ds_config.get("use_foundation_e0s", False)
+        
+        if rank == 0:
+            print(f"\n[Head {head_idx}: {head_name}]")
+            print(f"  - Train: {train_path}")
+            print(f"  - Valid: {valid_path}")
+            print(f"  - Use foundation E0s: {use_foundation_e0s}")
+        
+        # Load data
+        train_data = read(train_path, index=':') if train_path else []
+        valid_data = read(valid_path, index=':') if valid_path else []
+        
+        # Smoke test: limit number of samples
+        if smoke_enabled:
+            train_data = train_data[:smoke_max_samples]
+            valid_data = valid_data[:smoke_max_samples]
+            if rank == 0:
+                print(f"  - [SMOKE] Limited to {len(train_data)} train, {len(valid_data)} valid")
+        
+        traj = train_data + valid_data
+        
+        if not traj:
+            continue
+        
+        # Extract element list (convert to int to avoid np.int64)
+        element = sorted([int(z) for z in set(atom.number for atoms in traj for atom in atoms)])
+        
+        # MACE-style: all heads share foundation uniq_element, but each head gets its own E0s
+        if foundation_uniq_element is not None:
+            # Use foundation uniq_element (shared across heads)
+            uniq_element = foundation_uniq_element
+            
+            if use_foundation_e0s and foundation_enr_avg is not None:
+                # Use foundation E0s
+                enr_avg_per_element = foundation_enr_avg
+                enr_var = 1.0
+                if rank == 0:
+                    print(f"  - Using foundation E0s (foundation z_table)")
+            else:
+                # Compute E0s for this head, based on foundation z_table
+                from bam_torch.utils.utils import get_enr_avg_per_element_with_ztable
+                enr_avg_per_element, enr_var = get_enr_avg_per_element_with_ztable(
+                    traj, element, uniq_element, foundation_enr_avg
+                )
+                if rank == 0:
+                    print(f"  - Calculated E0s for this head (foundation z_table)")
+        else:
+            # No foundation → compute E0s using original method
+            enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element(traj, element)
+            if rank == 0:
+                print(f"  - Calculated new enr_avg_per_element (no foundation)")
+        
+        if rank == 0:
+            print(f"  - Elements: {element}")
+        
+        # Save the first head's uniq_element / enr_avg_per_element as global
+        if head_idx == 0:
+            global_uniq_element = uniq_element
+            global_enr_avg_per_element = enr_avg_per_element
+        
+        # Generate graphs and attach head information
+        for data, graphs_list, data_type in [(train_data, all_train_graphs, 'train'), 
+                                              (valid_data, all_valid_graphs, 'valid')]:
+            if data:
+                desc = f"[{head_name}] {data_type}"
+                graphs = get_graphset(data, cutoff, uniq_element, 
+                                      enr_avg_per_element, enr_var,
+                                      regress_forces, max_neigh,
+                                      show_progress=(rank == 0), desc=desc)
+                for g in graphs:
+                    g.head = torch.tensor([head_idx], dtype=torch.long)
+                    g.config_head = torch.tensor([head_idx], dtype=torch.long)
+                    g.weight = torch.tensor([loss_weight], dtype=torch.float)
+                graphs_list.extend(graphs)
+        
+        if rank == 0:
+            print(f"  - Train: {len(train_data)}, Valid: {len(valid_data)} graphs")
+    
+    # Shuffle train graphs and create DataLoaders
+    random.shuffle(all_train_graphs)
+    
+    data_sampler_train = None
+    data_sampler_valid = None
+    if world_size > 1:
+        data_sampler_train = DistributedSampler(all_train_graphs, num_replicas=world_size, rank=rank)
+        data_sampler_valid = DistributedSampler(all_valid_graphs, num_replicas=world_size, rank=rank)
+    
+    train_loader = DataLoader(all_train_graphs, nbatch, shuffle=(data_sampler_train is None),
+                              drop_last=False, pin_memory=True, sampler=data_sampler_train)
+    valid_loader = DataLoader(all_valid_graphs, nbatch, shuffle=False,
+                              drop_last=False, pin_memory=True, sampler=data_sampler_valid)
+    
+    if rank == 0:
+        print(f"\n✓ Multihead Dataloaders created")
+        print(f"  - Total train: {len(all_train_graphs)}, valid: {len(all_valid_graphs)}")
+        print(f"  - Batch size: {nbatch}")
+    
+    return train_loader, valid_loader, global_uniq_element, global_enr_avg_per_element
 
 
 def get_graphset_to_predict(data, cutoff, uniq_element, 
@@ -294,12 +498,10 @@ def get_dataloader_to_predict(fname, ndata, nbatch,
                               max_neigh=None):
     if type(ndata) == str:
         traj = read(fname, index=slice(None))
-        print('number of data:')
-        print(f'\033[33m -- test          {len(traj)}\033[0m\n')
+        print(f'N_test: {len(traj)}\n')
     else: 
         traj = read(fname, index=slice(None))[:ndata]
-        print('number of data:')
-        print(f'\033[33m -- test          {len(traj)}\033[0m\n')
+        print(f'N_test: {len(traj)}\n')
 
     uniq_element = model_ckpt['uniq_element']
     enr_avg_per_element = model_ckpt['enr_avg_per_element']
@@ -412,16 +614,22 @@ def on_exit(fout, separator_bottom, n_params, json_data, date1):
     print(f' - {"DATA_SEED":14} {json_data["NN"]["data_seed"]}', file=fout)
     print(f' - {"INIT_SEED":14} {json_data["NN"]["init_seed"]}', file=fout)
 
-    if type(json_data["ntrain"]) == str:
-        from ase.io import read
-        train = read(json_data["ntrain"], index=slice(None))
-        ntrain = len(train)
-        valid = read(json_data["nvalid"], index=slice(None))
-        nvalid = len(valid)
+    # ntrain/nvalid가 없을 수 있음 (multihead 등)
+    ntrain_val = json_data.get("ntrain")
+    nvalid_val = json_data.get("nvalid")
+    if ntrain_val is not None and nvalid_val is not None:
+        if type(ntrain_val) == str:
+            from ase.io import read
+            train = read(ntrain_val, index=slice(None))
+            ntrain = len(train)
+            valid = read(nvalid_val, index=slice(None))
+            nvalid = len(valid)
+        else:
+            ntrain = ntrain_val
+            nvalid = nvalid_val
+        print(f'\n* DATA INFO:\n - {"N(TRAIN)":14} {ntrain}\n - {"N(VALID)":14} {nvalid}', file=fout)
     else:
-        ntrain = json_data["ntrain"]
-        nvalid = json_data["nvalid"]
-    print(f'\n* DATA INFO:\n - {"N(TRAIN)":14} {ntrain}\n - {"N(VALID)":14} {nvalid}', file=fout)
+        print(f'\n* DATA INFO: (multihead mode, see datasets config)', file=fout)
     print(f' - {"BATCH":14} {json_data["nbatch"]}', file=fout)
     print(f' - {"CUTOFF":14} {json_data["cutoff"]}', file=fout)
     print(f' - {"AVG. NEIGH.":14} {json_data["avg_num_neighbors"]}', file=fout)

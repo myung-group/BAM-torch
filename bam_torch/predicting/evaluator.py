@@ -95,10 +95,8 @@ class Evaluator(BaseTrainer):
         separator = self.logger.get_seperator()
         print(separator, file=self.fout)
         print(separator)
-        print(f"MEAN_LOSS: {eval_loss_dict['loss']:<11.5g}", file=self.fout)
         print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}", file=self.fout)
         print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}", file=self.fout)
-        print(f"MEAN_LOSS: {eval_loss_dict['loss']:<11.5g}")
         print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}\n")
     
@@ -168,3 +166,32 @@ class Evaluator(BaseTrainer):
                                 )
                         )
         return log_config, log_interval, logger, fout
+        
+    def configure_loss(self, reduction='mean'):
+        pd_config = self.json_data.get("predict")
+        if pd_config is None:
+            nn_config = self.json_data.get("NN")
+        else:
+            nn_config = pd_config
+
+        loss_config = nn_config.get("loss_config")
+        if loss_config == None:
+            if self.json_data["regress_forces"]:
+                loss_config = {'energy_loss': 'mse', 'force_loss': 'mse'}
+            else:
+                loss_config = {'energy_loss': 'mse'}
+        
+        loss_fn = {}
+        loss_fn['energy_loss'] = loss_config.get('energy_loss')
+        loss_fn['force_loss'] = loss_config.get('force_loss')
+        loss_fn['stress_loss'] = loss_config.get('stress_loss')
+        
+        for loss, loss_name in loss_fn.items():
+            if loss_name in ['l1', 'L1', 'mae', 'MAE']:
+                loss_fn[loss] = torch.nn.L1Loss(reduction=reduction)
+            elif loss_name in ['mse', 'MSE']:
+                loss_fn[loss] = torch.nn.MSELoss(reduction=reduction)
+            elif loss_name in ['rmse', 'RMSE']:
+                loss_fn[loss] = RMSELoss(reduction=reduction)
+
+        return loss_fn, loss_config
