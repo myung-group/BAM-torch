@@ -30,17 +30,13 @@ if __name__ == '__main__':
     with open(input_json_path) as f:
         json_data = json.load(f)
 
-        if json_data['trainer'] in ['base']:
-            if not json_data['gpu-parallel'] or json_data['device'] == 'cpu':
-                rank = 0
-                world_size = 1
-                run(rank, world_size, json_data)
-            else:
-                world_size = torch.cuda.device_count()
-                mp.spawn(run, args=(world_size, json_data), nprocs=world_size, join=True)
-                dist.destroy_process_group()
+    if not json_data['gpu-parallel'] or json_data['device'] == 'cpu':
+        rank = 0
+        world_size = 1
+        run(rank, world_size, json_data)
+    else:
+        world_size = torch.cuda.device_count()
+        mp.spawn(run, args=(world_size, json_data), nprocs=world_size, join=True)
+        dist.destroy_process_group()
                 
-        else:
-            print('we are making')
-
     print(date())

@@ -28,7 +28,7 @@
 	    "weight_decay" : 0,
             "nepoch" : 50000,
             "nsave": 5,
-            "restart" : false,
+            "restart" : true,
             "fname_pkl" : "model.pkl",
 	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
             "frc_lambda" : 100,

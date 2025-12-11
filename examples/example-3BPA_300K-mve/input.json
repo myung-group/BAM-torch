@@ -4,8 +4,7 @@
     "model" : "race",
     "cueq_config" : false,
     "regress_forces" : true,
-    "trainer" : "base",
-    "fname_traj" : "train_300K.xyz",
+    "fname_traj" : "../dataset/train_300K.xyz",
     "ntrain" : 450,
     "nvalid" : 50,
     "element" : "auto",
@@ -30,7 +29,7 @@
             "nsave": 5,
             "restart" : false,
             "fname_pkl" : "model.pkl",
-	    "loss_config" : {"energy_loss": "nll", "force_loss": "nll", "stress_loss": "mse"},
+	    "loss_config" : {"energy_loss": "nll", "force_loss": "nll", "stress_loss": "nll"},
             "frc_lambda" : 1,
             "enr_lambda" : 1,
 	    "str_lambda" : 1,
@@ -62,8 +61,8 @@
     },
     "predict" : {
             "evaluate_tag" : false,
-            "fname_traj" : "test_1200K.xyz",
-            "ndata" : "test_1200K.xyz",
+            "fname_traj" : "../dataset/test_300K.xyz",
+            "ndata" : "../dataset/test_300K.xyz",
             "model" : "model.pkl",
             "fname_plog" : "predict.out"
     }

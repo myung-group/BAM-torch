@@ -294,10 +294,12 @@ def get_dataloader_to_predict(fname, ndata, nbatch,
                               max_neigh=None):
     if type(ndata) == str:
         traj = read(fname, index=slice(None))
-        print(f'N_test: {len(traj)}\n')
+        print('number of data:')
+        print(f'\033[33m -- test          {len(traj)}\033[0m\n')
     else: 
         traj = read(fname, index=slice(None))[:ndata]
-        print(f'N_test: {len(traj)}\n')
+        print('number of data:')
+        print(f'\033[33m -- test          {len(traj)}\033[0m\n')
 
     uniq_element = model_ckpt['uniq_element']
     enr_avg_per_element = model_ckpt['enr_avg_per_element']
