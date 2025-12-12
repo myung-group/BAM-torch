@@ -95,7 +95,7 @@ def get_enr_avg_per_element_with_ztable(traj, element, uniq_element, foundation_
     optimized_weights = results.x
     
     # Copy foundation E0s and update only the elements belonging to this head
-    enr_avg_per_element = dict(foundation_enr_avg)
+    enr_avg_per_element = dict(foundation_enr_avg) 
     for i, z in enumerate(element):
         species_idx = uniq_element[z]
         enr_avg_per_element[species_idx] = optimized_weights[i]
@@ -319,6 +319,10 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
     global_uniq_element = None
     global_enr_avg_per_element = None
     
+    # Per-head E0s storage for checkpoint
+    per_head_enr_avg = {}
+    
+
     for head_idx, ds_config in enumerate(datasets_config):
         head_name = ds_config.get("name", f"head_{head_idx}")
         train_path = ds_config.get("ntrain")
@@ -371,7 +375,7 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
                 if rank == 0:
                     print(f"  - Calculated E0s for this head (foundation z_table)")
         else:
-            # No foundation → compute E0s using original method
+            # No foundation -> compute E0s using original method
             enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element(traj, element)
             if rank == 0:
                 print(f"  - Calculated new enr_avg_per_element (no foundation)")
@@ -379,11 +383,20 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         if rank == 0:
             print(f"  - Elements: {element}")
         
-        # Save the first head's uniq_element / enr_avg_per_element as global
+        # Store per-head E0s for checkpoint
+        per_head_enr_avg[head_idx] = {
+            'name': head_name,
+            'enr_avg_per_element': dict(enr_avg_per_element),
+            'use_foundation_e0s': use_foundation_e0s,
+            'elements': element
+        }
+        
+        # First head becomes global (for backward compatibility)
         if head_idx == 0:
             global_uniq_element = uniq_element
             global_enr_avg_per_element = enr_avg_per_element
         
+
         # Generate graphs and attach head information
         for data, graphs_list, data_type in [(train_data, all_train_graphs, 'train'), 
                                               (valid_data, all_valid_graphs, 'valid')]:
@@ -402,7 +415,7 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         if rank == 0:
             print(f"  - Train: {len(train_data)}, Valid: {len(valid_data)} graphs")
     
-    # Shuffle train graphs and create DataLoaders
+    # Shuffle and create DataLoaders
     random.shuffle(all_train_graphs)
     
     data_sampler_train = None
@@ -420,8 +433,10 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         print(f"\n✓ Multihead Dataloaders created")
         print(f"  - Total train: {len(all_train_graphs)}, valid: {len(all_valid_graphs)}")
         print(f"  - Batch size: {nbatch}")
+        print(f"  - Per-head E0s stored for {len(per_head_enr_avg)} heads")
     
-    return train_loader, valid_loader, global_uniq_element, global_enr_avg_per_element
+    return train_loader, valid_loader, global_uniq_element, global_enr_avg_per_element, per_head_enr_avg
+
 
 
 def get_graphset_to_predict(data, cutoff, uniq_element, 
