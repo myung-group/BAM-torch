@@ -1,0 +1,141 @@
+{
+    "device": "gpu",
+    "model": "race",
+    "gpu-parallel": true,
+    "trainer": "mh",
+    "smoke_test": {
+        "enabled": false,
+        "max_files": 1,
+        "max_batches": 5,
+        "max_samples": 10
+    },
+    "_comment_multihead": "========== MULTIHEAD REPLAY FINETUNING (N-head support) ==========",
+    "multihead": {
+        "enabled": true,
+        "ema": true,
+        "ema_decay": 0.99999,
+        "_comment_datasets": "Automatically decided the N-head according to the number of datasets",
+        "datasets": [
+            {
+                "name": "target",
+                "head_idx": 0,
+                "fname_traj": "Data_sampling/target/train_data/train_random_1000.traj",
+                "ntrain": "Data_sampling/target/train_data/train_random_1000.traj",
+                "nvalid": "Data_sampling/target/valid_data/valid_10per.traj",
+                "use_foundation_e0s": false,
+                "loss_weight": 10.0,
+                "comment": "Main finetuning dataset - uses foundation E0s"
+            },
+            {
+                "name": "replay",
+                "head_idx": 1,
+                "fname_traj": "Data_sampling/replay/dataset/train_data/train_random_1000.traj",
+                "ntrain": "Data_sampling/replay/train_data/train_random_1000.traj",
+                "nvalid": "Data_sampling/replay/valid_data/valid_random_10per.traj",
+                "use_foundation_e0s": true,
+                "loss_weight": 1.0,
+                "comment": "Replay dataset - uses foundation model's enr_avg_per_element"
+            }
+        ],
+        "_comment_example_3heads": "Example: Add 3 datasets to use 3-head",
+        "_example_third_dataset": {
+            "name": "auxiliary",
+            "head_idx": 2,
+            "ntrain": "/path/to/aux/*.pkl",
+            "e0s_path": "/path/to/aux_e0s.json",
+            "loss_weight": 0.5
+        }
+    },
+    "element": "auto",
+    "cutoff": 6.0,
+    "avg_num_neighbors": 60,
+    "num_species": 89,
+    "hidden_channels": "128x0e + 128x1o + 128x2e",
+    "features_dim": 64,
+    "num_radial_basis": 8,
+    "nlayers": 3,
+    "max_ell": 2,
+    "output_channels": "1x0e",
+    "active_fn": "identity",
+    "regress_forces": true,
+    "cueq_config": false,
+    "nbatch": 4,
+    "pbc": true,
+    "_comment_lammps": "========== LAMMPS MODEL SETTINGS ==========",
+    "lammps_head": "target", 
+    "_comment_lammps_head": "Select the head in the Multihead model which will use when generate .pt file for the lammps. 'target' or 'replay'",
+    "NN": {
+        "data_seed": 1300,
+        "init_seed": 1301,
+        "learning_rate": 0.0001,
+        "weight_decay": 0,
+        "nepoch": 10000,
+        "nsave": 2,
+        "restart": false,
+        "fname_pkl": "model_large_multihead.pkl",
+        "foundation_model": "model_large.pkl",
+        "loss_config": {
+            "energy_loss": "huber",
+            "force_loss": "huber",
+            "stress_loss": "huber",
+            "huber_delta": 0.1
+        },
+        "enr_lambda": 10.0,
+        "frc_lambda": 1.0,
+        "str_lambda": 10.0,
+        "energy_grad_loss": true,
+        "energy_grad_mult": 10,
+        "l2_lambda": 0.0,
+        "cosine_sim": false
+    },
+    "scheduler": {
+        "scheduler": "ReduceLROnPlateau",
+        "lr_gamma": 0.1,
+        "decay_factor": 0.9,
+        "max_steps": 30,
+        "warmup_steps": 10,
+        "warmup_factor": 0.2,
+        "patience": 50,
+        "threshold": 1e-10
+    },
+    "log_length": "simple",
+    "log_interval": 2,
+    "log_config": {
+        "step": [
+            "date",
+            "epoch"
+        ],
+        "train": [
+            "loss",
+            "head_0_loss",
+            "head_0_loss_e",
+            "head_0_loss_f",
+            "head_1_loss",
+            "head_1_loss_e",
+            "head_1_loss_f"
+        ],
+        "valid": [
+            "loss",
+            "head_0_loss",
+            "head_0_loss_e",
+            "head_0_loss_f",
+            "head_1_loss",
+            "head_1_loss_e",
+            "head_1_loss_f"
+        ],
+        "lr": [
+            "lr"
+        ]
+    },
+    "_comment_log_config": "If N-head, auto-generated head_0_*, head_1_*, ..., head_N-1_*. Separate logging for target and replay heads",
+    "train": {
+        "fname_log": "loss_train.out"
+    },
+    "predict": {
+        "evaluate_tag": false,
+        "fname_traj": "Data_sampling/target/test_data/test_20.traj",
+        "ndata": "Data_sampling/target/test_data/test_20.traj",
+        "model": "model_multihead.pkl",
+        "fname_plog": "predict.out"
+    }
+}
