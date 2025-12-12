@@ -395,7 +395,6 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         if head_idx == 0:
             global_uniq_element = uniq_element
             global_enr_avg_per_element = enr_avg_per_element
-        
 
         # Generate graphs and attach head information
         for data, graphs_list, data_type in [(train_data, all_train_graphs, 'train'), 
@@ -436,7 +435,6 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         print(f"  - Per-head E0s stored for {len(per_head_enr_avg)} heads")
     
     return train_loader, valid_loader, global_uniq_element, global_enr_avg_per_element, per_head_enr_avg
-
 
 
 def get_graphset_to_predict(data, cutoff, uniq_element, 

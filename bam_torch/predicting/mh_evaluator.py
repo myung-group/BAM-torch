@@ -32,8 +32,8 @@ class MultiheadEvaluator(Evaluator):
     Evaluator that supports both single-head and multihead models.
     
     Auto-detects model type from checkpoint:
-    - If checkpoint has 'multihead.datasets' → multihead mode
-    - Otherwise → single-head mode
+    - If checkpoint has 'multihead.datasets' -> multihead mode
+    - Otherwise -> single-head mode
     """
     
     def __init__(self, json_data, rank=0, world_size=1):
@@ -205,7 +205,7 @@ class MultiheadEvaluator(Evaluator):
             num_heads = len(datasets)
             head_names = [ds.get('name', f'head_{i}') for i, ds in enumerate(datasets)]
             
-            # input.json에서 평가할 head 지정 (기본: 0 = target head)
+            # Select the head from input.json (Default: 0 = target head)
             eval_head = self.json_data.get('predict', {}).get('eval_head', 0)
             if isinstance(eval_head, str):
                 eval_head = head_names.index(eval_head) if eval_head in head_names else 0
@@ -225,7 +225,7 @@ class MultiheadEvaluator(Evaluator):
             print(f"\n✅ Single-head model detected\n")
             head_e0s = self.enr_avg_per_element
         
-        # e_corr 계산 (BAM-torch GitHub 방식)
+        # Get e_corr
         # For multihead, try to use per_head_scale_shift
         if is_multihead:
             per_head_scale_shift = self.model_ckpt.get('per_head_scale_shift', {})
@@ -258,7 +258,7 @@ class MultiheadEvaluator(Evaluator):
                 [head_e0s.get(int(iz), 0.0) for iz in species],
             ).sum()
             
-            # Multihead: head 설정
+            # Multihead: head setting
             if is_multihead:
                 num_graphs = data['batch'].max().item() + 1
                 data['head'] = torch.full((num_graphs,), eval_head, dtype=torch.long, device=self.device)
@@ -273,7 +273,7 @@ class MultiheadEvaluator(Evaluator):
                 ).sum()
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             
-            # Loss 계산
+            # loss computation
             loss_dict = self.compute_loss(preds, data)
             
             for l in eval_loss_dict.keys():
@@ -294,7 +294,7 @@ class MultiheadEvaluator(Evaluator):
             if i % 100 == 0:
                 gc.collect()
         
-        # 최종 평균 출력
+        # Get means of loss values per epoch
         eval_loss_dict = {key: torch.mean(torch.tensor(value)) 
                           for key, value in eval_loss_dict.items()}
         
