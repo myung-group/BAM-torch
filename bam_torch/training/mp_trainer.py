@@ -16,7 +16,7 @@ from bam_torch.training.loss import RMSELoss, l2_regularization, HuberLoss
 import ast
 import atexit
 from tqdm import tqdm
-from bam_torch.utils.utils import date
+from bam_torch.utils.utils import date, data_to_dict
 from torch.utils.data import Dataset, DataLoader as TorchLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -75,7 +75,7 @@ class MPTrainer(BaseTrainer):
 
             for data in data_loader:
                 data.to(self.device)
-                data = self.data_to_dict(data)  # This is for torch.jit compile
+                data = data_to_dict(data)  # This is for torch.jit compile
                 preds = self.model(data, backprop)
                 preds = self.scale_shift(preds, data, mode)
 
@@ -376,6 +376,14 @@ class MPTrainer_V2(BaseTrainer):
         model = self.set_model() # Set self.model
         model.to(self.device)
 
+        # Set criterion for direct force training
+        criterion = self.json_data.get("criterion")
+        criterion_value = self.json_data.get("criterion_value")
+        try:
+            model.set_criterion(criterion, criterion_value)
+        except:
+            pass
+
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         
@@ -477,7 +485,7 @@ class MPTrainer_V2(BaseTrainer):
         self.gpu_test_log.flush()
 
         # with torch.set_grad_enabled(mode == 'train'):
-        for filename in tqdm(files, desc="📂  Loading data" if mode == 'valid' else "🔄 Loading training data", dynamic_ncols=True):
+        for filename in files:
             try:
                 data_batch = self.load_pickle_files(filename, folder_path)
             except Exception as e:
@@ -505,9 +513,9 @@ class MPTrainer_V2(BaseTrainer):
                 collate_fn=collate_identity
             )
 
-            for data in tqdm(data_loader, desc="🚀 Training" if mode == 'train' else "🔍 Evaluating", leave=False, dynamic_ncols=True):
+            for data in data_loader:
                 data.to(self.device)
-                data = self.data_to_dict(data)  # This is for torch.jit compile
+                data = data_to_dict(data)  # This is for torch.jit compile
                 self.gpu_test_log.flush()
 
                 preds = self.model(data, backprop)

@@ -7,6 +7,7 @@ from tqdm import tqdm
 import torch
 from torch import vmap
 from torch_geometric.data import Data
+from torch_geometric.data import Batch as DataBatch
 from torch_geometric.loader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 

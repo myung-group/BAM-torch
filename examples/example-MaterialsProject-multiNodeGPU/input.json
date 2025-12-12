@@ -11,7 +11,7 @@
     "cutoff" : 6.0,
     "avg_num_neighbors": 60,
     "num_species" : 89,
-    "hidden_channels" : "128x0e",
+    "hidden_channels" : "32x0e+16x1o+4x2e",
     "features_dim" : 64,
     "num_radial_basis" : 8,
     "nlayers" : 3,
@@ -39,8 +39,6 @@
         "enr_lambda" : 10,   
         "frc_lambda" : 1,
         "str_lambda" : 10,
-        "energy_grad_loss" : true,
-        "energy_grad_mult" : 10,
         "l2_lambda" : 0.0,
         "cosine_sim" : false
     },

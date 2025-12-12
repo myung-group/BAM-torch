@@ -478,9 +478,9 @@ class MultiheadTrainer(BaseTrainer):
     
     def configure_dataloader(self):
         """
-        Override: 멀티헤드용 데이터로더 구성 (BaseTrainer 스타일)
+        Override: Multi-head specialized data_loader
         """
-        # Foundation model의 enr_avg_per_element 로드 (replay용)
+        # Load the enr_avg_per_element file of the foundation model (for replay)
         foundation_enr_avg, foundation_uniq_element = self._load_foundation_enr_avg()
         
         # Smoke test config
@@ -501,11 +501,9 @@ class MultiheadTrainer(BaseTrainer):
             )
         return train_loader, valid_loader, uniq_element, enr_avg_per_element
     
-    def load_loss(self, reduction='mean'):
+    def configure_loss(self, reduction='mean'):
         """
-        Override: Huber loss 지원 추가
-        로컬 BaseTrainer는 load_loss를 호출하므로 이 이름 사용
-        (GitHub 최신 버전은 configure_loss 사용)
+        Override: Huber loss support
         """
         nn_config = self.json_data.get("NN", {})
         loss_config = nn_config.get("loss_config", {})
@@ -516,7 +514,6 @@ class MultiheadTrainer(BaseTrainer):
             else:
                 loss_config = {'energy_loss': 'huber'}
         
-        # Stress loss 기본값
         s_lambda = nn_config.get("str_lambda", 0)
         if loss_config.get('stress_loss') is None and s_lambda:
             loss_config['stress_loss'] = 'mse'
@@ -538,9 +535,6 @@ class MultiheadTrainer(BaseTrainer):
                 loss_fn[loss_key] = None
         
         return loss_fn, loss_config
-    
-    # Alias for GitHub latest compatibility
-    configure_loss = load_loss
     
     def compute_loss(self, preds, data):
         """
@@ -867,11 +861,11 @@ class MultiheadTrainer(BaseTrainer):
                 for head_idx, head_loss in loss_dict['head_losses'].items():
                     if head_idx < self.num_heads:
                         if 'loss' in head_loss:
-                            head_loss_accum[head_idx]['loss'].append(head_loss['loss'].cpu())
+                            head_loss_accum[head_idx]['loss'].append(head_loss['loss'].detach().cpu())
                         if 'loss_e' in head_loss:
-                            head_loss_accum[head_idx]['loss_e'].append(head_loss['loss_e'].cpu())
+                            head_loss_accum[head_idx]['loss_e'].append(head_loss['loss_e'].detach().cpu())
                         if 'loss_f' in head_loss:
-                            head_loss_accum[head_idx]['loss_f'].append(head_loss['loss_f'].cpu())
+                            head_loss_accum[head_idx]['loss_f'].append(head_loss['loss_f'].detach().cpu())
             
             # Memory cleanup every N batches
             if batch_idx % 50 == 0:

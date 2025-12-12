@@ -9,6 +9,10 @@ import torch.multiprocessing as mp
 from bam_torch.training import TRAINER_REGISTRY
 from bam_torch.utils.utils import find_input_json, date
 
+with open('input.json') as f:
+    json_data = json.load(f)
+trainer_name = json_data.get("trainer", "mp")
+trainer_cls = TRAINER_REGISTRY.get(trainer_name)
 
 def setup(rank, world_size):
     # MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE are expected to be set
@@ -24,8 +28,6 @@ def run(rank, world_size, json_data):
     setup(rank, world_size)
     # Each process now knows its rank and the total world size.
     # Ensure the MPTrainer uses the correct device (handled by setup and MPTrainer init)
-    trainer_name = json_data.get("trainer", "mp")
-    trainer_cls = TRAINER_REGISTRY.get(trainer_name)
     trainer = trainer_cls(json_data, rank, world_size)
     trainer.train()
     #base_trainer.check_parameter_sync()
@@ -36,7 +38,7 @@ def run_single_node(rank, world_size, json_data):
     os.environ['MASTER_PORT'] = '12355' # Or another port
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
-    trainer = MPTrainer(json_data, rank, world_size)
+    trainer = trainer_cls(json_data, rank, world_size)
     trainer.train()
     dist.destroy_process_group()
 
@@ -71,7 +73,7 @@ if __name__ == '__main__':
              mp.spawn(run_single_node, args=(world_size, json_data), nprocs=world_size, join=True)
         else:
              print("Running non-distributed on a single device.")
-             trainer = MPTrainer(json_data, rank=0, world_size=1)
+             trainer = trainer_cls(json_data, rank=0, world_size=1)
              trainer.train()
 
     print(f"End time: {date()}")
