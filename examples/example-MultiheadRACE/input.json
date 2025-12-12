@@ -50,7 +50,7 @@
     "cutoff": 6.0,
     "avg_num_neighbors": 60,
     "num_species": 89,
-    "hidden_channels": "128x0e + 128x1o + 128x2e",
+    "hidden_channels": "128x0e",
     "features_dim": 64,
     "num_radial_basis": 8,
     "nlayers": 3,
@@ -73,7 +73,7 @@
         "nsave": 2,
         "restart": false,
         "fname_pkl": "model_large_multihead.pkl",
-        "foundation_model": "model_large.pkl",
+        "foundation_model": "model-1_rev.pkl",
         "loss_config": {
             "energy_loss": "huber",
             "force_loss": "huber",

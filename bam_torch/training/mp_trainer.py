@@ -606,7 +606,7 @@ class MPTrainer_V2(BaseTrainer):
         loss_fn['force_loss'] = loss_config.get('force_loss')
         loss_fn['stress_loss'] = loss_config.get('stress_loss')
         huber_delta = loss_config.get('huber_delta')
-
+        compute_tag = "basic"
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:
                 loss_fn[loss] = torch.nn.L1Loss(reduction=reduction)
@@ -616,23 +616,20 @@ class MPTrainer_V2(BaseTrainer):
                 loss_fn[loss] = RMSELoss(reduction=reduction)
             elif loss_name in ['huber', 'HUBER', 'h', 'H']:
                 loss_fn[loss] = HuberLoss(huber_delta=huber_delta)
+                compute_tag = "huber"
+        if compute_tag == "huber":
+            self.compute_loss = self.compute_loss_huber
+        else:
+            self.compute_loss = self.compute_loss_basic
 
         return loss_fn, loss_config
 
-    def compute_loss(self, preds, data):
+    def compute_loss_huber(self, preds, data):
         lambda_config = self.json_data["NN"]
-        e_lambda = lambda_config.get('enr_lambda')
-        f_lambda = lambda_config.get('frc_lambda')
-        s_lambda = lambda_config.get('str_lambda')
-        lambd = lambda_config.get('l2_lambda')
-        if e_lambda == None:
-            e_lambda = 1
-        if f_lambda == None:
-            f_lambda = 1
-        if s_lambda == None:
-            s_lambda = 1
-        if lambd == None:
-            lambd == 0
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 1)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
@@ -663,3 +660,46 @@ class MPTrainer_V2(BaseTrainer):
         loss["loss"] = sum(loss["loss"])
         return loss
 
+    def compute_loss_basic(self, preds, data):
+        lambda_config = self.json_data["NN"]
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 1)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
+
+        loss = {"loss": []}
+        energy_target = data["energy"].flatten()
+        loss["loss_e"] = self.loss_fn["energy_loss"](
+            preds["energy"].flatten(), energy_target
+        )
+        loss["loss"].append(e_lambda * loss["loss_e"])
+
+        if "forces" in preds and self.loss_fn.get("force_loss") is not None:
+            force_target = data["forces"].flatten()
+            loss["loss_f"] = self.loss_fn["force_loss"](
+                preds["forces"].flatten(), force_target
+            )
+            loss["loss"].append(f_lambda * loss["loss_f"])
+        
+        if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
+            stress_target = data["stress"].flatten()
+            loss["loss_s"] = self.loss_fn["stress_loss"](
+                preds["stress"].flatten(), stress_target
+            )
+            loss["loss"].append(s_lambda * loss["loss_s"])
+        elif (hasattr(self.model, "training_mode_for_lammps") \
+                and self.model.training_mode_for_lammps):
+            loss["loss_s"] = torch.tensor(
+                0.0, device=preds["stress"].device, requires_grad=True
+            )
+
+        if lambd != 0:
+            params = self.model.parameters()
+            loss["loss_l2"] = l2_regularization(params)
+            loss["loss"].append(lambd * loss["loss_l2"])
+
+        # Get loss: 
+        # loss = (e_lambda * loss_e) + (f_lambda * loss_f) 
+        #        + (s_lambda * loss_s) + (lambd * loss_l2)
+        loss["loss"] = sum(loss["loss"])
+        return loss

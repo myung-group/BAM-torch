@@ -11,7 +11,7 @@
     "cutoff" : 6.0,
     "avg_num_neighbors": 60,
     "num_species" : 89,
-    "hidden_channels" : "32x0e+16x1o+4x2e",
+    "hidden_channels" : "128x0e",
     "features_dim" : 64,
     "num_radial_basis" : 8,
     "nlayers" : 3,
@@ -65,9 +65,10 @@
     },
     "predict" : {
         "evaluate_tag" : false,
-        "fname_traj" : "test_data",
-        "ndata" : "test_data",
-        "model" : "model.pkl",
+	"loss_config" : {"energy_loss": "rmse", "force_loss": "rmse"},
+        "fname_traj" : "test_20.traj",
+        "ndata" : "test_20.traj",
+        "model" : "model-1_rev.pkl",
         "fname_plog" : "predict.out"
 }
 }

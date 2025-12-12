@@ -617,16 +617,19 @@ def on_exit(fout, separator_bottom, n_params, json_data, date1):
     print(f' - {"DATA_SEED":14} {json_data["NN"]["data_seed"]}', file=fout)
     print(f' - {"INIT_SEED":14} {json_data["NN"]["init_seed"]}', file=fout)
 
-    # ntrain/nvalid가 없을 수 있음 (multihead 등)
     ntrain_val = json_data.get("ntrain")
     nvalid_val = json_data.get("nvalid")
     if ntrain_val is not None and nvalid_val is not None:
         if type(ntrain_val) == str:
             from ase.io import read
-            train = read(ntrain_val, index=slice(None))
-            ntrain = len(train)
-            valid = read(nvalid_val, index=slice(None))
-            nvalid = len(valid)
+            try:
+                train = read(ntrain_val, index=slice(None))
+                ntrain = len(train)
+                valid = read(nvalid_val, index=slice(None))
+                nvalid = len(valid)
+            except:
+                ntrain = 0
+                nvalid = 0
         else:
             ntrain = ntrain_val
             nvalid = nvalid_val
