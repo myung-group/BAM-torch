@@ -1,0 +1,39 @@
+{
+    "device": "gpu",
+    "model": "race",
+    "element": "auto",
+    "enr_avg_per_element": "get_enr_avg_per_element.txt",
+    "cutoff": 6.0,
+    "avg_num_neighbors": 60,
+    "num_species": 89,
+    "hidden_channels": "128x0e + 128x1o + 128x2e",
+    "features_dim": 64,
+    "num_radial_basis": 8,
+    "nlayers": 3,
+    "max_ell": 2,
+    "output_channels": "1x0e",
+    "active_fn": "identity",
+    "regress_forces": true,
+    "cueq_config": false,
+    "nbatch": 1,
+    "pbc": true,
+    "NN": {
+        "data_seed": 1300
+    },
+    "predict": {
+        "evaluate_tag": true,
+        "model": "./model.pkl"
+    },
+    "monte_carlo": {
+        "structure_template": "POSCAR",
+        "temperature": 300.0,
+        "n_steps": 10000000,
+        "output_interval": 1,
+        "sampling_interval": 100,
+        "structure_save_interval": 5000,
+        "flexible_config": {
+            "tm_swap_cutoff": 6.0,
+            "tm_swaps_per_step": 1
+        }
+    }
+}
