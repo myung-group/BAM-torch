@@ -14,11 +14,11 @@
     "num_species" : 4,
     "max_ell" : 2,
     "num_radial_basis" : 8,
-    "hidden_channels" : "64x0e+64x1o+64x2e",
+    "hidden_channels" : "32x0e+16x1o+8x2e",
     "output_channels" : "1x0e",
     "nbatch" : 2,
     "nlayers" : 3,
-    "features_dim" : 128,
+    "features_dim" : 64,
     "active_fn": "identity",
     "pbc" : true,
     "NN" : {
@@ -26,17 +26,14 @@
 	    "init_seed" :  11,
             "learning_rate" : 0.01,
 	    "weight_decay" : 0,
-            "nepoch" : 50000,
+            "nepoch" : 100,
             "nsave": 5,
             "restart" : false,
             "fname_pkl" : "model.pkl",
 	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
             "frc_lambda" : 100,
             "enr_lambda" : 1,
-            "energy_grad_loss" : true,
-            "energy_grad_mult" : 10,
-            "l2_lambda" : 0.0,
-            "cosine_sim" : false
+            "l2_lambda" : 0.0
     },
     "scheduler": {
             "scheduler" : "ReduceLROnPlateau",

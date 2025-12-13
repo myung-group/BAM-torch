@@ -34,10 +34,7 @@
             "frc_lambda" : 1,
             "enr_lambda" : 1,
 	    "str_lambda" : 1,
-            "energy_grad_loss" : true,
-            "energy_grad_mult" : 10,
-            "l2_lambda" : 0.0,
-            "cosine_sim" : false
+            "l2_lambda" : 0.0
     },
     "scheduler": {
             "scheduler" : "ReduceLROnPlateau",

@@ -32,10 +32,7 @@
 	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
             "frc_lambda" : 100,
             "enr_lambda" : 1,
-            "energy_grad_loss" : true,
-            "energy_grad_mult" : 10,
-            "l2_lambda" : 0.0,
-            "cosine_sim" : false
+            "l2_lambda" : 0.0
     },
     "scheduler": {
             "scheduler" : "ReduceLROnPlateau",
@@ -61,8 +58,8 @@
     "predict" : {
             "evaluate_tag" : false,
 	    "loss_config" : {"energy_loss": "rmse", "force_loss": "rmse"},
-            "fname_traj" : "../dataset/test_300K.xyz",
-            "ndata" : 100,
+            "fname_traj" : "../dataset/test_1200K.xyz",
+            "ndata" :  "../dataset/test_1200K.xyz",
             "model" : "model.pkl",
             "fname_plog" : "predict.out"
     }

@@ -83,6 +83,7 @@ class CurvatureInterface:
         }
 
         self.e_corr = scale_info['e_corr']
+        self.element_wise = scale_info['element_wise']
         self.enr_avg_per_element = scale_info['enr_avg_per_element']
 
     @property
@@ -121,7 +122,13 @@ class CurvatureInterface:
                 [self.enr_avg_per_element[int(iz)] 
                 for iz in species]
             ).sum()
-            out = out + node_enr_avg + self.e_corr
+            if self.element_wise:
+                e_corr = torch.tensor(
+                    [self.e_corr[int(iz)] for iz in species]
+                ).sum()
+            else:
+                e_corr = self.e_corr
+            out = out + node_enr_avg + e_corr
             output_dim = out.shape[0]
             batch_size, _, _ = x["cell"].shape
             out = out.view(batch_size, output_dim)

@@ -53,7 +53,16 @@ class Evaluator(BaseTrainer):
                            'loss_f':[],
                            }
         e_corr_, element_wise = self.get_scale_shift_correction(element_wise)
-
+        test_values = {
+            'energy': [],
+            'force_x': [],
+            'force_y': [],
+            'force_z': [],
+            'exact_energy': [],
+            'exact_force_x': [],
+            'exact_force_y': [],
+            'exact_force_z': [],
+        }
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
             # Get node_enr_avg
@@ -71,6 +80,16 @@ class Evaluator(BaseTrainer):
             else:
                 e_corr = e_corr_
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
+
+            test_values['energy'].append(preds['energy'].detach().cpu())
+            test_values['force_x'].append(preds['forces'][:,0].detach().cpu())
+            test_values['force_y'].append(preds['forces'][:,1].detach().cpu())
+            test_values['force_z'].append(preds['forces'][:,2].detach().cpu())
+            test_values['exact_energy'].append(data['energy'].detach().cpu())
+            test_values['exact_force_x'].append(data['forces'][:,0].detach().cpu())
+            test_values['exact_force_y'].append(data['forces'][:,1].detach().cpu())
+            test_values['exact_force_z'].append(data['forces'][:,2].detach().cpu())  
+
             loss_dict = self.compute_loss(preds, data)
 
             for l in eval_loss_dict.keys():
@@ -104,6 +123,7 @@ class Evaluator(BaseTrainer):
         print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}", file=self.fout)
         print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}\n")
+        torch.save(test_values, "test_values.pkl")
     
     def get_scale_shift_correction(self, element_wise):
         if element_wise:

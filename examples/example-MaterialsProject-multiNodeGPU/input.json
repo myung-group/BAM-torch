@@ -39,8 +39,7 @@
         "enr_lambda" : 10,   
         "frc_lambda" : 1,
         "str_lambda" : 10,
-        "l2_lambda" : 0.0,
-        "cosine_sim" : false
+        "l2_lambda" : 0.0
     },
     "scheduler": {
         "scheduler" : "ReduceLROnPlateau",
@@ -68,7 +67,7 @@
 	"loss_config" : {"energy_loss": "rmse", "force_loss": "rmse"},
         "fname_traj" : "test_20.traj",
         "ndata" : "test_20.traj",
-        "model" : "model-1_rev.pkl",
+        "model" : "model.pkl",
         "fname_plog" : "predict.out"
 }
 }

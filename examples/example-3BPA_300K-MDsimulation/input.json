@@ -32,10 +32,7 @@
 	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
             "frc_lambda" : 100,
             "enr_lambda" : 1,
-            "energy_grad_loss" : true,
-            "energy_grad_mult" : 10,
-            "l2_lambda" : 0.0,
-            "cosine_sim" : false
+            "l2_lambda" : 0.0
     },
     "scheduler": {
             "scheduler" : "ReduceLROnPlateau",

@@ -69,7 +69,7 @@
         "init_seed": 1301,
         "learning_rate": 0.0001,
         "weight_decay": 0,
-        "nepoch": 10000,
+        "nepoch": 20,
         "nsave": 2,
         "restart": false,
         "fname_pkl": "model_large_multihead.pkl",
@@ -83,10 +83,7 @@
         "enr_lambda": 10.0,
         "frc_lambda": 1.0,
         "str_lambda": 10.0,
-        "energy_grad_loss": true,
-        "energy_grad_mult": 10,
-        "l2_lambda": 0.0,
-        "cosine_sim": false
+        "l2_lambda": 0.0
     },
     "scheduler": {
         "scheduler": "ReduceLROnPlateau",
@@ -133,9 +130,10 @@
     },
     "predict": {
         "evaluate_tag": false,
+	"loss_config" : {"energy_loss": "rmse", "force_loss": "rmse", "stress_loss": "rmse"},
         "fname_traj": "Data_sampling/target/test_data/test_20.traj",
         "ndata": "Data_sampling/target/test_data/test_20.traj",
-        "model": "model_multihead.pkl",
+        "model": "model_small_multihead_50epch.pkl",
         "fname_plog": "predict.out"
     }
 }
