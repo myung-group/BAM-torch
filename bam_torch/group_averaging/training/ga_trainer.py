@@ -35,7 +35,9 @@ class GATrainer(BaseTrainer):
             loss_log_config = self.log_config['train']
             if data_loader is None:
                 data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
         else:  # test or valid
             self.model.eval()
             backprop = False
@@ -43,7 +45,10 @@ class GATrainer(BaseTrainer):
             if data_loader is None:
                 data_loader = self.valid_loader
             if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = []
+                self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
+                self.ckpt['valid_scale_shift_origin'] = []
 
         pbc = self.json_data.get('pbc') 
         if pbc == None:

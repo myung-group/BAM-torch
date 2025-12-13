@@ -186,7 +186,7 @@ class MultiheadEvaluator(Evaluator):
         
         return log_config, log_interval, logger, self.fout
     
-    def evaluate(self):
+    def evaluate(self, element_wise=True):
         """
         BAM-torch style evaluate with multihead support.
         """
@@ -239,15 +239,8 @@ class MultiheadEvaluator(Evaluator):
                 element_wise = False
                 print(f"   ⚠️ No per-head scale_shift found, using 0")
         else:
-            try:
-                e_corr = torch.tensor(
-                    self.model_ckpt['valid_scale_shift']
-                ).mean()
-                element_wise = False
-            except:
-                e_corr_raw = self.model_ckpt['valid_scale_shift']
-                e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
-                element_wise = True
+            e_corr_, element_wise = self.get_scale_shift_correction(element_wise)    
+
         
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
@@ -269,8 +262,10 @@ class MultiheadEvaluator(Evaluator):
             # Correct the energy
             if element_wise:
                 e_corr = torch.tensor(
-                    [e_corr_mean[int(iz)] for iz in species]
+                    [e_corr_[int(iz)] for iz in species]
                 ).sum()
+            else:
+                e_corr = e_corr_
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             
             # loss computation

@@ -61,13 +61,18 @@ class MPTrainer(BaseTrainer):
             self.model.train()
             backprop = True
             loss_log_config = self.log_config['train']
-            self.ckpt['scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
             data_files = train_files
         else:  # test or valid
             self.model.eval()
             backprop = False
             loss_log_config = self.log_config['valid']
-            data_files = valid_files
+            self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
+            self.ckpt['valid_scale_shift_origin'] = []
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for filename in data_files:
@@ -340,7 +345,6 @@ class MPTrainer_V2(BaseTrainer):
         self.gpu_test_log = open(log_filename, 'w')
         atexit.register(self.close_log_file)
 
-
         self.epoch = 0
         super().__init__(json_data, rank, world_size)
 
@@ -445,7 +449,9 @@ class MPTrainer_V2(BaseTrainer):
             self.model.train()
             backprop = True
             loss_log_config = self.log_config['train']
-            self.ckpt['scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
             # data_files = train_files
             folder_path = self.json_data["ntrain"]       
         else:
@@ -453,6 +459,10 @@ class MPTrainer_V2(BaseTrainer):
             backprop = False
             loss_log_config = self.log_config['valid']
             folder_path = self.json_data["nvalid"]
+            self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
+            self.ckpt['valid_scale_shift_origin'] = []
 
         self.gpu_test_log.flush()
 

@@ -45,22 +45,14 @@ class Evaluator(BaseTrainer):
         self.loss_fn, self.loss_config = self.configure_loss()
         self.log_config, self.log_interval, self.logger, self.fout = self.configure_logger()
 
-    def evaluate(self):
+    def evaluate(self, element_wise=True):
         self.logger.print_logger_head()
         target = {}
         eval_loss_dict = {'loss':[],
                            'loss_e':[],
                            'loss_f':[],
-                           } 
-        try:
-            e_corr = torch.tensor(
-                self.model_ckpt['valid_scale_shift']
-            ).mean()
-            element_wise = False
-        except:
-            e_corr_raw = self.model_ckpt['valid_scale_shift'] # or train_scale_shift?
-            e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
-            element_wise = True
+                           }
+        e_corr_, element_wise = self.get_scale_shift_correction(element_wise)
 
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
@@ -74,8 +66,10 @@ class Evaluator(BaseTrainer):
             # Correct the energy
             if element_wise:
                 e_corr = torch.tensor(
-                    [e_corr_mean[int(iz)] for iz in species]
+                    [e_corr_[int(iz)] for iz in species]
                 ).sum()
+            else:
+                e_corr = e_corr_
             preds['energy'] = preds["energy"] + node_enr_avg + e_corr
             loss_dict = self.compute_loss(preds, data)
 
@@ -111,6 +105,29 @@ class Evaluator(BaseTrainer):
         print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}\n")
     
+    def get_scale_shift_correction(self, element_wise):
+        if element_wise:
+            try:
+                e_corr = torch.tensor(
+                    self.model_ckpt['valid_scale_shift']
+                ).mean()
+                element_wise = False
+            except:
+                e_corr = self.model_ckpt['valid_scale_shift'] 
+                element_wise = True
+        else:
+            try:
+                e_corr = torch.tensor(
+                    self.model_ckpt['valid_scale_shift_origin']
+                ).mean()
+                element_wise = False
+            except:
+                e_corr = torch.tensor(
+                    self.model_ckpt['valid_scale_shift']
+                ).mean()
+                element_wise = False   
+        return e_corr, element_wise
+
     def save_input_parameters(self, input_json, fname=None):
         predict_config = self.json_data.get('predict') 
         if fname == None:

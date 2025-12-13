@@ -118,8 +118,16 @@ class BaseTrainer:
                 
                 # Save check point
                 if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                    self.ckpt['train_scale_shift'] = {
+                        k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
+                            for k, v in self.ckpt['train_scale_shift'].items()
+                    }
+                    self.ckpt['valid_scale_shift'] = {
+                        k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
+                            for k, v in self.ckpt['valid_scale_shift'].items()
+                    }
                     torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                    #torch.save(self.model, 'model.pt')
+                    torch.save(self.model, 'model.pt')
                     self.l_ckpt_saved = True
 
     def initial_test(self):
@@ -138,7 +146,9 @@ class BaseTrainer:
             loss_log_config = self.log_config['train']
             if data_loader is None:
                 data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = []
+            self.ckpt['train_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+            }
         else:  # test or valid
             self.model.eval()
             backprop = False
@@ -146,7 +156,10 @@ class BaseTrainer:
             if data_loader is None:
                 data_loader = self.valid_loader
             if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = []
+                self.ckpt['valid_scale_shift'] = {
+                    k: [] for k in self.enr_avg_per_element.keys()
+                }
+                self.ckpt['valid_scale_shift_origin'] = []
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for data in data_loader:
@@ -181,10 +194,23 @@ class BaseTrainer:
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         preds["energy"] = energy_predict + shift_enr
+        # Calculate element-wise scale-shift 
+        node_energy = preds["node_energy"].detach()
+        energy = energy_predict.detach()
+        batch = data["batch"]
+        ratios = node_energy/energy[batch]
+        shift_node_enr = shift_enr * ratios
+        species = data["species"][:len(node_energy)]
+        # Save scale-shift values
         if mode == 'train':
-            self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
+            for i in range(len(species)):
+                self.ckpt['train_scale_shift'][species[i].item()].append(
+                    shift_node_enr[i].detach().cpu())
         elif mode == 'valid':
-            self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
+            for i in range(len(species)):
+                self.ckpt['valid_scale_shift'][species[i].item()].append(
+                    shift_node_enr[i].detach().cpu())
+                self.ckpt['valid_scale_shift_origin'].append(shift_enr.detach().cpu())
         return preds
 
     def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):       
@@ -668,6 +694,7 @@ class BaseTrainer:
             'input.json': self.json_data,
             'train_scale_shift': [],
             'valid_scale_shift': [],
+            'valid_scale_shift_origin' : [],
             'ema_state': None
         }
         return loss_dict, ckpt
