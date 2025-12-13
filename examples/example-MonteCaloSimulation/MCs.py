@@ -260,7 +260,7 @@ class TMSwapMonteCarlo:
             "move_history": move_history,
         }
 
-        self._save_top_structures(total_steps - 1)
+        self._save_top_structures(total_steps - 1, is_final=True)
         self._log_summary(stats)
         
         if self.log_file:
@@ -325,7 +325,7 @@ class TMSwapMonteCarlo:
         elif energy < -self.top_structures[0][0]:
             heapq.heapreplace(self.top_structures, entry)
 
-    def _save_top_structures(self, step: int) -> None:
+    def _save_top_structures(self, step: int, is_final: bool = False) -> None:
         """Save top 10 structures to files."""
         if not self.top_structures:
             return
@@ -334,7 +334,10 @@ class TMSwapMonteCarlo:
         from ase.io import write
 
         sorted_structures = sorted(self.top_structures, key=lambda x: x[0])
-        step_dir = os.path.join(RESULTS_DIR, f"step_{step:06d}")
+        if is_final:
+            step_dir = os.path.join(RESULTS_DIR, "final_top10")
+        else:
+            step_dir = os.path.join(RESULTS_DIR, f"checkpoint_{step:06d}")
         os.makedirs(step_dir, exist_ok=True)
 
         for rank, (neg_energy, struct_step, atoms) in enumerate(sorted_structures):
@@ -399,12 +402,10 @@ def main() -> None:
         config = json.load(f)
 
     mc_cfg = config["monte_carlo"]
-    flex_cfg = mc_cfg.get("flexible_config", {}) or {}
-
     # Setup configurations
     swap_settings = SwapSettings(
-        cutoff=float(flex_cfg.get("tm_swap_cutoff", config.get("cutoff", 6.0))),
-        swaps_per_step=int(flex_cfg.get("tm_swaps_per_step", 1)),
+        cutoff=float(mc_cfg.get("tm_swap_cutoff", config.get("cutoff", 6.0))),
+        swaps_per_step=int(mc_cfg.get("tm_swaps_per_step", 1)),
     )
     
     mc_config = MonteCarloConfig(
@@ -415,16 +416,17 @@ def main() -> None:
         structure_save_interval=int(mc_cfg.get("structure_save_interval", 5000)),
     )
 
-    seeds = [
-        config.get("NN", {}).get("data_seed", 1300) + i for i in range(3)
-    ]
+    n_seeds = int(mc_cfg.get("n_seeds", 3))
+    base_seed = config.get("NN", {}).get("data_seed", 1300)
+    seeds = [base_seed + i for i in range(n_seeds)]
 
-    # Handle structure_template path: absolute or relative to data/ folder
+    # Handle structure_template path
     structure_template = mc_cfg["structure_template"]
-    if os.path.isabs(structure_template):
+    if os.path.exists(structure_template):
         structure_path = structure_template
     else:
         structure_path = os.path.join(PROJECT_ROOT, "data", structure_template)
+    
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     print(f"    Structure : {structure_path}")
@@ -433,49 +435,54 @@ def main() -> None:
 
     # MultiGPU or sequential execution
     use_multigpu = os.environ.get("USE_MULTIGPU", "false").lower() == "true"
-    gpu_ids = [g.strip() for g in os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")]
+    gpu_ids = [int(g.strip()) for g in os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")]
 
-    if use_multigpu and len(gpu_ids) >= len(seeds):
-        print(f"🚀 MultiGPU mode: {len(seeds)} seeds on {len(gpu_ids)} GPUs")
-
-        # Use subprocess instead of multiprocessing to properly set CUDA_VISIBLE_DEVICES
+    if use_multigpu and len(gpu_ids) > 1:
         import subprocess
         import sys
         import tempfile
+        from collections import defaultdict
 
+        # Round-robin: distribute seeds across GPUs
+        gpu_to_seeds = defaultdict(list)
+        for idx, seed in enumerate(seeds):
+            gpu_idx = gpu_ids[idx % len(gpu_ids)]
+            gpu_to_seeds[gpu_idx].append(seed)
+
+        print(f"MultiGPU mode (round-robin): {len(seeds)} seeds on {len(gpu_ids)} GPUs")
+        for gpu_idx, assigned_seeds in gpu_to_seeds.items():
+            print(f"  GPU {gpu_idx} → Seeds {assigned_seeds}")
+
+        # Create one subprocess per GPU, each runs its assigned seeds sequentially
         processes = []
         temp_files = []
 
-        for idx, seed in enumerate(seeds):
-            gpu_idx = int(gpu_ids[idx % len(gpu_ids)])
-
-            # Create a temporary file to store results
+        for gpu_idx, assigned_seeds in gpu_to_seeds.items():
             temp_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False, suffix='.pkl')
             temp_file.close()
             temp_files.append(temp_file.name)
 
-            # Create a runner script that will be executed with specific CUDA_VISIBLE_DEVICES
+            seeds_list_str = str(assigned_seeds)
             runner_code = f'''
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "{gpu_idx}"
 
 import sys
-sys.path.insert(0, "{PROJECT_ROOT}/src")
-
 import pickle
-from test_1027 import TMSwapMonteCarlo, SwapSettings, MonteCarloConfig, set_random_seed
 
 # Load config
 import json
 with open("{input_json}", "r") as f:
     config = json.load(f)
 
+# Import after setting CUDA_VISIBLE_DEVICES
+from MCs import TMSwapMonteCarlo, SwapSettings, MonteCarloConfig, set_random_seed
+
 mc_cfg = config["monte_carlo"]
-flex_cfg = mc_cfg.get("flexible_config", {{}}) or {{}}
 
 swap_settings = SwapSettings(
-    cutoff=float(flex_cfg.get("tm_swap_cutoff", config.get("cutoff", 6.0))),
-    swaps_per_step=int(flex_cfg.get("tm_swaps_per_step", 1)),
+    cutoff=float(mc_cfg.get("tm_swap_cutoff", config.get("cutoff", 6.0))),
+    swaps_per_step=int(mc_cfg.get("tm_swaps_per_step", 1)),
 )
 
 mc_config = MonteCarloConfig(
@@ -486,47 +493,49 @@ mc_config = MonteCarloConfig(
     structure_save_interval=int(mc_cfg.get("structure_save_interval", 5000)),
 )
 
-print(f"\\n{{'=' * 70}}\\n[Physical GPU {gpu_idx}] Seed {seed} Start\\n{{'=' * 70}}\\n", flush=True)
+assigned_seeds = {seeds_list_str}
+results_dict = {{}}
 
-set_random_seed({seed})
-mc = TMSwapMonteCarlo("{structure_path}", config, swap_settings, seed={seed})
-results = mc.run(mc_config)
+for seed in assigned_seeds:
+    print(f"\\n{{'=' * 70}}\\n[GPU {gpu_idx}] Seed {{seed}} Start\\n{{'=' * 70}}\\n", flush=True)
+    set_random_seed(seed)
+    mc = TMSwapMonteCarlo("{structure_path}", config, swap_settings, seed=seed)
+    results = mc.run(mc_config)
+    results_dict[f"seed_{{seed}}"] = results
+    print(f"\\n[GPU {gpu_idx}] Seed {{seed}} Completed", flush=True)
 
-# Save results to temp file
+# Save all results from this GPU
 with open("{temp_file.name}", "wb") as f:
-    pickle.dump({{"seed": {seed}, "results": results}}, f)
-
-print(f"\\n[GPU {gpu_idx}] Seed {seed} Completed", flush=True)
+    pickle.dump(results_dict, f)
 '''
 
-            # Launch subprocess with specific GPU
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(gpu_idx)
 
             p = subprocess.Popen(
                 [sys.executable, "-c", runner_code],
+                cwd=PROJECT_ROOT,
                 env=env,
                 stdout=sys.stdout,
                 stderr=sys.stderr
             )
             processes.append(p)
-            print(f"  Seed {seed} → GPU {gpu_idx} (PID: {p.pid})")
 
-        # Wait for all processes
+        # Wait for all GPU processes
         for p in processes:
             p.wait()
 
-        # Collect results from temp files
+        # Collect results from all temp files
         all_results = {}
         for temp_file in temp_files:
             with open(temp_file, "rb") as f:
                 data = pickle.load(f)
-                all_results[f"seed_{data['seed']}"] = data['results']
+                all_results.update(data)
             os.unlink(temp_file)
 
     else:
-        if use_multigpu:
-            print(f"⚠️  MultiGPU requested but insufficient GPUs, running sequentially")
+        if use_multigpu and len(gpu_ids) <= 1:
+            print(f"⚠️  MultiGPU requested but only {len(gpu_ids)} GPU available, running sequentially")
         
         all_results = {}
         for seed in seeds:
