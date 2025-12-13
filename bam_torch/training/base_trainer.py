@@ -127,7 +127,7 @@ class BaseTrainer:
                             for k, v in self.ckpt['valid_scale_shift'].items()
                     }
                     torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                    torch.save(self.model, 'model.pt')
+                    # torch.save(self.model, 'model.pt')
                     self.l_ckpt_saved = True
 
     def initial_test(self):

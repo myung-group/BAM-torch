@@ -231,11 +231,11 @@ class MultiheadEvaluator(Evaluator):
             per_head_scale_shift = self.model_ckpt.get('per_head_scale_shift', {})
             if eval_head in per_head_scale_shift and per_head_scale_shift[eval_head]:
                 head_shifts = per_head_scale_shift[eval_head]
-                e_corr = sum(head_shifts) / len(head_shifts)
+                e_corr_ = sum(head_shifts) / len(head_shifts)
                 element_wise = False
-                print(f"   ✓ Using per-head scale_shift: {e_corr:.4f}")
+                print(f"   ✓ Using per-head scale_shift: {e_corr_:.4f}")
             else:
-                e_corr = torch.tensor(0.0)
+                e_corr_ = torch.tensor(0.0)
                 element_wise = False
                 print(f"   ⚠️ No per-head scale_shift found, using 0")
         else:
