@@ -51,9 +51,9 @@ class RACECalculator(Calculator, BaseTrainer):
         self.json_data["predict"]["evaluate_tag"] = True
     
         # Configure model
-        self.model, self.n_params, model_ckpt, _ = self.configure_model()
-        self.uniq_element = model_ckpt['uniq_element']
-        self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
+        self.model, self.n_params, self.model_ckpt, _ = self.configure_model()
+        self.uniq_element = self.model_ckpt['uniq_element']
+        self.enr_avg_per_element = self.model_ckpt['enr_avg_per_element']
         self.e_corr, self.element_wise = self.get_scale_shift_correction(element_wise)
 
     def calculate(self, atoms, properties=['energy'], system_changes=all_changes):
