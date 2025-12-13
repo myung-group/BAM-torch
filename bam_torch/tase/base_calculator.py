@@ -11,7 +11,7 @@ from bam_torch.utils.utils import get_graphset_to_predict
 class RACECalculator(Calculator, BaseTrainer):
     implemented_properties = ['energy', 'forces', 'stress']
 
-    def __init__(self, json_data=None, model=None, device=None):
+    def __init__(self, json_data=None, model=None, device=None, element_wise=True):
         """ 
         To use the RACECalculator, specify one of the following inputs:
             - Load configuration from JSON:
@@ -54,15 +54,7 @@ class RACECalculator(Calculator, BaseTrainer):
         self.model, self.n_params, model_ckpt, _ = self.configure_model()
         self.uniq_element = model_ckpt['uniq_element']
         self.enr_avg_per_element = model_ckpt['enr_avg_per_element']
-        try:
-            self.e_corr = torch.tensor(
-                model_ckpt['valid_scale_shift']
-            ).mean()
-            self.element_wise = False
-        except:
-            e_corr_raw = model_ckpt['valid_scale_shift']
-            self.e_corr_mean = {k: torch.stack(v).mean() for k, v in e_corr_raw.items()}
-            self.element_wise = True
+        self.e_corr, self.element_wise = self.get_scale_shift_correction(element_wise)
 
     def calculate(self, atoms, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms, properties, system_changes)
@@ -80,10 +72,12 @@ class RACECalculator(Calculator, BaseTrainer):
         node_enr_avg = np.array([self.enr_avg_per_element[int(iz)] \
                         for iz in species]).sum()
         if self.element_wise:
-            self.e_corr = torch.tensor(
-                [self.e_corr_mean[int(iz)] for iz in species]
+            e_corr = torch.tensor(
+                [self.e_corr[int(iz)] for iz in species]
             ).sum()
-        energy = preds["energy"] + node_enr_avg + self.e_corr
+        else:
+            e_corr = self.e_corr
+        energy = preds["energy"] + node_enr_avg + e_corr
 
         self.results['energy'] = float(energy)
         self.results['forces'] = np.array(preds['forces'].detach().cpu())
@@ -125,3 +119,26 @@ class RACECalculator(Calculator, BaseTrainer):
                 self.msg += f'\ndevice:\n -- {device}\n'
 
         return device
+
+    def get_scale_shift_correction(self, element_wise):
+        if element_wise:
+            try:
+                e_corr = torch.tensor(
+                    self.model_ckpt['valid_scale_shift']
+                ).mean()
+                element_wise = False
+            except:
+                e_corr = self.model_ckpt['valid_scale_shift'] 
+                element_wise = True
+        else:
+            try:
+                e_corr = torch.tensor(
+                    self.model_ckpt['valid_scale_shift_origin']
+                ).mean()
+                element_wise = False
+            except:
+                e_corr = torch.tensor(
+                    self.model_ckpt['valid_scale_shift']
+                ).mean()
+                element_wise = False   
+        return e_corr, element_wise
