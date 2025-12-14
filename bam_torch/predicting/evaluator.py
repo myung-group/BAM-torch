@@ -100,7 +100,11 @@ class Evaluator(BaseTrainer):
                     "date": date(),
                     "data": i,
                 }
+
+            for l in loss_dict.keys():
+                loss_dict[l] = loss_dict.get(l).detach().cpu()
             loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
+
             del loss_dict['loss']
             target['energy'] = data['energy']
             self.logger.print_epoch_loss(step_dict, 

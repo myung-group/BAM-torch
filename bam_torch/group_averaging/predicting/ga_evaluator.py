@@ -107,8 +107,6 @@ class GAEvaluator(GATrainer):
                 val = loss_dict.get(l, torch.nan)
                 total_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
 
-            target['energy'] = data['energy']
-            loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
             del loss_dict['loss']
             if loss_dict.get('loss_grad') == None:
                 loss_dict['loss_grad'] = torch.nan
@@ -118,6 +116,12 @@ class GAEvaluator(GATrainer):
                     "date": date(),
                     "data": i,
                 }
+
+            for l in loss_dict.keys():
+                loss_dict[l] = loss_dict.get(l).detach().cpu()
+            loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
+            target['energy'] = data['energy']
+            
             self.logger.print_epoch_loss(step_dict, 
                                          loss_dict, 
                                          target,

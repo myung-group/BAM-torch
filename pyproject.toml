@@ -43,7 +43,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12"]
-laplace = ["laplace-torch", "torchmetrics", "curvlinops-for-pytorch"]
+laplace = ["laplace-torch", "torchmetrics", "curvlinops-for-pytorch==2.0.1"]
 group_averaging = ["mendeleev", "pandas"]
 
 [project.urls]
