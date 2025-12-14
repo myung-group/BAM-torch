@@ -20,7 +20,6 @@ from datetime import datetime
 from contextlib import nullcontext
 
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.algorithms.join import Join
 from e3nn import o3
 
 try:
@@ -52,12 +51,12 @@ class MultiheadTrainer(BaseTrainer):
     """
     
     def __init__(self, json_data: Dict[str, Any], rank: int = 0, world_size: int = 1):
-        # Process multihead config first (needed before super().__init__)
+        # Multihead config pre-processing (needed before super().__init__)
         self.multihead_config = json_data.get("multihead", {})
         if not self.multihead_config.get("enabled", False):
             raise ValueError("Multihead finetuning is not enabled in config")
 
-        # Initialize datasets_config
+        # datasets_config initiating
         self.datasets_config = self.multihead_config.get("datasets", [])
         if not self.datasets_config:
             raise ValueError("multihead.datasets must be specified and non-empty")
@@ -74,17 +73,17 @@ class MultiheadTrainer(BaseTrainer):
         if self.smoke_enabled and rank == 0:
             print(f"\n⚠️ SMOKE TEST MODE: max_batches={self.smoke_max_batches}")
 
-        # Extract foundation model config
+        # Extract the foundation model's setting
         self.foundation_config = self._extract_foundation_config(json_data, rank)
 
-        # Setup batch logs directory
+        # Set Batch logs directory
         self._setup_batch_logs(json_data, rank)
 
-        # Call parent __init__ - setup() is called automatically
         super().__init__(json_data, rank, world_size)
     
     def _extract_foundation_config(self, json_data: Dict[str, Any], rank: int) -> Dict[str, Any]:
-        """Return the foundation model's input.json as-is"""
+        """Return the input.json of the foundation model
+        """
         foundation_path = json_data.get('NN', {}).get('foundation_model')
         if not foundation_path:
             raise ValueError("foundation_model must be specified in NN config for multihead finetuning")
@@ -111,7 +110,7 @@ class MultiheadTrainer(BaseTrainer):
         self.device = self.configure_device()
         self.model, self.n_params, _, self.start_epoch = self.configure_model()
         
-        # Load foundation model (if not restarting)
+        # Load the foundation model (if not restart)
         if not self.json_data['NN'].get('restart', False):
             self._load_foundation_model()
         
@@ -125,8 +124,9 @@ class MultiheadTrainer(BaseTrainer):
         self.ema = self.configure_exponential_moving_average()
     
     def _setup_batch_logs(self, json_data: Dict[str, Any], rank: int):
-        """Setup batch logs directory and log files"""
-        # Extract Node ID and Local GPU rank
+        """Set Batch logs directory and log-file
+        """
+        # Get Node ID and Local GPU rank
         if 'SLURM_NODEID' in os.environ:
             node_id = int(os.environ['SLURM_NODEID'])
         elif 'NODE_RANK' in os.environ:
@@ -141,12 +141,12 @@ class MultiheadTrainer(BaseTrainer):
         else:
             local_rank = rank
 
-        # Per-rank batch size log directory/file
+        # Set batch size and log-directory/file per rank
         batch_log_root = Path(json_data.get('batch_size_log_root', 'batch_logs'))
         self.batch_log_dir = batch_log_root / f"rank_{rank}"
         self.batch_log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Per-GPU log file (created inside batch_log_dir)
+        # Set logfile per GPU (generated in batch_log_dir)
         log_filename = self.batch_log_dir / f'node{node_id}_gpu{local_rank}_global{rank}.log'
         self.gpu_log = open(log_filename, 'w')
         atexit.register(lambda: self.gpu_log.close() if hasattr(self, 'gpu_log') and not self.gpu_log.closed else None)
@@ -167,20 +167,21 @@ class MultiheadTrainer(BaseTrainer):
             print(f"✓ Batch logs directory created: {batch_log_root}")
     
     def _log_batch_size(self, mode: str, batch_idx: int, data, epoch: int = 0):
-        """Log batch size information to file"""
+        """Report the batch size information to log-file
+        """
         if not hasattr(self, 'batch_size_log') or self.batch_size_log.closed:
             return
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Number of graphs in batch
+        # The number of graph in the batch
         num_graphs = data.ptr.numel() - 1 if hasattr(data, 'ptr') else 1
         
-        # Total node/edge count
+        # The total number of nodes and edges
         total_nodes = data.num_nodes if hasattr(data, 'num_nodes') else len(data.positions)
         total_edges = data.edge_index.shape[1] if hasattr(data, 'edge_index') else 0
         
-        # Head composition
+        # Head configuration
         if hasattr(data, 'head'):
             head_counts = {}
             heads = data.head.flatten().tolist()
@@ -194,16 +195,14 @@ class MultiheadTrainer(BaseTrainer):
         self.batch_size_log.write(log_line)
         self.batch_size_log.flush()
 
-    # configure_exponential_moving_average: Use BaseTrainer as-is
-
     def set_model(self):
         """
-        Override: Create RACEMultihead model
-        Use foundation config first to ensure shape compatibility
+        Override: Generate RACEMultihead model
+        Prioritize the foundation model configuration to ensure shape compatibility
         """
         model_config = self.json_data
         
-        # Use foundation config if available
+        # Use the foundation configuration first if available
         if self.foundation_config:
             fc = self.foundation_config
             if self.rank == 0:
@@ -213,7 +212,7 @@ class MultiheadTrainer(BaseTrainer):
                 print(f"  - nlayers: {fc.get('nlayers', 'N/A')}")
                 print(f"  - cutoff: {fc.get('cutoff', 'N/A')}")
             
-            # Get from foundation config
+            # Load from the foundation config
             hidden_irreps_str = fc.get('hidden_channels', model_config['hidden_channels'])
             hidden_irreps = o3.Irreps(hidden_irreps_str)
             features_dim = fc.get('features_dim', model_config['features_dim'])
@@ -222,7 +221,7 @@ class MultiheadTrainer(BaseTrainer):
             num_basis_func = fc.get('num_radial_basis', model_config['num_radial_basis'])
             max_ell = fc.get('max_ell', model_config['max_ell'])
         else:
-            # Use input.json if foundation config not available
+            # If not exist the foundation config, load from input.json
             hidden_irreps = o3.Irreps(model_config['hidden_channels'])
             features_dim = model_config['features_dim']
             nlayers = model_config['nlayers']
@@ -230,7 +229,7 @@ class MultiheadTrainer(BaseTrainer):
             num_basis_func = model_config['num_radial_basis']
             max_ell = model_config['max_ell']
         
-        # Rest from input.json (dataset related)
+        # Load the remaining (dataset-related) settings from input.json
         avg_num_neighbors = model_config['avg_num_neighbors']
         num_species = model_config['num_species']
         
@@ -242,33 +241,10 @@ class MultiheadTrainer(BaseTrainer):
             regress_forces = "autograd"
         elif regress_forces == False:
             regress_forces = "false"
-        
-        # MLP_irreps: Direct conversion from features_dim
+
         mlp_irreps = o3.Irreps(f"{features_dim}x0e")
         
-        # # RACEMultihead model creation (original code - commented out)
-        # from bam_torch.model.models import RACEMultihead
-        # 
-        # model = RACEMultihead(
-        #     cutoff=cutoff,
-        #     avg_num_neighbors=avg_num_neighbors,
-        #     num_species=num_species,
-        #     max_ell=max_ell,
-        #     num_basis_func=num_basis_func,
-        #     hidden_irreps=hidden_irreps,
-        #     nlayers=nlayers,
-        #     features_dim=features_dim,
-        #     output_irreps=output_irreps,
-        #     active_fn=active_fn,
-        #     radial_MLP=[64, 64],
-        #     MLP_irreps=mlp_irreps,
-        #     regress_forces=regress_forces,
-        #     compute_stress=True,
-        #     heads=self.heads,
-        #     cueq_config=None,
-        # )
-        
-        # RACEUnified 모델 생성 (Single-head/Multihead 통합 버전)
+        # Generate the RACEUnified model (Single-head + Multihead)
         from bam_torch.model.models import RACEUnified
         
         model = RACEUnified(
@@ -296,7 +272,7 @@ class MultiheadTrainer(BaseTrainer):
     
     def _load_foundation_enr_avg(self):
         """
-        Foundation model의 enr_avg_per_element 로드
+        Load enr_avg_per_element from the foundation model
         
         Returns:
             enr_avg_per_element: {species_index: energy}
@@ -330,7 +306,8 @@ class MultiheadTrainer(BaseTrainer):
             return None, None
     
     def _load_foundation_model(self):
-        """Load foundation model weights and expand readout"""
+        """Load foundation model weights and extend the readout layers
+        """
         foundation_path = self.json_data['NN']['foundation_model']
         
         if self.rank == 0:
@@ -338,11 +315,11 @@ class MultiheadTrainer(BaseTrainer):
             print(f"Loading Foundation model: {foundation_path}")
             print(f"{'='*80}\n")
         
-        # BAM-torch pkl 형식: {'params': state_dict, ...}
+        # BAM-torch pkl format: {'params': state_dict, ...}
         foundation_ckpt = torch.load(foundation_path, map_location='cpu', weights_only=False)
         foundation_state = foundation_ckpt['params']
         
-        # Reference to current model
+        # Refer present model
         model = self.model.module if self.ddp else self.model
         
         self._load_from_state_dict(model, foundation_state, self.num_heads)
@@ -350,12 +327,12 @@ class MultiheadTrainer(BaseTrainer):
     
     def _load_from_state_dict(self, model, foundation_state, num_heads):
         """
-        Fallback: Load parameters from state_dict
+        Fallback: load parameters from state_dict 
         
-        Used when only state_dict is available, not model object
+        Use when only the state_dict is available (no model object)
         Reference: https://github.com/ACEsuit/mace/blob/main/mace/tools/finetuning_utils.py
         
-        Foundation model readout 파라미터 구조:
+        Parameters structure of the foundation model's readout block:
         - readouts.X.linear_1.weight: [hidden_dim_0e * MLP_dim] = [128 * 64] = [8192]
         - readouts.X.linear_1.output_mask: [MLP_dim] = [64]
         - readouts.X.linear_2.weight: [MLP_dim * output_dim] = [64 * 1] = [64]
@@ -374,7 +351,7 @@ class MultiheadTrainer(BaseTrainer):
         loaded_count = 0
         readout_expanded = 0
         skipped_readout = []
-        # Extract MLP_dim and hidden_dim_0e from Foundation NonLinearReadoutBlock
+        # Extract MLP_dim and hidden_dim_0e from the foundation NonLinearReadoutBlock
         mlp_dim = next(p.numel() for n, p in foundation_state.items() 
                        if 'linear_2.weight' in n and p.numel() > 0)
         linear_1_numel = next(p.numel() for n, p in foundation_state.items() 
@@ -396,7 +373,7 @@ class MultiheadTrainer(BaseTrainer):
             
             target_param = current_state[clean_name]
             
-            # Readout parameters need expansion
+            # Readout parameters require extension 
             if 'readouts' in clean_name:
                 if param.numel() == 0:
                     # Empty parameter (no bias)
@@ -429,11 +406,11 @@ class MultiheadTrainer(BaseTrainer):
                 elif 'linear_2.weight' in clean_name:
                     # Foundation: [MLP_dim * 1] = [64]
                     # Target: [MLP_dim * num_heads * num_heads] = [256]
-                    # Apply scaling: / sqrt(MLP_dim / target_output_dim)
+                    # Scailing: / sqrt(MLP_dim / target_output_dim)
                     if param.numel() == mlp_dim:
                         # view(1, MLP_dim).repeat(num_heads, num_heads) -> [num_heads, MLP_dim * num_heads]
                         expanded = param.view(1, mlp_dim).repeat(num_heads, num_heads).flatten()
-                        # Scaling
+                        # Scailing
                         scale_factor = (mlp_dim / target_output_dim) ** 0.5
                         expanded = expanded / scale_factor
                     else:
@@ -455,7 +432,7 @@ class MultiheadTrainer(BaseTrainer):
                     if param.numel() % hidden_dim_0e == 0:
                         output_dim_linear = param.numel() // hidden_dim_0e
                         expanded = param.view(hidden_dim_0e, output_dim_linear).repeat(1, num_heads).flatten()
-                        # Scaling
+                        # Scailing
                         if output_dim_linear == 1:
                             scale_factor = (hidden_dim_0e / target_output_dim) ** 0.5
                             expanded = expanded / scale_factor
@@ -482,7 +459,7 @@ class MultiheadTrainer(BaseTrainer):
                             f"{clean_name}: {param.shape} -> {expanded.shape} (target: {target_param.shape})"
                         )
             else:
-                # General parameters: copy directly if shape matches
+                # For general parameters, directly copy when the shapes match
                 if target_param.shape == param.shape:
                     current_state[clean_name].copy_(param)
                     loaded_count += 1
@@ -500,9 +477,9 @@ class MultiheadTrainer(BaseTrainer):
     
     def configure_dataloader(self):
         """
-        Override: Configure multihead dataloader (BaseTrainer style)
+        Override: Configure a multihead data loader
         """
-        # Load foundation model's enr_avg_per_element (for replay)
+        # Load enr_avg_per_element from the foundation model (for replay)
         foundation_enr_avg, foundation_uniq_element = self._load_foundation_enr_avg()
         
         # Smoke test config
@@ -527,12 +504,7 @@ class MultiheadTrainer(BaseTrainer):
         
         return train_loader, valid_loader, uniq_element, enr_avg_per_element
     
-    def load_loss(self, reduction='mean'):
-        """
-        Override: Add Huber loss support
-        Local BaseTrainer calls load_loss, so use this name
-        (GitHub latest version uses configure_loss)
-        """
+    def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN", {})
         loss_config = nn_config.get("loss_config", {})
         
@@ -542,7 +514,6 @@ class MultiheadTrainer(BaseTrainer):
             else:
                 loss_config = {'energy_loss': 'huber'}
         
-        # Stress loss default
         s_lambda = nn_config.get("str_lambda", 0)
         if loss_config.get('stress_loss') is None and s_lambda:
             loss_config['stress_loss'] = 'mse'
@@ -565,12 +536,9 @@ class MultiheadTrainer(BaseTrainer):
         
         return loss_fn, loss_config
     
-    # Alias for GitHub latest compatibility
-    configure_loss = load_loss
-    
     def compute_loss(self, preds, data):
         """
-        Override: Compute per-head weighted loss
+        Override: compute weighted loss per head
         """
         lambda_config = self.json_data["NN"]
         e_lambda = lambda_config.get('enr_lambda', 1.0)
@@ -580,18 +548,18 @@ class MultiheadTrainer(BaseTrainer):
         
         loss = {"loss": []}
         
-        # Get head and weight per config
+        # Load heads and weights from the config
         if 'config_head' in data:
             config_heads = data['config_head'].flatten()
         elif 'head' in data:
-            # Expand head to batch if graph-level
+            # If the head is graph-level, expand it to batch level
             if hasattr(data, 'batch'):
-                # Convert per-graph head to per-config
+                # Convert per-graph heads to per-configuration heads
                 ptr = data.get('ptr')
                 if ptr is not None and ptr.numel() > 1:
                     batch_size = ptr.numel() - 1
                     config_heads = torch.zeros(batch_size, dtype=torch.long, device=data['head'].device)
-                    # Use head of first atom in each config
+                    # Use the head of the first atom in each configuration
                     for i in range(batch_size):
                         start_idx = ptr[i].item()
                         config_heads[i] = data['head'][data['batch'] == i][0] if (data['batch'] == i).any() else 0
@@ -602,7 +570,7 @@ class MultiheadTrainer(BaseTrainer):
         else:
             config_heads = torch.zeros(preds['energy'].shape[0], dtype=torch.long, device=preds['energy'].device)
         
-        # Get weights
+        # Load weight
         if 'weight' in data:
             config_weights = data['weight'].flatten()
         else:
@@ -633,7 +601,6 @@ class MultiheadTrainer(BaseTrainer):
             )
             loss["loss"].append(f_lambda * loss["loss_f"])
         
-        # Stress loss (preds["stress"]가 None일 수 있음)
         if "stress" in preds and preds["stress"] is not None and self.loss_fn.get('stress_loss') is not None:
             stress_target = data.get("stress")
             if stress_target is not None:
@@ -677,19 +644,19 @@ class MultiheadTrainer(BaseTrainer):
                     "loss_e": head_energy_loss.detach()
                 }
                 
-                # Compute per-head force loss
+                # Compute force loss for each head
                 head_force_loss = None
                 if "forces" in preds and self.loss_fn.get('force_loss') is not None:
                     if 'batch' in data:
                         batch_indices = data['batch']
-                        # Find atoms belonging to this head
+                        # Identify atoms belonging to the corresponding head
                         atom_head_mask = head_mask[batch_indices]
                         if atom_head_mask.any():
                             force_diff = preds["forces"][atom_head_mask] - data["forces"][atom_head_mask]
                             head_force_loss = (force_diff ** 2).sum(dim=-1).mean()
                             head_loss_dict["loss_f"] = head_force_loss.detach()
                 
-                # Per-head total loss (energy + force)
+                # Compute total loss per head (energy + force)
                 head_total_loss = e_lambda * head_energy_loss
                 if head_force_loss is not None:
                     head_total_loss = head_total_loss + f_lambda * head_force_loss
@@ -700,11 +667,12 @@ class MultiheadTrainer(BaseTrainer):
         return loss
     
     def scale_shift(self, preds, data, mode):
-        """Override: Head별 scale_shift 적용 (GitHub BaseTrainer compatible)."""
+        """Override: apply scale_shift per head (GitHub BaseTrainer compatible).
+        """
         energy_target = data["energy"].flatten()
         energy_predict = preds["energy"].flatten()
         
-        # Get head per config
+        # Get the corresponding head per configuration
         if 'config_head' in data:
             config_heads = data['config_head'].flatten()
         else:
@@ -724,7 +692,7 @@ class MultiheadTrainer(BaseTrainer):
             if not head_mask.any():
                 continue
             
-            # Compute per-head shift
+            # Compute shift per head
             head_target = energy_target[head_mask]
             head_predict = energy_predict[head_mask]
             
@@ -774,7 +742,6 @@ class MultiheadTrainer(BaseTrainer):
             # Train
             epoch_loss_train = self.train_one_epoch(mode='train', epoch=epoch+self.start_epoch)
             
-            # Barrier after training (all GPUs must call this)
             if self.ddp:
                 torch.distributed.barrier()
             
@@ -782,60 +749,41 @@ class MultiheadTrainer(BaseTrainer):
             param_context = (
                 self.ema.average_parameters() if self.ema is not None else nullcontext()
             )
-            
-            # Determine if we should validate this epoch
-            do_validation = (epoch+1) % self.log_interval == 0
-            epoch_loss_valid = None
-            
             with param_context:
-                if do_validation:
+                if (epoch+1) % self.log_interval == 0:
                     epoch_loss_valid = self.train_one_epoch(mode='valid', epoch=epoch+self.start_epoch)
-            
-            # Barrier OUTSIDE conditional block - ALL GPUs must call this every epoch
-            # to prevent deadlock when log_interval > 1
-            if self.ddp:
-                torch.distributed.barrier()
-            
-            # Logging and checkpoint (only rank 0, only on validation epochs)
-            if do_validation and epoch_loss_valid is not None:
-                if self.rank == 0:
-                    # Update check point 
-                    if epoch_loss_valid['loss'] < self.loss_test_min:
-                        self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
-                        self.loss_test_min = epoch_loss_valid['loss']
-                        self.l_ckpt_saved = False
                     
-                    # Print epoch loss
-                    self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
+                    if self.ddp:
+                        torch.distributed.barrier()
                     
-                    # Free GPU memory
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                    if self.rank == 0:
+                        # Update check point 
+                        if epoch_loss_valid['loss'] < self.loss_test_min:
+                            self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
+                            self.loss_test_min = epoch_loss_valid['loss']
+                            self.l_ckpt_saved = False
+                        
+                        # Print epoch loss
+                        self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
+                        
+                        # Free GPU memory
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                    
+                    # Update scheduler (learning rate)
+                    metrics = None
+                    if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
+                        metrics = epoch_loss_valid['loss']
+                    self.scheduler.step(metrics, epoch)
                 
-                # Update scheduler (learning rate) - all ranks
-                metrics = None
-                if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
-                    metrics = epoch_loss_valid['loss']
-                self.scheduler.step(metrics, epoch)
-            
-            # Save check point (only rank 0) - every 10 epochs to pkl/ folder
-            if self.rank == 0:
-                current_epoch = epoch + self.start_epoch + 1
-                if current_epoch % 10 == 0:
-                    # Create pkl folder if it doesn't exist
-                    pkl_dir = Path("pkl")
-                    pkl_dir.mkdir(exist_ok=True)
-                    
-                    # Generate filename with epoch number
-                    base_fname = self.json_data['NN']['fname_pkl']
-                    fname_stem = Path(base_fname).stem  # e.g., "model_large_multihead"
-                    save_path = pkl_dir / f"{fname_stem}_epoch_{current_epoch}.pkl"
-                    
-                    torch.save(self.ckpt, save_path)
-                    print(f"✓ Checkpoint saved: {save_path}")
+                # Save check point
+                if (epoch+1) % self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                    torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                    # Note: disable saving model.pt to avoid ScriptFunction pickle errors
+                    # Save only model.state_dict() if needed
                     self.l_ckpt_saved = True
     
-    # initial_test: Use BaseTrainer as-is (but need to pass epoch arg to train_one_epoch)
+    # Initial_test: use BaseTrainer as-is (pass the epoch argument to train_one_epoch)
     def initial_test(self):
         """Run a preliminary test epoch and record the initial reference loss."""
         epoch_loss_test = self.train_one_epoch(mode='test', epoch=0)
@@ -843,19 +791,14 @@ class MultiheadTrainer(BaseTrainer):
             torch.distributed.barrier()
         self.loss_test_min = epoch_loss_test['loss']
     
-    # update_check_point: Add EMA state saving
+    # Update_check_point: additionally save the EMA state
     def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):
-        """Update checkpoint with current training state (+ EMA state + per-head E0s)."""
-        # BaseTrainer 로직 호출
+        """Update checkpoint with current training state (+ EMA state + per-head E0s).
+        """
         super().update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
-        # EMA state 추가 저장
-        if self.ema is not None:
-            self.ckpt['ema_state'] = self.ema.state_dict()
-        # Per-head E0s 저장 (evaluation에서 사용)
+        # Store per-head E0s (used during evaluation)
         if hasattr(self, 'per_head_enr_avg'):
             self.ckpt['per_head_enr_avg'] = self.per_head_enr_avg
-    
-    # print_logger: Use BaseTrainer as-is
     
     def train_one_epoch(self, mode='train', data_loader=None, epoch=0):
         """Train/validate one epoch - Multihead version with per-head loss tracking."""
@@ -875,10 +818,10 @@ class MultiheadTrainer(BaseTrainer):
             if mode == 'valid':
                 self.ckpt['valid_scale_shift'] = []
         
-        # Exclude head_X_* keys from initialization as they are computed separately
+        # Exclude head_X_* keys from initialization, as they are computed separately
         epoch_loss_dict = {key: [] for key in loss_log_config if not key.startswith('head_')}
         
-        # Per-head loss tracking
+        # Loss tracking per haed
         head_loss_accum = {h: {'loss': [], 'loss_e': [], 'loss_f': []} for h in range(self.num_heads)}
         
         # tqdm progress bar for training
@@ -887,78 +830,68 @@ class MultiheadTrainer(BaseTrainer):
         else:
             data_iter = data_loader
         
-        # Join context for handling uneven batches during validation/test in DDP
-        # Prevents deadlock when GPUs have different number of batches
-        if self.ddp and not backprop:
-            # Validation/Test: Allow uneven processing with Join since only forward pass
-            join_context = Join([self.model])
-        else:
-            # Training: All GPUs must have same batch count (grad sync required)
-            join_context = nullcontext()
-        
-        with join_context:
-            for batch_idx, data in enumerate(data_iter):
-                # Smoke test: limit batches
-                if self.smoke_enabled and batch_idx >= self.smoke_max_batches:
-                    if self.rank == 0 and batch_idx == self.smoke_max_batches:
-                        print(f"  [SMOKE] Stopping after {self.smoke_max_batches} batches")
-                    break
+        for batch_idx, data in enumerate(data_iter):
+            # Smoke test: limit batches
+            if self.smoke_enabled and batch_idx >= self.smoke_max_batches:
+                if self.rank == 0 and batch_idx == self.smoke_max_batches:
+                    print(f"  [SMOKE] Stopping after {self.smoke_max_batches} batches")
+                break
+            
+            data = self.move_to_device(data, self.device)
+            
+            # Batch size logging
+            self._log_batch_size(mode, batch_idx, data, epoch)
+            
+            # Predict
+            preds = self.model(data, backprop)
+            preds = self.scale_shift(preds, data, mode)
+            
+            # Compute loss
+            loss_dict = self.compute_loss(preds, data)
+            
+            # Update tqdm progress bar
+            if self.rank == 0 and tqdm is not None and hasattr(data_iter, 'set_postfix'):
+                data_iter.set_postfix({
+                    'loss': f"{loss_dict['loss'].item():.4f}",
+                    'loss_e': f"{loss_dict.get('loss_e', 0):.4f}" if 'loss_e' in loss_dict else 'N/A'
+                })
+            
+            loss = loss_dict['loss']
+            if backprop:
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
+                self.optimizer.step()
                 
-                data = self.move_to_device(data, self.device)
-                
-                # Log batch size
-                self._log_batch_size(mode, batch_idx, data, epoch)
-                
-                # Predict
-                preds = self.model(data, backprop)
-                preds = self.scale_shift(preds, data, mode)
-                
-                # Compute loss
-                loss_dict = self.compute_loss(preds, data)
-                
-                # Update tqdm progress display
-                if self.rank == 0 and tqdm is not None and hasattr(data_iter, 'set_postfix'):
-                    data_iter.set_postfix({
-                        'loss': f"{loss_dict['loss'].item():.4f}",
-                        'loss_e': f"{loss_dict.get('loss_e', 0):.4f}" if 'loss_e' in loss_dict else 'N/A'
-                    })
-                
-                loss = loss_dict['loss']
-                if backprop:
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
-                    self.optimizer.step()
-                    
-                    # EMA update during training (GitHub BaseTrainer pattern)
-                    if self.ema is not None:
-                        self.ema.update()
-                
-                # Log losses (exclude head_X_* keys as they are computed in epoch average)
-                for l in loss_log_config:
-                    if l.startswith('head_'):
-                        continue  # Per-head loss is computed later
-                    val = loss_dict.get(l, torch.nan)
-                    epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
-                
-                # Accumulate per-head loss
-                if 'head_losses' in loss_dict:
-                    for head_idx, head_loss in loss_dict['head_losses'].items():
-                        if head_idx < self.num_heads:
-                            if 'loss' in head_loss:
-                                head_loss_accum[head_idx]['loss'].append(head_loss['loss'].cpu())
-                            if 'loss_e' in head_loss:
-                                head_loss_accum[head_idx]['loss_e'].append(head_loss['loss_e'].cpu())
-                            if 'loss_f' in head_loss:
-                                head_loss_accum[head_idx]['loss_f'].append(head_loss['loss_f'].cpu())
-                
-                # Memory cleanup every N batches
-                if batch_idx % 50 == 0:
-                    torch.cuda.empty_cache()
+                # EMA update during training (GitHub BaseTrainer pattern)
+                if self.ema is not None:
+                    self.ema.update()
+            
+            # Log losses (exclude head_X_* keys, as they are computed as epoch averages)
+            for l in loss_log_config:
+                if l.startswith('head_'):
+                    continue  # Per-head losses are computed later
+                val = loss_dict.get(l, torch.nan)
+                epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
+            
+            # Accumulate per-head losses
+            if 'head_losses' in loss_dict:
+                for head_idx, head_loss in loss_dict['head_losses'].items():
+                    if head_idx < self.num_heads:
+                        if 'loss' in head_loss:
+                            head_loss_accum[head_idx]['loss'].append(head_loss['loss'].cpu())
+                        if 'loss_e' in head_loss:
+                            head_loss_accum[head_idx]['loss_e'].append(head_loss['loss_e'].cpu())
+                        if 'loss_f' in head_loss:
+                            head_loss_accum[head_idx]['loss_f'].append(head_loss['loss_f'].cpu())
+            
+            # Memory cleanup every N batches
+            if batch_idx % 50 == 0:
+                torch.cuda.empty_cache()
         
         torch.cuda.synchronize()
         
-        # Compute averages
+        # Compute the average
         epoch_loss_dict = {
             key: torch.mean(torch.tensor(value)) 
             for key, value in epoch_loss_dict.items()
