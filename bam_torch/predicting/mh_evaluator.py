@@ -116,7 +116,12 @@ class MultiheadEvaluator(Evaluator):
         )
         
         # Load weights
-        state_dict = ckpt['params']
+        if 'ema_params' in ckpt:
+            state_dict = ckpt['ema_params']
+            print("  - Using EMA parameters for evaluation (recommended for inference)")
+        else:
+            state_dict = ckpt['params']
+            print("  - Using regular parameters (EMA not available in checkpoint)")
         model.load_state_dict(state_dict, strict=False)
         model = model.to(self.device)
         model.eval()
@@ -324,7 +329,7 @@ class MultiheadEvaluator(Evaluator):
         print(f"MEAN_LOSS(E): {eval_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {eval_loss_dict['loss_f']:<11.5g}\n")
         torch.save(test_values, "test_values.pkl")
-        
+
 
 if __name__ == '__main__':
     print(date())

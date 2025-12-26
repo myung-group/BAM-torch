@@ -216,6 +216,11 @@ class RACE(torch.nn.Module):
                                            node_attrs,
                                            data["edge_index"],
                                            species)
+#        ###
+#        i_sp = species[data["edge_index"][0]]
+#        j_sp = species[data["edge_index"][1]]
+#        sp = (i_sp + j_sp) / 2
+#        edge_feats = edge_feats * sp[:, None]
 
         x_node_feats = self.linear_x(node_feats)
 
@@ -506,6 +511,7 @@ class RACEUnified(torch.nn.Module):
             multihead_MLP_irreps = (self.num_heads * MLP_irreps).simplify()
             multihead_output_irreps = o3.Irreps(f"{self.num_heads}x0e")
         else:
+            MLP_irreps = o3.Irreps("64x0e")
             multihead_MLP_irreps = MLP_irreps
             multihead_output_irreps = self.output_irreps
         

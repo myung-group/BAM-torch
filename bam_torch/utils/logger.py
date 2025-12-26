@@ -72,6 +72,7 @@ class Logger:
         keys = list(self.logger_config.keys())
         values = list(self.logger_config.values())
         divider = "| "
+        last = len(self.logger_config) - 1
         for k in range(len(self.logger_config)):
             if k == 0:
                 key_values = values[k]
@@ -79,7 +80,7 @@ class Logger:
                 separator = ' ' * (len(line)-len(divider))
                 head += separator
                 LINE += line
-            elif k < 3: #len(self.logger_config)-1:
+            elif k < last: #len(self.logger_config)-1:
                 key_values = values[k]
                 key = keys[k]
                 line = key_values[0]

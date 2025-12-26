@@ -257,7 +257,7 @@ def get_dataloader(fname, ntrain, nvalid,
         for graph in graphset:
             pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
             pad_edges_to = max(graph.num_edges, pad_edges_to)
-        #graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
         #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:

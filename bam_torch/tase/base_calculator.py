@@ -4,14 +4,22 @@ from torch_geometric.loader import DataLoader
 from ase.calculators.calculator import Calculator, all_changes
 from copy import deepcopy
 
-from bam_torch.training.base_trainer import BaseTrainer
+from bam_torch.training.multihead_trainer import MultiheadTrainer
+from bam_torch.predicting.mh_evaluator import MultiheadEvaluator
 from bam_torch.utils.utils import get_graphset_to_predict
 
 
-class RACECalculator(Calculator, BaseTrainer):
+class RACECalculator(Calculator, MultiheadEvaluator):
     implemented_properties = ['energy', 'forces', 'stress']
 
-    def __init__(self, json_data=None, model=None, device=None, element_wise=True):
+    def __init__(
+        self, 
+        json_data=None, 
+        model=None, 
+        device=None, 
+        element_wise=True, 
+        multihead=None
+    ):
         """ 
         To use the RACECalculator, specify one of the following inputs:
             - Load configuration from JSON:
@@ -24,6 +32,7 @@ class RACECalculator(Calculator, BaseTrainer):
         Calculator.__init__(self)
 
         self.ddp = False
+        self.rank = 0
         self.world_size = 1
         self.msg = ''
         self.json_data = json_data
@@ -36,6 +45,7 @@ class RACECalculator(Calculator, BaseTrainer):
                 weights_only=False
             )
             self.json_data = model_ckpt['input.json']
+            self.json_data["predict"]["model"] = model
         elif model is None and json_data is None:
             raise ValueError(
                 "\033[31mTo use the RACECalculator, specify one of the following inputs:\n"
@@ -51,6 +61,7 @@ class RACECalculator(Calculator, BaseTrainer):
         self.json_data["predict"]["evaluate_tag"] = True
     
         # Configure model
+        self.configure_head(multihead)
         self.model, self.n_params, self.model_ckpt, _ = self.configure_model()
         self.uniq_element = self.model_ckpt['uniq_element']
         self.enr_avg_per_element = self.model_ckpt['enr_avg_per_element']
@@ -118,7 +129,20 @@ class RACECalculator(Calculator, BaseTrainer):
                 device = torch.device("cpu")
                 self.msg += f'\ndevice:\n -- {device}\n'
 
+        print(self.msg)
         return device
+
+    def configure_head(self, multihead):
+        multihead_config = self.json_data.get("multihead", {})
+        if multihead is None or multihead == False:
+            multihead = multihead_config.get("enabled", False)
+        
+        # Update the multihead's configuration
+        if multihead_config == {}:
+            self.json_data["multihead"] = {}
+            self.json_data["NN"]["foundation_model"] \
+                        = self.json_data["NN"]["fname_pkl"]
+        self.json_data["multihead"]["enabled"] = multihead
 
     def get_scale_shift_correction(self, element_wise):
         if element_wise:
