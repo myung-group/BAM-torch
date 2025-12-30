@@ -48,7 +48,7 @@ class FrameAveraging(Transform):
         and the rotation matrices used for the frame averaging transform.
     """
 
-    def __init__(self, frame_averaging=None, fa_method=None):
+    def __init__(self, frame_averaging=None, fa_method=None, permute=True):
         self.fa_method = (
             "stochastic" if (fa_method is None or fa_method == "") else fa_method
         )
@@ -87,6 +87,8 @@ class FrameAveraging(Transform):
                 self.fa_func = None
             else:
                 raise ValueError(f"Unknown frame averaging: {self.frame_averaging}")
+        
+        self.permute = permute
 
     def __call__(self, data, equiv_model=None, n_samples=1):
         """The only requirement for the data is to have a `pos` attribute."""
@@ -106,7 +108,7 @@ class FrameAveraging(Transform):
 
         elif self.fa_method == "prob":
             data.fa_pos, data.fa_cell, data.fa_rot, data.fa_species, data.fa_edge_index, entropy_loss \
-                = self.pa_func(data, equiv_model, n_samples, self.fa_method)
+                = self.pa_func(data, equiv_model, n_samples, self.fa_method, self.permute)
             return data, entropy_loss
 
         else:

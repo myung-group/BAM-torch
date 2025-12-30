@@ -432,7 +432,7 @@ class BaseTrainer:
             rng_seed (int): The random seed value.
             cublas_config (str): Configuration for CUBLAS workspace (default: ":16:8").
         """
-        rng_seed = self.json_data['NN']['data_seed']
+        rng_seed = self.json_data['NN']['init_seed']
         random.seed(rng_seed)
         np.random.seed(rng_seed)
         torch.manual_seed(rng_seed)

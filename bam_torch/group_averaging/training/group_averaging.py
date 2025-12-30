@@ -232,8 +232,7 @@ def data_augmentation(g, d=3, *args):
 
     return graph_rotated
 
-
-def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", check=False):
+def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", permute=True):
     ## Handle residual component: Translational transform
     #loc_input, loc_center, node_features = parse_translation(node_features)
     pos = data.positions
@@ -260,18 +259,27 @@ def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", ch
     fa_pos_exp = torch.matmul(fa_pos_exp, gs_list.transpose(-1, -2))
     fa_cell_exp = torch.matmul(fa_cell_exp, gs_list.transpose(-1, -2))
     hs_inv = hs.transpose(2, 3)
-    fa_pos_exp = torch.einsum('bkij,bkjn->bkin', hs_inv, fa_pos_exp) # permute
-
     perm_index = hs_inv.argmax(dim=-1)
+    if permute:
+        fa_pos_exp = torch.einsum('bkij,bkjn->bkin', hs_inv, fa_pos_exp) # permute
+        species_perm = data.species[perm_index] 
+        all_species = species_perm.permute(1, 0, 2).contiguous().view(n_samples, -1)
+    else:
+        species = data.species.view(B, n)   # (B, N)
+        all_species = (
+            species
+            .unsqueeze(1)                              # (B, 1, N)
+            .expand(-1, n_samples, -1)                 # (B, K, N)
+            .permute(1, 0, 2)                          # (K, B, N)
+            .contiguous()
+            .view(n_samples, -1)                       # (K, B*N)
+        )
     #species = torch.tensor(data.species)
-    species_perm = data.species[perm_index] 
-    all_species = species_perm.permute(1, 0, 2).contiguous().view(n_samples, -1)
-
     all_fa_pos = fa_pos_exp.permute(1, 0, 2, 3).contiguous().view(n_samples, b_n, 3)
     all_cell = fa_cell_exp.permute(1, 0, 2, 3).contiguous()
     all_rots = [hs.permute(1, 0, 2, 3), gs_list.permute(1, 0, 2, 3)]#.contiguous().view(n_samples, 3, 3)
     # No need to update distances, they are preserved.
-    all_fa_pos.requires_grad_(True)
+    #all_fa_pos.requires_grad_(True)
 
     edge_index = data.edge_index
     edge_index = edge_index.view(2, B, -1).permute(1, 0, 2).contiguous()
@@ -319,4 +327,127 @@ def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", ch
     edge_index_new = edge_index_new.view(K,B*E,2)
     edge_index_new = edge_index_new.permute(0, 2, 1)
 
+    if not permute:
+        entropy_loss = 0.0
+        edge_index = data.edge_index
+        edge_index_new = (
+            edge_index
+            .unsqueeze(0)                     # (1, 2, B*E)
+            .expand(K, -1, -1)                # (K, 2, B*E)
+            .contiguous()
+        )
+
     return all_fa_pos, all_cell, all_rots, all_species, edge_index_new, entropy_loss
+
+def probablistic_averaging_3D_(data, equiv_model, n_samples, fa_method="prob", check=False):
+    ## Handle residual component: Translational transform
+    #loc_input, loc_center, node_features = parse_translation(node_features)
+    positions = data.positions
+    K = n_samples
+    cell = data.cell
+    fa_cell = data.cell
+    nbatch, _, _ = cell.shape
+    b_n, _ = positions.shape
+    pos_3D = None    
+    n = int(b_n/nbatch)
+
+    # Sample from p(g|x)
+    positions = positions - positions.mean(dim=0, keepdim=True)
+    data.positions = positions
+    (hs, gs_list), entropy_loss = equiv_model(data, n_samples)
+    hs_inv = hs.transpose(2, 3)
+
+    #split info
+    num_atoms = torch.bincount(data['batch']).tolist()
+    num_edges = data.num_edges.tolist()
+
+    pos_split = torch.split(positions, num_atoms, dim=0)
+    species_split = torch.split(data.species, num_atoms, dim=0)
+
+    edge_frac_split = torch.split(data.edges, num_edges, dim=0)
+    i_split = torch.split(data.edge_index[0], num_edges)
+    j_split = torch.split(data.edge_index[1], num_edges)
+
+    cell_split = data.cell  # (B, 3, 3)
+
+    #outputs
+    all_pos = []
+    all_species = []
+    all_cell = []
+    all_rel_pos = []
+    all_dist = []
+    all_edge_index = []
+    all_rots = [hs.permute(1, 0, 2, 3), gs_list.permute(1, 0, 2, 3)]
+
+    atom_offset = 0
+
+    for b, (pos, species, cell, edge_frac, i_old, j_old) in enumerate(
+        zip(pos_split, species_split, cell_split,
+            edge_frac_split, i_split, j_split)
+    ):
+        n = pos.size(0)
+        E = edge_frac.size(0)
+
+        # ---- rotations ----
+        pos_rot = torch.matmul(
+            pos[None, :, :], gs_list[b].transpose(-1, -2)
+        )                               # (K, n, 3)
+
+        cell_rot = torch.matmul(
+            cell[None, :, :], gs_list[b].transpose(-1, -2)
+        )                               # (K, 3, 3)
+
+        # ---- permutation ----
+        perm = hs_inv[b].argmax(dim=-1)   # (K, n)
+        invperm = perm.argsort(dim=-1)    # (K, n)
+        index = invperm.unsqueeze(-1).expand(-1, -1, 3)  # (K, n, 3)
+        pos_perm = torch.gather(pos_rot, dim=1, index=index)
+        species_perm = species[invperm]  # (K, n)
+
+        # ---- local edge indices ----
+        i_loc = i_old - atom_offset
+        j_loc = j_old - atom_offset
+
+        i_new = invperm.gather(
+            1, i_loc[None, :].expand(K, E)
+        )                                 # (K, E)
+
+        j_new = invperm.gather(
+            1, j_loc[None, :].expand(K, E)
+        )                                 # (K, E)
+
+        # ---- PBC offsets ----
+        offsets = torch.einsum(
+            "ei,kij->kej", edge_frac, cell_rot
+        )                                 # (K, E, 3)
+
+        # ---- relative vectors ----
+        rel = pos_perm[:, j_new] - pos_perm[:, i_new] + offsets
+        dist = torch.linalg.norm(rel, dim=-1)   # (K, E)
+
+        # ---- global edge index ----
+        i_glob = i_new + atom_offset
+        j_glob = j_new + atom_offset
+
+        edge_index = torch.stack(
+            [i_glob, j_glob], dim=1
+        )                                 # (K, 2, E)
+
+        # ---- collect ----
+        all_pos.append(pos_perm)
+        all_species.append(species_perm)
+        all_cell.append(cell_rot)
+        all_rel_pos.append(rel)
+        #all_dist.append(dist)
+        all_edge_index.append(edge_index)
+
+        atom_offset += n
+
+    all_fa_pos = torch.cat(all_pos, dim=1)              # (K, N_atoms, 3)
+    all_species = torch.cat(all_species, dim=1)      # (K, N_atoms)
+    all_cell = torch.cat(all_cell, dim=1)             # (K, B*3, 3)
+    all_rel_pos = torch.cat(all_rel_pos, dim=2)      # (K, N_edges, 3)
+    #all_dist = torch.cat(all_dist, dim=1)            # (K, N_edges)
+    all_edge_index = torch.cat(all_edge_index, dim=2)# (K, 2, N_edges)
+
+    return all_fa_pos, all_cell, all_rots, all_species, all_edge_index, entropy_loss

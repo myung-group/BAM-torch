@@ -2,7 +2,9 @@ from copy import deepcopy
 import torch
 
 
-def model_forward(batch, model, frame_averaging, mode="train", crystal_task=True, edge_mask=None):
+def model_forward(batch, model, frame_averaging, 
+                mode="train", crystal_task=True, 
+                edge_mask=None, permute=None):
     """Perform a model forward pass when frame averaging is applied.
 
     Args:
@@ -99,7 +101,9 @@ def model_forward(batch, model, frame_averaging, mode="train", crystal_task=True
     return preds
 
 
-def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=True, edge_mask=None):
+def pa_model_forward(batch, model, frame_averaging, 
+                    mode="train", crystal_task=True, 
+                    edge_mask=None, permute=True):
     """Perform a model forward pass when frame averaging is applied.
 
     Args:
@@ -164,8 +168,9 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
                 # Transform forces to guarantee equivariance of FA method
 
                 forces = preds["forces"].view(B, N, 3)
-                g_forces_rot = torch.bmm(forces, ks.to(preds["forces"].device))
-                g_forces = torch.bmm(hs.to(preds["forces"].device), g_forces_rot)
+                g_forces = torch.bmm(forces, ks.to(preds["forces"].device))
+                if permute:
+                    g_forces = torch.bmm(hs.to(preds["forces"].device), g_forces)
                 f_all.append(g_forces.view(-1, 3))
 
             # Energy conservation loss
@@ -202,7 +207,8 @@ def pa_model_forward(batch, model, frame_averaging, mode="train", crystal_task=T
 
 
 def base_foward(batch, model, frame_averaging="no", 
-                mode="train", crystal_task=True, edge_mask=None):
+                mode="train", crystal_task=True, 
+                edge_mask=None, permute=True):
     batch.pos = batch.positions
     preds = model(batch)
     return preds

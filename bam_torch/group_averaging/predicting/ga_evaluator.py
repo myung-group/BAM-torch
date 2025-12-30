@@ -61,6 +61,8 @@ class GAEvaluator(GATrainer):
             'exact_force_y': [],
             'exact_force_z': [],
         }
+        rotation_matrices = []
+        permute_matrices = []
         pbc = self.json_data.get('pbc') 
         if pbc == None:
             pbc = True
@@ -73,6 +75,8 @@ class GAEvaluator(GATrainer):
                 equiv_model=self.equiv_model, # for the probabilistic symmetrization
                 n_samples=self.json_data.get("nsamples") # for the probabilistic symmetrization
             )
+            rotation_matrices.append(batch.fa_rot[1].detach().cpu())
+            permute_matrices.append(batch.fa_rot[0].detach().cpu())
             preds = self.model_forward_cls(
                 batch=batch,  # transform the PyG graph data
                 model=self.model,
@@ -118,7 +122,7 @@ class GAEvaluator(GATrainer):
                 }
 
             for l in loss_dict.keys():
-                loss_dict[l] = loss_dict.get(l).detach().cpu()
+                loss_dict[l] = loss_dict.get(l)
             loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
             target['energy'] = data['energy']
             
@@ -145,6 +149,8 @@ class GAEvaluator(GATrainer):
         print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
         torch.save(test_values, "test_values.pkl")
+        np.save("group_reps_ks.npy", np.array(rotation_matrices))
+        np.save("group_reps_hs.npy", np.array(permute_matrices))
 
     def get_scale_shift_correction(self, element_wise):
         if element_wise:

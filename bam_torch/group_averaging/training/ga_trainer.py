@@ -25,7 +25,7 @@ class GATrainer(BaseTrainer):
     def __init__(self, json_data, rank, world_size):
         super().__init__(json_data, rank, world_size)
 
-        self.transform, self.model_forward_cls, self.ga_method, self.group_averaging \
+        self.transform, self.model_forward_cls, self.ga_method, self.group_averaging, self.permute \
             = self.configure_group_averaging()
 
     def train_one_epoch(self, mode='train', data_loader=None):
@@ -58,7 +58,7 @@ class GATrainer(BaseTrainer):
         entropy_loss_list = []
         for i, data in enumerate(data_loader):
             data = self.move_to_device(data, self.device)
-
+            data.positions.requires_grad_(True)
             batch, entropy_loss = self.transform(
                 data=data, 
                 equiv_model=self.equiv_model, # for the probabilistic symmetrization
@@ -70,7 +70,8 @@ class GATrainer(BaseTrainer):
                 frame_averaging=self.group_averaging, 
                 mode=mode,      
                 crystal_task=pbc,
-                edge_mask=None
+                edge_mask=None,
+                permute=self.permute
             )
             preds = self.scale_shift(preds, data, mode)
             loss_dict = self.compute_loss(preds, data)
@@ -105,11 +106,17 @@ class GATrainer(BaseTrainer):
         : ga_method = {"det", "all", "se3-stochastic", "se3-det", "se3-all", "stochastic"}
         
         The probabilistic symmetrization method
-        : ga_method = "prob" or "probabilistic"
+        : ga_method = "prob" or "probabilistic" 
+        / "prob_rot": only rot, "prob": rot x permute
         """
         ga_method = self.json_data.get('ga_method')
+        permute = True
         if ga_method == None:
             ga_method = "prob"
+            permute = True
+        elif ga_method == "prob_rot":
+            ga_method = "prob"
+            permute = False
 
         group_averaging = self.json_data.get('group_averaging')
         if group_averaging == None: # ["2D", "3D", "DA", ""]
@@ -117,10 +124,10 @@ class GATrainer(BaseTrainer):
         elif group_averaging == "no":
             ga_method = "no"
 
-        transform = FrameAveraging(group_averaging, ga_method)
+        transform = FrameAveraging(group_averaging, ga_method, permute)
         model_forward_cls = FORWARD_REGISTRY[ga_method]
 
-        return transform, model_forward_cls, ga_method, group_averaging
+        return transform, model_forward_cls, ga_method, group_averaging, permute
 
     def compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
@@ -258,7 +265,7 @@ class GATrainer(BaseTrainer):
         else:
             raise ValueError(f"Unknown model type: {cfg['model']}")
 
-        if model_config.get("ga_method").lower() in ["prob", "probabilistic"]: # Probabilistic symmetrization
+        if model_config.get("ga_method").lower() in ["prob", "probabilistic", "prob_rot"]: # Probabilistic symmetrization
             small_equiv_model_config = model_config.get('small_equiv', {})
             symmetry = small_equiv_model_config.get('symmetry', 'O3')
             interface = small_equiv_model_config.get('interface', 'prob')
@@ -295,7 +302,7 @@ class GATrainer(BaseTrainer):
                 **small_equiv_model_config_params
             ).to(self.device)
             interface_n_params = sum(p.numel() for p in self.equiv_model.parameters() if p.requires_grad)
-            print(f'\nnumber of parameters:\n\033[36m -- interface (race) {interface_n_params}\033[0m\n')
+            print(f'\nnumber of parameters (small equiv. model):\n\033[36m -- interface (race) {interface_n_params}\033[0m')
         else:
             self.equiv_model = None
 
