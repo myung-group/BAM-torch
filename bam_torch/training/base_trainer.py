@@ -126,6 +126,9 @@ class BaseTrainer:
                         k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
                             for k, v in self.ckpt['valid_scale_shift'].items()
                     }
+                    self.ckpt['valid_scale_shift_origin'] = torch.tensor(
+                        self.ckpt['valid_scale_shift_origin']
+                    ).mean()
                     torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
                     # torch.save(self.model, 'model.pt')
                     self.l_ckpt_saved = True
@@ -707,8 +710,10 @@ class BaseTrainer:
         else:
             ema = None
         model_config = self.json_data['NN']
-        restart = model_config.get('restart')
-        if restart:
+        restart = model_config.get('restart') 
+        evaluate_config = self.json_data['predict']
+        evaluate = evaluate_config.get('evaluate_tag')  # True or False(None)
+        if restart or evaluate:
             ema.load_state_dict(self.model_ckpt['ema_state'])
         return ema
 
