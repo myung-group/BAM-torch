@@ -1,11 +1,11 @@
 """
-Convert model pkl to pt format.
+Convert multihead model pkl to pt format.
 
 Usage:
-    python -m bam_torch.lammps.make_pt --pkl model.pkl --pt model.pt
+    python -m bam_torch.lammps.make_pt_mh --pkl model.pkl --pt model.pt
 
 Or in Python:
-    from bam_torch.lammps.make_pt import recreate_model_pt_from_pkl
+    from bam_torch.lammps.make_pt_mh import recreate_model_pt_from_pkl
     recreate_model_pt_from_pkl('model.pkl', 'model.pt')
 """
 
@@ -14,32 +14,38 @@ import torch
 from e3nn import o3
 from copy import deepcopy
 
-from bam_torch.model.models import RACE
+from bam_torch.model.models import RACEUnified
 
 
 def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
-    """Generate model.pt from model.pkl
+    """Generate model.pt from multihead model.pkl
 
     Args:
-        pkl_path: Path to the model pkl file
+        pkl_path: Path to the multihead model pkl file
         output_path: Path to save the pt file
 
     Returns:
-        model: The loaded RACE model
+        model: The loaded RACEUnified model
     """
     # Load checkpoint
     pckl = torch.load(pkl_path, map_location='cpu', weights_only=False)
     cfg = pckl['input.json']
 
-    # Parameter to choose force computation mode:
-    regress_forces = cfg.get('regress_forces', 'auto')
-    if regress_forces == True:    # forces computed via auto-gradient of energy
+    regress_forces = cfg.get('regress_forces', 'direct')
+    if regress_forces == True:
         regress_forces = "auto"
-    elif regress_forces == False:  # no force computation
+    elif regress_forces == False:
         regress_forces = "false"
 
+    # Extract heads from multihead config
+    heads = None
+    if 'multihead' in cfg and cfg['multihead'].get('enabled', False):
+        datasets = cfg['multihead'].get('datasets', [])
+        heads = [ds['name'] for ds in datasets]
+        print(f"Detected multihead configuration with {len(heads)} heads: {heads}")
+
     # Create model with exact config
-    model = RACE(
+    model = RACEUnified(
         cutoff=cfg['cutoff'],
         avg_num_neighbors=cfg['avg_num_neighbors'],
         num_species=cfg['num_species'],
@@ -51,6 +57,7 @@ def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
         output_irreps=o3.Irreps(cfg.get('output_channels', '1x0e')),
         active_fn=cfg.get('active_fn', 'identity'),
         regress_forces=regress_forces,
+        heads=heads,
     )
 
     # Load weights (remove DDP prefix if exists)
@@ -65,7 +72,8 @@ def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
     torch.save(deepcopy(model), output_path)
 
     print(f"Successfully recreated {output_path} from {pkl_path}")
-    print(f"  Model type: RACE")
+    print(f"  Model type: RACEUnified")
+    print(f"  Heads: {heads}")
     print(f"  Cutoff: {cfg['cutoff']} A")
     print(f"  Total params: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -73,9 +81,9 @@ def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Convert model pkl to pt format')
+    parser = argparse.ArgumentParser(description='Convert multihead model pkl to pt format')
     parser.add_argument('--pkl', type=str, default='model.pkl',
-                        help='Path to the model pkl file (default: model.pkl)')
+                        help='Path to the multihead model pkl file (default: model.pkl)')
     parser.add_argument('--pt', type=str, default='model.pt',
                         help='Path to save the pt file (default: model.pt)')
     args = parser.parse_args()
