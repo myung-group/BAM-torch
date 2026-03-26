@@ -1,0 +1,89 @@
+{
+    "_version": "Phase 4 — Performance Optimization (meV-level accuracy target)",
+    "_changes_from_v3": [
+        "hidden_channels: 32→64x0e+32x1o+16x2e (larger representation)",
+        "nlayers: 3→4 (deeper model)",
+        "features_dim: 64→128 (larger readout MLP)",
+        "nepoch: 100→1000 (sufficient convergence for meV-level accuracy)",
+        "learning_rate: 0.01→0.01 (same, but scheduler will reduce)",
+        "scheduler: ReduceLROnPlateau→CosineAnnealingLR (smooth decay)",
+        "frc_lambda: 100→10 (QM9star forces near-zero, reduce weight)",
+        "chg_lambda: 10→1 (let energy/force dominate)",
+        "log_interval: 2→5 (less overhead for long training)"
+    ],
+    "device": "gpu",
+    "gpu-parallel": false,
+    "model": "charge_race_v3",
+    "cueq_config": false,
+    "regress_forces": true,
+    "trainer": "cd_v3",
+    "fname_traj": "qm9star_data.xyz",
+    "ntrain": 4000,
+    "nvalid": 500,
+    "element": "auto",
+    "cutoff": 6.0,
+    "avg_num_neighbors": 30,
+    "num_species": 5,
+    "max_ell": 2,
+    "num_radial_basis": 8,
+    "hidden_channels": "64x0e+32x1o+16x2e",
+    "output_channels": "1x0e",
+    "nbatch": 4,
+    "nlayers": 4,
+    "features_dim": 128,
+    "active_fn": "identity",
+    "pbc": false,
+    "charge": {
+        "cep_hidden_dim": 64,
+        "use_cent_energy": false,
+        "charge_type": "npa",
+        "charge_key": "charges",
+        "total_charge_key": "total_charge",
+        "charge_loss": "mse"
+    },
+    "NN": {
+        "data_seed": 10,
+        "init_seed": 11,
+        "learning_rate": 0.01,
+        "weight_decay": 0,
+        "nepoch": 1000,
+        "nsave": 50,
+        "restart": false,
+        "fname_pkl": "model_v4.pkl",
+        "loss_config": {
+            "energy_loss": "mse",
+            "force_loss": "mse"
+        },
+        "enr_lambda": 1,
+        "frc_lambda": 50,
+        "chg_lambda": 5,
+        "l2_lambda": 0.0
+    },
+    "scheduler": {
+        "scheduler": "CosineAnnealingLR",
+        "T_max": 1000,
+        "eta_min": 1e-6
+    },
+    "log_length": "simple",
+    "log_interval": 5,
+    "log_config": {
+        "step": ["date", "epoch"],
+        "train": ["loss", "loss_e", "loss_f", "loss_q"],
+        "valid": ["loss", "loss_e", "loss_f", "loss_q"],
+        "lr": ["lr"]
+    },
+    "train": {
+        "fname_log": "loss_train_v4.out"
+    },
+    "predict": {
+        "evaluate_tag": false,
+        "loss_config": {
+            "energy_loss": "rmse",
+            "force_loss": "rmse"
+        },
+        "fname_traj": "wiggle150_data.xyz",
+        "ndata": "wiggle150_data.xyz",
+        "model": "model_v4.pkl",
+        "fname_plog": "predict_v4.out"
+    }
+}
