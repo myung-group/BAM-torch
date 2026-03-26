@@ -45,6 +45,7 @@ dependencies = [
 cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12"]
 laplace = ["laplace-torch", "torchmetrics", "curvlinops-for-pytorch==2.0.1"]
 group_averaging = ["mendeleev", "pandas"]
+charge_dependent = []
 
 [project.urls]
 Homepage = "https://github.com/myung-group/BAM-torch"

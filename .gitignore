@@ -73,3 +73,14 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# Data & large files
+qm9star/
+Wiggle150/
+*.zip
+
+# Development artifacts
+_archive/
+_upload/
+bam_torch/legacy_phases/
+tests/*_output/
+docs/
