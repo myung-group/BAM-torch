@@ -11,6 +11,7 @@ Uses RACEMultihead model from bam_torch.model.models
 
 import os
 import gc
+import signal
 import atexit
 import torch
 import numpy as np
@@ -477,15 +478,20 @@ class MultiheadTrainer(BaseTrainer):
     
     def configure_dataloader(self):
         """
-        Override: Configure a multihead data loader
+        Override: Configure multihead data loaders (per-head + mixed).
+
+        Returns mixed loaders for backward compatibility.
+        Per-head loaders stored as self.per_head_train_loaders / self.per_head_valid_loaders.
         """
         # Load enr_avg_per_element from the foundation model (for replay)
         foundation_enr_avg, foundation_uniq_element = self._load_foundation_enr_avg()
-        
+
         # Smoke test config
         smoke_config = self.json_data.get('smoke_test', {})
-        
-        train_loader, valid_loader, uniq_element, enr_avg_per_element, per_head_enr_avg = \
+
+        (train_loader, valid_loader,
+         per_head_train_loaders, per_head_valid_loaders,
+         uniq_element, enr_avg_per_element, per_head_enr_avg) = \
             get_dataloader_multihead(
                 self.datasets_config,
                 self.json_data['cutoff'],
@@ -498,10 +504,14 @@ class MultiheadTrainer(BaseTrainer):
                 self.world_size,
                 smoke_config=smoke_config
             )
-        
+
+        # Store per-head loaders (JAX-style separate streams)
+        self.per_head_train_loaders = per_head_train_loaders
+        self.per_head_valid_loaders = per_head_valid_loaders
+
         # Store per-head E0s for checkpoint
         self.per_head_enr_avg = per_head_enr_avg
-        
+
         return train_loader, valid_loader, uniq_element, enr_avg_per_element
     
     def configure_loss(self, reduction='mean'):
@@ -715,73 +725,169 @@ class MultiheadTrainer(BaseTrainer):
     
     def train(self):
         """Main training loop for BAM models - Multihead version.
-        
-        Follows GitHub latest BaseTrainer pattern with:
-        - initial_test() for loss_test_min initialization
-        - EMA context manager for validation
-        - update_check_point() and print_logger() methods
+
+        Follows BAM-JAX architecture:
+        - Per-head gradient computation with weighted accumulation
+        - Per-head independent validation
+        - Best / latest checkpoint saving with epoch numbers
+        - Emergency checkpointing on SIGTERM / SIGINT
         """
         # Initial test
         self.initial_test()
-        
+
+        # Create checkpoints directory (following BAM-JAX pattern)
+        self._ckpt_dir = 'checkpoints'
+        self._best_ckpt_path = None
+        self._latest_ckpt_path = None
+        if self.rank == 0:
+            os.makedirs(self._ckpt_dir, exist_ok=True)
+
+        # Register emergency checkpoint handler (JAX EmergencyCheckpointer)
+        self._emergency_requested = False
+        self._register_emergency_handler()
+
         # Print logger head
         if self.rank == 0:
             self.logger.print_logger_head()
-        
+
         # Main training loop
         nepoch = self.json_data['NN']['nepoch']
-        
+
         for epoch in range(nepoch):
+            # Check emergency stop request
+            if self._emergency_requested:
+                if self.rank == 0:
+                    print("\n[Emergency] Signal received — saving emergency checkpoint and exiting.")
+                    ckpt = self._build_current_checkpoint(
+                        max(epoch - 1, 0), {}, {'loss': self.loss_test_min})
+                    emergency_path = os.path.join(self._ckpt_dir, 'ckpt_emergency.pkl')
+                    torch.save(ckpt, emergency_path)
+                    print(f"  Emergency checkpoint saved: {emergency_path}")
+                break
+
             # Update criterion
             try:
                 base_model = self.model.module if self.ddp else self.model
                 base_model.update_criterion_value(epoch + self.start_epoch + 1)
             except:
                 pass
-            
-            # Train
+
+            # Train (JAX-style per-head gradient accumulation)
             epoch_loss_train = self.train_one_epoch(mode='train', epoch=epoch+self.start_epoch)
-            
+
             if self.ddp:
                 torch.distributed.barrier()
-            
-            # Validate and record with EMA context
+
+            # Validate with EMA context (JAX-style per-head validation)
             param_context = (
                 self.ema.average_parameters() if self.ema is not None else nullcontext()
             )
             with param_context:
                 if (epoch+1) % self.log_interval == 0:
-                    epoch_loss_valid = self.train_one_epoch(mode='valid', epoch=epoch+self.start_epoch)
-                    
+                    # Per-head validation (JAX evaluate_per_head pattern)
+                    epoch_loss_valid = self.validate_per_head(epoch=epoch+self.start_epoch)
+
                     if self.ddp:
                         torch.distributed.barrier()
-                    
+
                     if self.rank == 0:
-                        # Update check point 
+                        actual_epoch = epoch + 1 + self.start_epoch
+
+                        # Save best checkpoint if validation loss improved
                         if epoch_loss_valid['loss'] < self.loss_test_min:
                             self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
                             self.loss_test_min = epoch_loss_valid['loss']
-                            self.l_ckpt_saved = False
-                        
+                            self._save_named_checkpoint(self.ckpt, 'best', actual_epoch)
+
+                        # Always save latest checkpoint
+                        latest_ckpt = self._build_current_checkpoint(
+                            epoch, epoch_loss_train, epoch_loss_valid
+                        )
+                        self._save_named_checkpoint(latest_ckpt, 'latest', actual_epoch)
+
                         # Print epoch loss
                         self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
-                        
+
                         # Free GPU memory
                         torch.cuda.empty_cache()
                         gc.collect()
-                    
+
                     # Update scheduler (learning rate)
                     metrics = None
                     if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
                         metrics = epoch_loss_valid['loss']
                     self.scheduler.step(metrics, epoch)
-                
-                # Save check point
-                if (epoch+1) % self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                    torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                    # Note: disable saving model.pt to avoid ScriptFunction pickle errors
-                    # Save only model.state_dict() if needed
-                    self.l_ckpt_saved = True
+
+    # ------------------------------------------------------------------
+    # Emergency checkpoint handler (JAX EmergencyCheckpointer)
+    # ------------------------------------------------------------------
+    def _register_emergency_handler(self):
+        """Register SIGTERM/SIGINT handlers for emergency checkpoint saving."""
+        def _handler(signum, frame):
+            sig_name = signal.Signals(signum).name
+            if self.rank == 0:
+                print(f"\n[Emergency] Received {sig_name} — will save checkpoint at next epoch boundary.")
+            self._emergency_requested = True
+
+        signal.signal(signal.SIGTERM, _handler)
+        signal.signal(signal.SIGINT, _handler)
+
+    def _build_current_checkpoint(self, epoch, epoch_loss_train, epoch_loss_valid):
+        """Build a checkpoint dict with the current model state (for latest saving)."""
+        state_dict = self.model.state_dict()
+        if self.ddp:
+            state_dict = self.model.module.state_dict()
+        ema_state = None
+        if self.ema is not None:
+            ema_state = self.ema.state_dict()
+
+        ckpt = {
+            'loss': {
+                'epoch': epoch + 1 + self.start_epoch,
+                'train': epoch_loss_train.get('loss', float('nan')),
+                'valid': epoch_loss_valid.get('loss', float('nan')),
+            },
+            'params': state_dict,
+            'opt_state': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict(),
+            'uniq_element': self.ckpt.get('uniq_element'),
+            'enr_avg_per_element': self.ckpt.get('enr_avg_per_element'),
+            'input.json': self.json_data,
+            'train_scale_shift': self.ckpt.get('train_scale_shift', []),
+            'valid_scale_shift': self.ckpt.get('valid_scale_shift', []),
+            'valid_scale_shift_origin': self.ckpt.get('valid_scale_shift_origin', []),
+            'ema_state': ema_state,
+        }
+        if hasattr(self, 'per_head_enr_avg'):
+            ckpt['per_head_enr_avg'] = self.per_head_enr_avg
+        if 'per_head_scale_shift' in self.ckpt:
+            ckpt['per_head_scale_shift'] = self.ckpt['per_head_scale_shift']
+        return ckpt
+
+    def _save_named_checkpoint(self, ckpt_data, tag, epoch):
+        """Save checkpoint as ckpt_{tag}_epoch_{NN}.pkl, removing the previous file with same tag.
+
+        Args:
+            ckpt_data: checkpoint dictionary to save
+            tag: 'best' or 'latest'
+            epoch: epoch number (appended as _epoch_NN)
+        """
+        attr = f'_{tag}_ckpt_path'
+        old_path = getattr(self, attr, None)
+        if old_path and os.path.exists(old_path):
+            os.remove(old_path)
+
+        fname = os.path.join(self._ckpt_dir, f'ckpt_{tag}_epoch_{epoch:02d}.pkl')
+        torch.save(ckpt_data, fname)
+        setattr(self, attr, fname)
+
+        if tag == 'best':
+            val_loss = ckpt_data['loss']['valid']
+            if isinstance(val_loss, torch.Tensor):
+                val_loss = val_loss.item()
+            print(f'  *** New best checkpoint saved: {fname} (val_loss: {val_loss:.6f}) ***')
+        else:
+            print(f'  Latest checkpoint saved: {fname}')
     
     # Initial_test: use BaseTrainer as-is (pass the epoch argument to train_one_epoch)
     def initial_test(self):
@@ -801,115 +907,264 @@ class MultiheadTrainer(BaseTrainer):
             self.ckpt['per_head_enr_avg'] = self.per_head_enr_avg
     
     def train_one_epoch(self, mode='train', data_loader=None, epoch=0):
-        """Train/validate one epoch - Multihead version with per-head loss tracking."""
+        """Train/validate one epoch — JAX-style per-head processing.
+
+        Training mode:
+            For each step, loads one batch per head, computes per-head gradients,
+            accumulates with head loss_weights, then applies one optimizer step.
+            (Mirrors JAX make_per_head_grad_step + make_accumulate_and_update_step)
+
+        Validation / test mode:
+            Falls back to mixed-loader evaluation for initial_test compatibility.
+            Per-head validation is handled separately by validate_per_head().
+        """
         if mode == 'train':
-            self.model.train()
-            backprop = True
-            loss_log_config = self.log_config['train']
-            if data_loader is None:
-                data_loader = self.train_loader
-            self.ckpt['train_scale_shift'] = []
-        else:  # test or valid
-            self.model.eval()
-            backprop = False
-            loss_log_config = self.log_config['valid']
-            if data_loader is None:
-                data_loader = self.valid_loader
-            if mode == 'valid':
-                self.ckpt['valid_scale_shift'] = []
-        
-        # Exclude head_X_* keys from initialization, as they are computed separately
-        epoch_loss_dict = {key: [] for key in loss_log_config if not key.startswith('head_')}
-        
-        # Loss tracking per haed
-        head_loss_accum = {h: {'loss': [], 'loss_e': [], 'loss_f': []} for h in range(self.num_heads)}
-        
-        # tqdm progress bar for training
-        if self.rank == 0 and tqdm is not None:
-            data_iter = tqdm(data_loader, desc=f"Epoch {epoch} [{mode}]", leave=True)
+            return self._train_one_epoch_perhead(epoch)
         else:
-            data_iter = data_loader
-        
-        for batch_idx, data in enumerate(data_iter):
-            # Smoke test: limit batches
-            if self.smoke_enabled and batch_idx >= self.smoke_max_batches:
-                if self.rank == 0 and batch_idx == self.smoke_max_batches:
-                    print(f"  [SMOKE] Stopping after {self.smoke_max_batches} batches")
+            return self._eval_one_epoch_mixed(mode, data_loader, epoch)
+
+    # ------------------------------------------------------------------
+    # Training: JAX-style per-head gradient accumulation
+    # ------------------------------------------------------------------
+    def _train_one_epoch_perhead(self, epoch):
+        """Per-head gradient computation and weighted accumulation (JAX pattern)."""
+        self.model.train()
+        self.ckpt['train_scale_shift'] = []
+        loss_log_config = self.log_config['train']
+        grad_clip = self.json_data.get('NN', {}).get('grad_clip', 1.0)
+
+        # Per-head iterators (JAX HeadBatchStream equivalent)
+        head_iters = {h: iter(loader) for h, loader in self.per_head_train_loaders.items()}
+        steps_per_epoch = max(len(loader) for loader in self.per_head_train_loaders.values())
+
+        # Accumulators
+        epoch_loss_dict = {key: [] for key in loss_log_config if not key.startswith('head_')}
+        head_loss_accum = {h: {'loss': [], 'loss_e': [], 'loss_f': []} for h in range(self.num_heads)}
+
+        if self.rank == 0 and tqdm is not None:
+            step_iter = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch} [train]", leave=True)
+        else:
+            step_iter = range(steps_per_epoch)
+
+        for step in step_iter:
+            if self.smoke_enabled and step >= self.smoke_max_batches:
+                if self.rank == 0 and step == self.smoke_max_batches:
+                    print(f"  [SMOKE] Stopping after {self.smoke_max_batches} steps")
                 break
-            
-            data = self.move_to_device(data, self.device)
-            
-            # Batch size logging
-            self._log_batch_size(mode, batch_idx, data, epoch)
-            
-            # Predict
-            preds = self.model(data, backprop)
-            preds = self.scale_shift(preds, data, mode)
-            
-            # Compute loss
-            loss_dict = self.compute_loss(preds, data)
-            
-            # Update tqdm progress bar
-            if self.rank == 0 and tqdm is not None and hasattr(data_iter, 'set_postfix'):
-                data_iter.set_postfix({
-                    'loss': f"{loss_dict['loss'].item():.4f}",
-                    'loss_e': f"{loss_dict.get('loss_e', 0):.4f}" if 'loss_e' in loss_dict else 'N/A'
-                })
-            
-            loss = loss_dict['loss']
-            if backprop:
-                self.optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
-                self.optimizer.step()
-                
-                # EMA update during training (GitHub BaseTrainer pattern)
-                if self.ema is not None:
-                    self.ema.update()
-            
-            # Log losses (exclude head_X_* keys, as they are computed as epoch averages)
+
+            self.optimizer.zero_grad()
+            total_weight = 0.0
+            step_loss_sum = 0.0
+
+            # --- Per-head forward + backward (gradient accumulation) ---
+            per_head_loss_dicts = {}
+            for head_idx in sorted(head_iters.keys()):
+                # Get next batch (cycle if exhausted — JAX HeadBatchStream pattern)
+                try:
+                    data = next(head_iters[head_idx])
+                except StopIteration:
+                    head_iters[head_idx] = iter(self.per_head_train_loaders[head_idx])
+                    data = next(head_iters[head_idx])
+
+                data = self.move_to_device(data, self.device)
+                self._log_batch_size('train', step, data, epoch)
+
+                # Forward
+                preds = self.model(data, True)
+                preds = self.scale_shift(preds, data, 'train')
+                loss_dict = self.compute_loss(preds, data)
+
+                # Weighted backward: scale loss by head's grad_weight before backward
+                head_weight = self.loss_weights[head_idx]
+                scaled_loss = loss_dict['loss'] * head_weight
+                scaled_loss.backward()  # gradients accumulate across heads
+
+                total_weight += head_weight
+                step_loss_sum += loss_dict['loss'].detach().item() * head_weight
+                per_head_loss_dicts[head_idx] = loss_dict
+
+            # --- Normalize accumulated gradients by total weight (JAX pattern) ---
+            if total_weight > 0:
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad.div_(total_weight)
+
+            # Clip by global norm (JAX: optax.clip_by_global_norm)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=grad_clip)
+
+            self.optimizer.step()
+
+            if self.ema is not None:
+                self.ema.update()
+
+            # --- Logging ---
+            weighted_loss = step_loss_sum / total_weight if total_weight > 0 else 0.0
+
+            if self.rank == 0 and tqdm is not None and hasattr(step_iter, 'set_postfix'):
+                step_iter.set_postfix({'loss': f"{weighted_loss:.4f}"})
+
+            # Aggregate step-level losses
             for l in loss_log_config:
                 if l.startswith('head_'):
-                    continue  # Per-head losses are computed later
+                    continue
+                # Combine from all heads (weighted mean)
+                vals = []
+                for hd, ld in per_head_loss_dicts.items():
+                    v = ld.get(l)
+                    if v is not None:
+                        v = v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                        vals.append(v * self.loss_weights[hd])
+                if vals:
+                    epoch_loss_dict[l].append(sum(vals) / total_weight)
+
+            # Per-head loss tracking
+            for head_idx, ld in per_head_loss_dicts.items():
+                if 'head_losses' in ld and head_idx in ld['head_losses']:
+                    hl = ld['head_losses'][head_idx]
+                    for key in ('loss', 'loss_e', 'loss_f'):
+                        if key in hl:
+                            head_loss_accum[head_idx][key].append(hl[key].cpu())
+
+            if step % 50 == 0:
+                torch.cuda.empty_cache()
+
+        torch.cuda.synchronize()
+        return self._aggregate_epoch_losses(epoch_loss_dict, head_loss_accum)
+
+    # ------------------------------------------------------------------
+    # Validation: per-head separate evaluation (JAX evaluate_per_head)
+    # ------------------------------------------------------------------
+    def validate_per_head(self, epoch=0):
+        """Evaluate each head on its own validation set independently.
+
+        Returns:
+            epoch_loss_dict: combined + per-head metrics dict
+            total_val_loss: weighted total validation loss (scalar)
+        """
+        self.model.eval()
+        self.ckpt['valid_scale_shift'] = []
+        loss_log_config = self.log_config['valid']
+
+        epoch_loss_dict = {key: [] for key in loss_log_config if not key.startswith('head_')}
+        head_loss_accum = {h: {'loss': [], 'loss_e': [], 'loss_f': []} for h in range(self.num_heads)}
+
+        total_val_loss = 0.0
+        total_weight = 0.0
+
+        for head_idx, valid_loader in self.per_head_valid_loaders.items():
+            head_weight = self.loss_weights[head_idx]
+            head_name = self.heads[head_idx]
+            head_total_loss = 0.0
+            n_batches = 0
+
+            for batch_idx, data in enumerate(valid_loader):
+                if self.smoke_enabled and batch_idx >= self.smoke_max_batches:
+                    break
+
+                data = self.move_to_device(data, self.device)
+                self._log_batch_size('valid', batch_idx, data, epoch)
+
+                with torch.no_grad():
+                    preds = self.model(data, False)
+                    preds = self.scale_shift(preds, data, 'valid')
+                    loss_dict = self.compute_loss(preds, data)
+
+                head_total_loss += loss_dict['loss'].detach().item()
+                n_batches += 1
+
+                # Aggregate non-head losses
+                for l in loss_log_config:
+                    if l.startswith('head_'):
+                        continue
+                    v = loss_dict.get(l)
+                    if v is not None:
+                        v = v.detach().cpu() if isinstance(v, torch.Tensor) else v
+                        epoch_loss_dict[l].append(v * head_weight)
+
+                # Per-head loss tracking
+                if 'head_losses' in loss_dict and head_idx in loss_dict['head_losses']:
+                    hl = loss_dict['head_losses'][head_idx]
+                    for key in ('loss', 'loss_e', 'loss_f'):
+                        if key in hl:
+                            head_loss_accum[head_idx][key].append(hl[key].cpu())
+
+            # Per-head summary
+            if n_batches > 0:
+                avg_head_loss = head_total_loss / n_batches
+                total_val_loss += avg_head_loss * head_weight
+                total_weight += head_weight
+                if self.rank == 0:
+                    print(f"  [Valid] Head {head_idx} ({head_name}): "
+                          f"loss={avg_head_loss:.6f}, weight={head_weight}")
+
+        # Normalize total validation loss
+        if total_weight > 0:
+            total_val_loss /= total_weight
+
+        torch.cuda.synchronize()
+        result = self._aggregate_epoch_losses(epoch_loss_dict, head_loss_accum, total_weight)
+        result['loss'] = torch.tensor(total_val_loss)
+        return result
+
+    # ------------------------------------------------------------------
+    # Mixed eval (for initial_test / backward compatibility)
+    # ------------------------------------------------------------------
+    def _eval_one_epoch_mixed(self, mode, data_loader, epoch):
+        """Evaluate on mixed data loader (used by initial_test)."""
+        self.model.eval()
+        loss_log_config = self.log_config['valid']
+        if data_loader is None:
+            data_loader = self.valid_loader
+        if mode == 'valid':
+            self.ckpt['valid_scale_shift'] = []
+
+        epoch_loss_dict = {key: [] for key in loss_log_config if not key.startswith('head_')}
+        head_loss_accum = {h: {'loss': [], 'loss_e': [], 'loss_f': []} for h in range(self.num_heads)}
+
+        for batch_idx, data in enumerate(data_loader):
+            if self.smoke_enabled and batch_idx >= self.smoke_max_batches:
+                break
+            data = self.move_to_device(data, self.device)
+            preds = self.model(data, False)
+            preds = self.scale_shift(preds, data, mode)
+            loss_dict = self.compute_loss(preds, data)
+
+            for l in loss_log_config:
+                if l.startswith('head_'):
+                    continue
                 val = loss_dict.get(l, torch.nan)
                 epoch_loss_dict[l].append(val.detach().cpu() if isinstance(val, torch.Tensor) else val)
-            
-            # Accumulate per-head losses
             if 'head_losses' in loss_dict:
-                for head_idx, head_loss in loss_dict['head_losses'].items():
+                for head_idx, hl in loss_dict['head_losses'].items():
                     if head_idx < self.num_heads:
-                        if 'loss' in head_loss:
-                            head_loss_accum[head_idx]['loss'].append(head_loss['loss'].cpu())
-                        if 'loss_e' in head_loss:
-                            head_loss_accum[head_idx]['loss_e'].append(head_loss['loss_e'].cpu())
-                        if 'loss_f' in head_loss:
-                            head_loss_accum[head_idx]['loss_f'].append(head_loss['loss_f'].cpu())
-            
-            # Memory cleanup every N batches
-            if batch_idx % 50 == 0:
-                torch.cuda.empty_cache()
-        
+                        for key in ('loss', 'loss_e', 'loss_f'):
+                            if key in hl:
+                                head_loss_accum[head_idx][key].append(hl[key].cpu())
+
         torch.cuda.synchronize()
-        
-        # Compute the average
-        epoch_loss_dict = {
-            key: torch.mean(torch.tensor(value)) 
-            for key, value in epoch_loss_dict.items()
-        }
-        
-        # Add per-head average loss
+        return self._aggregate_epoch_losses(epoch_loss_dict, head_loss_accum)
+
+    # ------------------------------------------------------------------
+    # Helper: aggregate epoch losses
+    # ------------------------------------------------------------------
+    def _aggregate_epoch_losses(self, epoch_loss_dict, head_loss_accum, total_weight=None):
+        """Average accumulated per-step losses into epoch-level metrics."""
+        if total_weight and total_weight > 0:
+            result = {
+                key: torch.mean(torch.tensor(value)) / total_weight
+                if value else torch.tensor(float('nan'))
+                for key, value in epoch_loss_dict.items()
+            }
+        else:
+            result = {
+                key: torch.mean(torch.tensor(value)) if value else torch.tensor(float('nan'))
+                for key, value in epoch_loss_dict.items()
+            }
+
         for head_idx in range(self.num_heads):
-            if head_loss_accum[head_idx]['loss']:
-                epoch_loss_dict[f'head_{head_idx}_loss'] = torch.mean(
-                    torch.tensor(head_loss_accum[head_idx]['loss'])
-                )
-            if head_loss_accum[head_idx]['loss_e']:
-                epoch_loss_dict[f'head_{head_idx}_loss_e'] = torch.mean(
-                    torch.tensor(head_loss_accum[head_idx]['loss_e'])
-                )
-            if head_loss_accum[head_idx]['loss_f']:
-                epoch_loss_dict[f'head_{head_idx}_loss_f'] = torch.mean(
-                    torch.tensor(head_loss_accum[head_idx]['loss_f'])
-                )
-        
-        return epoch_loss_dict
+            for key in ('loss', 'loss_e', 'loss_f'):
+                vals = head_loss_accum[head_idx][key]
+                if vals:
+                    result[f'head_{head_idx}_{key}'] = torch.mean(torch.tensor(vals))
+
+        return result

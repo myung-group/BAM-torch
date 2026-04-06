@@ -414,27 +414,63 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         if rank == 0:
             print(f"  - Train: {len(train_data)}, Valid: {len(valid_data)} graphs")
     
-    # Shuffle and create DataLoaders
+    # --- Per-head DataLoaders (JAX-style separate streams) ---
+    per_head_train_loaders = {}
+    per_head_valid_loaders = {}
+    per_head_train_graphs = {}
+    per_head_valid_graphs = {}
+
+    # Separate graphs by head index
+    for g in all_train_graphs:
+        h = int(g.head.item())
+        per_head_train_graphs.setdefault(h, []).append(g)
+    for g in all_valid_graphs:
+        h = int(g.head.item())
+        per_head_valid_graphs.setdefault(h, []).append(g)
+
+    for h in sorted(set(list(per_head_train_graphs.keys()) + list(per_head_valid_graphs.keys()))):
+        # Train loader per head
+        train_gs = per_head_train_graphs.get(h, [])
+        random.shuffle(train_gs)
+        sampler_t = DistributedSampler(train_gs, num_replicas=world_size, rank=rank) if world_size > 1 else None
+        per_head_train_loaders[h] = DataLoader(
+            train_gs, nbatch, shuffle=(sampler_t is None),
+            drop_last=False, pin_memory=True, sampler=sampler_t
+        )
+        # Valid loader per head
+        valid_gs = per_head_valid_graphs.get(h, [])
+        sampler_v = DistributedSampler(valid_gs, num_replicas=world_size, rank=rank) if world_size > 1 else None
+        per_head_valid_loaders[h] = DataLoader(
+            valid_gs, nbatch, shuffle=False,
+            drop_last=False, pin_memory=True, sampler=sampler_v
+        )
+
+    # --- Mixed DataLoaders (backward-compatible) ---
     random.shuffle(all_train_graphs)
-    
     data_sampler_train = None
     data_sampler_valid = None
     if world_size > 1:
         data_sampler_train = DistributedSampler(all_train_graphs, num_replicas=world_size, rank=rank)
         data_sampler_valid = DistributedSampler(all_valid_graphs, num_replicas=world_size, rank=rank)
-    
+
     train_loader = DataLoader(all_train_graphs, nbatch, shuffle=(data_sampler_train is None),
                               drop_last=False, pin_memory=True, sampler=data_sampler_train)
     valid_loader = DataLoader(all_valid_graphs, nbatch, shuffle=False,
                               drop_last=False, pin_memory=True, sampler=data_sampler_valid)
-    
+
     if rank == 0:
         print(f"\n✓ Multihead Dataloaders created")
         print(f"  - Total train: {len(all_train_graphs)}, valid: {len(all_valid_graphs)}")
+        for h in sorted(per_head_train_loaders.keys()):
+            n_t = len(per_head_train_graphs.get(h, []))
+            n_v = len(per_head_valid_graphs.get(h, []))
+            print(f"  - Head {h}: train {n_t}, valid {n_v}")
         print(f"  - Batch size: {nbatch}")
         print(f"  - Per-head E0s stored for {len(per_head_enr_avg)} heads")
-    
-    return train_loader, valid_loader, global_uniq_element, global_enr_avg_per_element, per_head_enr_avg
+
+    return (train_loader, valid_loader,
+            per_head_train_loaders, per_head_valid_loaders,
+            global_uniq_element, global_enr_avg_per_element, per_head_enr_avg)
 
 
 def get_graphset_to_predict(data, cutoff, uniq_element, 
