@@ -1,0 +1,10 @@
+
+# === Charge-dependent development artifacts ===
+qm9star/
+_archive/
+_upload/
+Wiggle150/
+*.zip
+bam_torch/legacy_phases/
+tests/*_output/
+docs/

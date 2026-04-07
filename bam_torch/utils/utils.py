@@ -5,6 +5,7 @@ from matscipy.neighbours import neighbour_list
 from tqdm import tqdm
 
 import torch
+import torch.distributed as dist
 from torch import vmap
 from torch_geometric.data import Data
 from torch_geometric.data import Batch as DataBatch
@@ -12,6 +13,7 @@ from torch_geometric.loader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 import os
+import hashlib
 import pprint
 from copy import deepcopy
 from datetime import datetime
@@ -209,56 +211,135 @@ def get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to):
     return graph_list
 
 
-def get_dataloader(fname, ntrain, nvalid, 
-                   nbatch, cutoff, random_seed, 
+def _get_base_cache_path(fname, ntrain, nvalid, random_seed, cutoff,
+                         regress_forces, max_neigh):
+    """Generate deterministic cache file path for base dataloader."""
+    fsize = os.path.getsize(fname) if os.path.exists(fname) else 0
+    key = (f"base|{os.path.abspath(fname)}|{fsize}|{ntrain}|{nvalid}|"
+           f"{random_seed}|{cutoff}|{regress_forces}|{max_neigh}")
+    h = hashlib.md5(key.encode()).hexdigest()[:12]
+    basename = os.path.splitext(os.path.basename(fname))[0]
+    cache_dir = os.path.dirname(os.path.abspath(fname))
+    return os.path.join(cache_dir, f".cache_{basename}_{h}.pt")
+
+
+def _wait_for_cache(cache_path, rank, poll_interval=10):
+    """Wait for rank 0 to finish writing the cache file.
+
+    Uses file-based synchronization instead of dist.barrier() to avoid
+    NCCL timeout when rank 0 takes a long time to convert large datasets.
+    """
+    import time
+    ready_path = cache_path + '.ready'
+    if rank == 0:
+        with open(ready_path, 'w') as f:
+            f.write('ready')
+    else:
+        while not os.path.exists(ready_path):
+            time.sleep(poll_interval)
+        time.sleep(1)  # ensure file is fully flushed
+
+
+def get_dataloader(fname, ntrain, nvalid,
+                   nbatch, cutoff, random_seed,
                    element=None, regress_forces=True,
                    max_neigh=None,
                    rank=0, world_size=1):
-    msg = ''
-    if type(ntrain) == str: 
-        train_data = read(ntrain, index=slice(None))
-        valid_data = read(nvalid, index=slice(None))
-        msg += 'number of data:\n'
-        msg += f'\033[33m -- training      {len(train_data)}\n'
-        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
-        traj = train_data + valid_data
-    else:
-        nsamp = ntrain + nvalid
-        traj = read(fname, index=slice(None))[-nsamp:]
-        torch.manual_seed(random_seed)
-        torch.cuda.manual_seed_all(random_seed)
-        idx = torch.arange(nsamp)
-        idx = idx[torch.randperm(nsamp)] 
-        idx_train = idx[:ntrain]
-        idx_valid = idx[ntrain:]   
-        train_data = [traj[i] for i in idx_train]
-        valid_data = [traj[i] for i in idx_valid]
-        msg += 'number of data:\n'
-        msg += f'\033[33m -- training      {len(train_data)}\n'
-        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+    # For DDP with integer ntrain/nvalid, use rank-0 caching
+    use_cache = (world_size > 1 and not isinstance(ntrain, str))
+    cache_path = None
+    if use_cache:
+        cache_path = _get_base_cache_path(
+            fname, ntrain, nvalid, random_seed, cutoff,
+            regress_forces, max_neigh,
+        )
 
-    if element == None or element == 'auto':
-        element = sorted(
-            list(set(atom.number for atoms in traj 
-                                  for atom in atoms))
-        )  # traj: ase.Atoms
-    enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element (traj, element) 
-    msg += f'mean energy per element:\n {enr_avg_per_element}\n'
-    if rank == 0:
-        print(msg)
-    
+    if use_cache and rank != 0:
+        # Non-rank-0: wait for rank 0 via file-based sync, then load cache
+        _wait_for_cache(cache_path, rank)
+        cached = torch.load(cache_path, weights_only=False)
+        train_graphset = cached['train_graphset']
+        valid_graphset = cached['valid_graphset']
+        uniq_element = cached['uniq_element']
+        enr_avg_per_element = cached['enr_avg_per_element']
+    else:
+        # Rank 0 (or single-GPU): check cache first
+        if use_cache and os.path.exists(cache_path):
+            print(f"\033[32mLoading cached dataset: {cache_path}\033[0m")
+            cached = torch.load(cache_path, weights_only=False)
+            train_graphset = cached['train_graphset']
+            valid_graphset = cached['valid_graphset']
+            uniq_element = cached['uniq_element']
+            enr_avg_per_element = cached['enr_avg_per_element']
+            del cached
+        else:
+            # Original data loading logic
+            msg = ''
+            if type(ntrain) == str:
+                train_data = read(ntrain, index=slice(None))
+                valid_data = read(nvalid, index=slice(None))
+                msg += 'number of data:\n'
+                msg += f'\033[33m -- training      {len(train_data)}\n'
+                msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+                traj = train_data + valid_data
+            else:
+                nsamp = ntrain + nvalid
+                traj = read(fname, index=slice(None))[-nsamp:]
+                torch.manual_seed(random_seed)
+                torch.cuda.manual_seed_all(random_seed)
+                idx = torch.arange(nsamp)
+                idx = idx[torch.randperm(nsamp)]
+                idx_train = idx[:ntrain]
+                idx_valid = idx[ntrain:]
+                train_data = [traj[i] for i in idx_train]
+                valid_data = [traj[i] for i in idx_valid]
+                msg += 'number of data:\n'
+                msg += f'\033[33m -- training      {len(train_data)}\n'
+                msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+
+            if element == None or element == 'auto':
+                element = sorted(
+                    list(set(atom.number for atoms in traj
+                                          for atom in atoms))
+                )  # traj: ase.Atoms
+            enr_avg_per_element, uniq_element, enr_var = get_enr_avg_per_element(traj, element)
+            msg += f'mean energy per element:\n {enr_avg_per_element}\n'
+            if rank == 0:
+                print(msg)
+            del traj  # free ASE trajectory memory
+
+            all_graphsets = []
+            for dataset in [train_data, valid_data]:
+                graphset = get_graphset(dataset, cutoff, uniq_element,
+                                        enr_avg_per_element, enr_var,
+                                        regress_forces, max_neigh)
+                pad_nodes_to = 0
+                pad_edges_to = 0
+                for graph in graphset:
+                    pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+                    pad_edges_to = max(graph.num_edges, pad_edges_to)
+                graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+                all_graphsets.append(graphset)
+            del train_data, valid_data
+            train_graphset, valid_graphset = all_graphsets
+
+            # Save cache for other ranks
+            if use_cache:
+                print(f"\033[32mSaving dataset cache: {cache_path}\033[0m")
+                torch.save({
+                    'train_graphset': train_graphset,
+                    'valid_graphset': valid_graphset,
+                    'uniq_element': uniq_element,
+                    'enr_avg_per_element': enr_avg_per_element,
+                }, cache_path)
+
+        # Rank 0 signals other ranks via file-based sync
+        if use_cache:
+            _wait_for_cache(cache_path, rank=0)
+
+    # Create DataLoaders
     loaders = []
-    for dataset in [train_data, valid_data]:
-        graphset = get_graphset(dataset, cutoff, uniq_element, 
-                                enr_avg_per_element, enr_var,
-                                regress_forces, max_neigh)
-        pad_nodes_to = 0 # nbatch * max_nodes 
-        pad_edges_to = 0 # nbatch * max_edges
-        for graph in graphset:
-            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-            pad_edges_to = max(graph.num_edges, pad_edges_to)
-        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
-        #padded_graphset = graphset
+    for graphset in [train_graphset, valid_graphset]:
         data_sampler = None
         if world_size > 1:
             data_sampler = DistributedSampler(
@@ -273,8 +354,7 @@ def get_dataloader(fname, ntrain, nvalid,
                             collate_fn=None,
                             sampler=data_sampler)
         loaders.append(loader)
-        # train_loader, test_loader
-    return loaders[0], loaders[1], uniq_element, enr_avg_per_element  
+    return loaders[0], loaders[1], uniq_element, enr_avg_per_element
 
 
 def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=True,

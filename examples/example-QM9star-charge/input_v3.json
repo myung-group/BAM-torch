@@ -1,0 +1,96 @@
+{
+    "_version": "Phase 3 (E) — CEP as Pure Charge Predictor (E_SR only, no U_CENT)",
+    "device": "gpu",
+    "gpu-parallel": false,
+    "model": "charge_race_v3",
+    "cueq_config": false,
+    "regress_forces": true,
+    "trainer": "cd_v3",
+    "fname_traj": "qm9star_data.xyz",
+    "ntrain": 4000,
+    "nvalid": 500,
+    "element": "auto",
+    "cutoff": 6.0,
+    "avg_num_neighbors": 30,
+    "num_species": 5,
+    "max_ell": 2,
+    "num_radial_basis": 8,
+    "hidden_channels": "32x0e+16x1o+8x2e",
+    "output_channels": "1x0e",
+    "nbatch": 4,
+    "nlayers": 3,
+    "features_dim": 64,
+    "active_fn": "identity",
+    "pbc": false,
+    "_comment_charge": [
+        "Phase 3 (E) CEP 설정.",
+        "use_cent_energy: false → E_total = E_SR only (U_CENT 에너지 미포함).",
+        "charge_type: 학습 데이터의 전하 타입 (npa/mulliken/hirshfeld).",
+        "cep_hidden_dim: χ_i MLP 의 hidden dimension.",
+        "charge_key: extended xyz 의 atomic charge 컬럼 이름.",
+        "total_charge_key: extended xyz 의 total charge 키 이름."
+    ],
+    "charge": {
+        "cep_hidden_dim": 64,
+        "use_cent_energy": false,
+        "charge_type": "npa",
+        "charge_key": "charges",
+        "total_charge_key": "total_charge",
+        "charge_loss": "mse"
+    },
+    "NN": {
+        "data_seed": 10,
+        "init_seed": 11,
+        "learning_rate": 0.01,
+        "weight_decay": 0,
+        "nepoch": 100,
+        "nsave": 5,
+        "restart": false,
+        "fname_pkl": "model.pkl",
+        "loss_config": {
+            "energy_loss": "mse",
+            "force_loss": "mse"
+        },
+        "enr_lambda": 1,
+        "frc_lambda": 100,
+        "chg_lambda": 10,
+        "l2_lambda": 0.0
+    },
+    "scheduler": {
+        "scheduler": "ReduceLROnPlateau",
+        "lr_gamma": 0.1,
+        "decay_factor": 0.9,
+        "max_steps": 30,
+        "warmup_steps": 10,
+        "warmup_factor": 0.2,
+        "patience": 50,
+        "threshold": 0.0001
+    },
+    "log_length": "simple",
+    "log_interval": 2,
+    "log_config": {
+        "step": ["date", "epoch"],
+        "train": ["loss", "loss_e", "loss_f", "loss_q"],
+        "valid": ["loss", "loss_e", "loss_f", "loss_q"],
+        "lr": ["lr"]
+    },
+    "train": {
+        "fname_log": "loss_train.out"
+    },
+    "predict": {
+        "evaluate_tag": false,
+        "loss_config": {
+            "energy_loss": "rmse",
+            "force_loss": "rmse"
+        },
+        "fname_traj": "wiggle150_data.xyz",
+        "ndata": "wiggle150_data.xyz",
+        "model": "model.pkl",
+        "fname_plog": "predict.out"
+    },
+    "_usage": {
+        "_step1": "전처리: python -m bam_torch.charge_dependent.utils.qm9star_preprocessor --dump qm9star_archive_240912.sql --charge-type npa_charges --energy-type U_0 --output qm9star_data.xyz",
+        "_step2": "학습: python -m bam_torch.training.run_train --config input_v3.json",
+        "_step3": "평가: python -m bam_torch.predicting.run_predict --config input_v3.json"
+    }
+}
