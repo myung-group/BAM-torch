@@ -1064,10 +1064,10 @@ class MultiheadTrainer(BaseTrainer):
                 data = self.move_to_device(data, self.device)
                 self._log_batch_size('valid', batch_idx, data, epoch)
 
-                with torch.no_grad():
-                    preds = self.model(data, False)
-                    preds = self.scale_shift(preds, data, 'valid')
-                    loss_dict = self.compute_loss(preds, data)
+                # no_grad() disabled: autograd.grad() needs a live graph for force computation
+                preds = self.model(data, False)
+                preds = self.scale_shift(preds, data, 'valid')
+                loss_dict = self.compute_loss(preds, data)
 
                 head_total_loss += loss_dict['loss'].detach().item()
                 n_batches += 1
