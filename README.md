@@ -45,21 +45,11 @@ $ conda activate bam_torch
 
 Equivalent environments have also been tested with [virtualenv](https://virtualenv.pypa.io/) and [venv](https://docs.python.org/library/venv.html).
 
-### Step 2: Install Core Dependencies
-
-As of October 2025, [PyTorch Geometric](https://pyg.org/) (PyG) supports PyTorch up to version 2.8.0.  
-Check their [wheels page](https://data.pyg.org/whl/) for any updates (near the bottom).  
-We should therefore manually install a version of PyTorch between 2.5.1 and 2.8.0.
+### Step 2: Install BAM
 
 ```bash
 $ git clone https://github.com/myung-group/BAM-torch
 $ cd BAM-torch
-$ pip install "torch<=2.8"
-```
-
-### Step 3: Install BAM
-
-```bash
 $ pip install -e .
 ```
 
@@ -68,9 +58,9 @@ The core training and inference path uses a pure-PyTorch scatter
 (`torch_scatter`, `torch_cluster`, `torch_sparse`, `torch_spline_conv`,
 `pyg_lib`). Only the optional `group_averaging` module imports
 `torch_scatter` and `torch_cluster`; install those when you opt in
-(see Step 4).
+(see Step 3).
 
-### Step 4: Install optional components as needed
+### Step 3: Install optional components as needed
 
 For low-level acceleration of equivariant neural networks, use [cuEquivariance](https://github.com/NVIDIA/cuEquivariance).
 
