@@ -206,6 +206,7 @@ class InteractionBlock(torch.nn.Module):
         raise NotImplementedError
 
 
+    @torch.jit.ignore
     def separated_layer_norm(
         self,
         node_feats: torch.Tensor,
@@ -419,7 +420,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
 
         skip = self.skip_tp_node(node_feats, node_attrs)
-        if self.l_separated_layer_norm:
+        if not torch.jit.is_scripting() and self.l_separated_layer_norm:
             node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
         mix = self.conv_tp_weights(edge_feats)  # tp_weights
@@ -525,7 +526,7 @@ class RaceInteractionBlock(InteractionBlock):
         avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
 
         skip = self.skip_tp_node(node_feats, node_attrs)
-        if self.l_separated_layer_norm:
+        if not torch.jit.is_scripting() and self.l_separated_layer_norm:
             node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
         messages = node_feats[sender]
@@ -724,10 +725,11 @@ class NonLinearReadoutBlock(torch.nn.Module):
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
         out = self.linear_2(x)
-        if self.bias is not None:
-            n_scalars = self.bias.shape[0]
+        bias = self.bias
+        if bias is not None:
+            n_scalars = bias.shape[0]
             out = out.clone()
-            out[:, :n_scalars] = out[:, :n_scalars] + self.bias
+            out[:, :n_scalars] = out[:, :n_scalars] + bias
         return out
 
 

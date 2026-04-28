@@ -67,8 +67,13 @@ def create_lammps_model(pkl_path='model.pkl', pt_path='model.pt', output_path=No
         enr_avg_per_element = pckl['enr_avg_per_element']
 
     # Get energy correction
-    e_corr = torch.tensor(pckl['valid_scale_shift'])
-    e_corr = e_corr.flatten().mean().item()
+    # Newer checkpoints save valid_scale_shift as {class_idx: tensor} dict;
+    # older checkpoints saved it as a tensor/list. Handle both.
+    vss = pckl['valid_scale_shift']
+    if isinstance(vss, dict):
+        e_corr = torch.stack([v for v in vss.values()]).flatten().mean().item()
+    else:
+        e_corr = torch.tensor(vss).flatten().mean().item()
 
     print(f"enr_avg_per_element: {enr_avg_per_element}")
     print(f"e_corr: {e_corr}")
