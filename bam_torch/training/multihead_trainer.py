@@ -265,6 +265,7 @@ class MultiheadTrainer(BaseTrainer):
             compute_stress=True,
             heads=self.heads,
             cueq_config=None,
+            l_separated_layer_norm=model_config.get('l_separated_layer_norm', False),
         )
         
         self.msg += f'\n\033[33m -- Multihead model with {self.num_heads} heads: {self.heads}\033[0m\n'
@@ -778,45 +779,47 @@ class MultiheadTrainer(BaseTrainer):
             if self.ddp:
                 torch.distributed.barrier()
 
-            # Validate with EMA context (JAX-style per-head validation)
-            param_context = (
-                self.ema.average_parameters() if self.ema is not None else nullcontext()
-            )
-            with param_context:
-                if (epoch+1) % self.log_interval == 0:
-                    # Per-head validation (JAX evaluate_per_head pattern)
+            if (epoch+1) % self.log_interval == 0:
+                # Evaluate with EMA-averaged parameters (JAX-style per-head validation)
+                param_context = (
+                    self.ema.average_parameters() if self.ema is not None else nullcontext()
+                )
+                with param_context:
                     epoch_loss_valid = self.validate_per_head(epoch=epoch+self.start_epoch)
 
                     if self.ddp:
                         torch.distributed.barrier()
 
-                    if self.rank == 0:
-                        actual_epoch = epoch + 1 + self.start_epoch
+                # Snapshot/log/save with live (non-EMA) parameters
+                if self.rank == 0:
+                    actual_epoch = epoch + 1 + self.start_epoch
 
-                        # Save best checkpoint if validation loss improved
-                        if epoch_loss_valid['loss'] < self.loss_test_min:
-                            self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
-                            self.loss_test_min = epoch_loss_valid['loss']
-                            self._save_named_checkpoint(self.ckpt, 'best', actual_epoch)
+                    # Save best checkpoint if validation loss improved
+                    if epoch_loss_valid['loss'] < self.loss_test_min:
+                        self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
+                        self.loss_test_min = epoch_loss_valid['loss']
+                        self._save_named_checkpoint(self.ckpt, 'best', actual_epoch)
 
-                        # Always save latest checkpoint
-                        latest_ckpt = self._build_current_checkpoint(
-                            epoch, epoch_loss_train, epoch_loss_valid
-                        )
-                        self._save_named_checkpoint(latest_ckpt, 'latest', actual_epoch)
+                    # Always save latest checkpoint
+                    latest_ckpt = self._build_current_checkpoint(
+                        epoch, epoch_loss_train, epoch_loss_valid
+                    )
+                    self._save_named_checkpoint(latest_ckpt, 'latest', actual_epoch)
 
-                        # Print epoch loss
-                        self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
+                    # Print epoch loss
+                    self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
 
-                        # Free GPU memory
-                        torch.cuda.empty_cache()
-                        gc.collect()
+                    # Free GPU memory
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
-                    # Update scheduler (learning rate)
-                    metrics = None
-                    if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
-                        metrics = epoch_loss_valid['loss']
-                    self.scheduler.step(metrics, epoch)
+                # Update scheduler (learning rate)
+                metrics = None
+                scheduler_cfg = self.json_data.get("scheduler", {})
+                if isinstance(scheduler_cfg, dict) \
+                        and scheduler_cfg.get("scheduler") == "ReduceLROnPlateau":
+                    metrics = epoch_loss_valid['loss']
+                self.scheduler.step(metrics, epoch)
 
     # ------------------------------------------------------------------
     # Emergency checkpoint handler (JAX EmergencyCheckpointer)
@@ -892,10 +895,14 @@ class MultiheadTrainer(BaseTrainer):
     # Initial_test: use BaseTrainer as-is (pass the epoch argument to train_one_epoch)
     def initial_test(self):
         """Run a preliminary test epoch and record the initial reference loss."""
-        epoch_loss_test = self.train_one_epoch(mode='test', epoch=0)
-        if self.ddp:
-            torch.distributed.barrier()
-        self.loss_test_min = epoch_loss_test['loss']
+        param_context = (
+            self.ema.average_parameters() if self.ema is not None else nullcontext()
+        )
+        with param_context:
+            epoch_loss_test = self.train_one_epoch(mode='test', epoch=0)
+            if self.ddp:
+                torch.distributed.barrier()
+            self.loss_test_min = epoch_loss_test['loss']
     
     # Update_check_point: additionally save the EMA state
     def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):

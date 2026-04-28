@@ -2,6 +2,8 @@
     "device" : "gpu",
     "gpu-parallel" : false,
     "model" : "race",
+    "interaction_block" : "fast",
+    "oeq_config" : true,
     "cueq_config" : false,
     "regress_forces" : true,
     "trainer" : "mve",

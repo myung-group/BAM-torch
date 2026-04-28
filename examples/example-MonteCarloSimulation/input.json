@@ -1,6 +1,8 @@
 {
     "device": "gpu",
     "model": "race",
+    "interaction_block" : "slow",
+    "oeq_config" : false,
     "element": "auto",
     "enr_avg_per_element": "get_enr_avg_per_element.txt",
     "cutoff": 6.0,

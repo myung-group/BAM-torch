@@ -1,6 +1,8 @@
 {
     "device" : "gpu",
     "model" : "race",
+    "interaction_block" : "fast",
+    "oeq_config" : true,
     "gpu-parallel" : true,
     "trainer" : "mp",
     "fname_traj" : "train_data",

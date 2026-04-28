@@ -11,15 +11,34 @@ from .blocks import (
     RadialEmbeddingBlock,
     LinearNodeEmbeddingBlock,
     ConcatenateRaceInteractionBlock,
+    RaceInteractionBlock,
     RaceEquivariantBlock,
     NonLinearReadoutBlock,
     LinearForceDecoderBlock,
     AgnosticResidualNonlinearInteractionBlock,
     EquivariantProductBasisBlock,
     LinearReadoutBlock,
-    NonLinearReadoutBlock,
     ScaleShiftBlock,
 )
+
+
+# Maps the `interaction_block` config string to a class. "slow" is the
+# JAX-style FullTensorProduct path (e3nn-only); "fast" is the weighted-channel
+# TensorProduct path (CUET / OEQ-capable).
+_RACE_INTERACTION_BLOCKS = {
+    "slow": ConcatenateRaceInteractionBlock,
+    "fast": RaceInteractionBlock,
+}
+
+
+def _resolve_race_interaction_block(name: str):
+    try:
+        return _RACE_INTERACTION_BLOCKS[name]
+    except KeyError:
+        valid = ", ".join(sorted(_RACE_INTERACTION_BLOCKS))
+        raise ValueError(
+            f"Unknown interaction_block {name!r}. Valid options: {valid}"
+        )
 from .wrapper_ops import Linear
 from bam_torch.utils.scatter import scatter_sum, scatter_mean
 from bam_torch.utils.output_utils import (
@@ -34,33 +53,36 @@ class RACE(torch.nn.Module):
     """Restratification Atomic Cluster Expansion (RACE) model
     """
     def __init__(
-        self, 
-        cutoff: float = 6.0, 
-        avg_num_neighbors: int = 40, 
-        num_species: int = 1, 
+        self,
+        cutoff: float = 6.0,
+        avg_num_neighbors: int = 40,
+        num_species: int = 1,
         max_ell: int = 3,
         num_basis_func: int = 8,
         hidden_irreps: e3nn.o3.Irreps = o3.Irreps("32x0e+32x1o+32x2e"),
         nlayers: int = 3,
-        features_dim: int = 32, 
+        features_dim: int = 32,
         output_irreps: e3nn.o3.Irreps = o3.Irreps("1x0e"),
         active_fn: str = "swish",
         radial_MLP: Optional[List[int]] = [64, 64],
         MLP_irreps: e3nn.o3.Irreps = o3.Irreps("16x0e"),
         gate: Optional[Callable] = torch.nn.SiLU(),
         cueq_config: Optional[Dict[str, Any]] = None,
+        oeq_config: Optional[Dict[str, Any]] = None,
         regress_forces: str = "direct",
-        compute_stress: bool = True
+        compute_stress: bool = True,
+        l_separated_layer_norm: bool = False,
+        interaction_block: str = "slow",
     ):
         super().__init__()
-    
+
         if active_fn in ["swish", "silu", "SiLU"]:
             self.act_fn = torch.nn.SiLU()
         elif active_fn in ["relu", "ReLU"]:
             self.act_fn = torch.nn.ReLU()
         elif active_fn in ["identity", None]:
-            self.act_fn = torch.nn.Identity() 
-        
+            self.act_fn = torch.nn.Identity()
+
         self.cutoff = cutoff
         self.regress_forces = regress_forces
         self.compute_stress = compute_stress
@@ -69,12 +91,16 @@ class RACE(torch.nn.Module):
         hidden_irreps = hidden_irreps.sort().irreps
         self.hidden_irreps = hidden_irreps
         self.nlayers = nlayers
-        
+        interaction_cls = _resolve_race_interaction_block(interaction_block)
+
         ## 1) Embedding
         # Node embedding
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
         node_feats_irreps = o3.Irreps([(features_dim, (0, 1))])
-        x_node_feats_irreps = node_feats_irreps
+        if interaction_block in ["slow"]:
+            x_node_feats_irreps = node_feats_irreps
+        else:
+            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])
 
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
@@ -93,15 +119,15 @@ class RACE(torch.nn.Module):
         # Edge embedding
         edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell) # interaction_irreps in JAX
-        num_features = hidden_irreps.count(o3.Irrep(0, 1))
-        interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
+        #num_features = hidden_irreps.count(o3.Irrep(0, 1))
+        #interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
         self.spherical_harmonics = o3.SphericalHarmonics(sh_irreps, 
                                                          normalize=True,
                                                          normalization="component")
         
         ## 2) Interaction layer  # RealAgnosticInteractionBlock
         self.linear_x = Linear(
-            x_node_feats_irreps,
+            node_feats_irreps,
             x_node_feats_irreps,
             internal_weights=True,
             shared_weights=True,
@@ -122,7 +148,7 @@ class RACE(torch.nn.Module):
                 node_feats_irreps = hidden_irreps
                 target_irreps = hidden_irreps
 
-            inter = ConcatenateRaceInteractionBlock(
+            inter = interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
                 node_feats_irreps=node_feats_irreps,
                 edge_attrs_irreps=sh_irreps,
@@ -132,6 +158,8 @@ class RACE(torch.nn.Module):
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
+                oeq_config=oeq_config,
+                l_separated_layer_norm=l_separated_layer_norm,
             )
             self.interactions.append(inter)
 
@@ -150,6 +178,7 @@ class RACE(torch.nn.Module):
                 gate=gate,
                 irrep_out=output_irreps,
                 cueq_config=cueq_config,
+                biases=True
             )
             self.readouts.append(readout) # [n_nodes, output_irreps.count(o3.Irrep(0, 1))]
 
@@ -423,9 +452,12 @@ class RACEUnified(torch.nn.Module):
         MLP_irreps: e3nn.o3.Irreps = o3.Irreps("64x0e"),
         gate: Optional[Callable] = torch.nn.SiLU(),
         cueq_config: Optional[Dict[str, Any]] = None,
+        oeq_config: Optional[Dict[str, Any]] = None,
         regress_forces: str = "direct",
         compute_stress: bool = True,
         heads: Optional[List[str]] = None,  # ⭐ Multihead support
+        l_separated_layer_norm: bool = False,
+        interaction_block: str = "slow",
     ):
         super().__init__()
     
@@ -451,7 +483,8 @@ class RACEUnified(torch.nn.Module):
         hidden_irreps = hidden_irreps.sort().irreps
         self.hidden_irreps = hidden_irreps
         self.nlayers = nlayers
-        
+        interaction_cls = _resolve_race_interaction_block(interaction_block)
+
         # Initialize criterion attributes (compatibility with RACE)
         self.criterion = None
         self.criterion_tag = None
@@ -460,8 +493,11 @@ class RACEUnified(torch.nn.Module):
         ## 1) Embedding
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
         node_feats_irreps = o3.Irreps([(features_dim, (0, 1))])
-        x_node_feats_irreps = node_feats_irreps
-
+        if interaction_block in ["slow"]:
+            x_node_feats_irreps = node_feats_irreps
+        else:
+            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])
+        
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
             irreps_out=node_feats_irreps,
@@ -478,8 +514,8 @@ class RACEUnified(torch.nn.Module):
         
         edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
-        num_features = hidden_irreps.count(o3.Irrep(0, 1))
-        interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
+        #num_features = hidden_irreps.count(o3.Irrep(0, 1))
+        #interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
         self.spherical_harmonics = o3.SphericalHarmonics(
             sh_irreps, 
             normalize=True,
@@ -488,7 +524,7 @@ class RACEUnified(torch.nn.Module):
         
         ## 2) Interaction layers
         self.linear_x = Linear(
-            x_node_feats_irreps,
+            node_feats_irreps,
             x_node_feats_irreps,
             internal_weights=True,
             shared_weights=True,
@@ -520,7 +556,7 @@ class RACEUnified(torch.nn.Module):
                 node_feats_irreps = hidden_irreps
                 target_irreps = hidden_irreps
 
-            inter = ConcatenateRaceInteractionBlock(
+            inter = interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
                 node_feats_irreps=node_feats_irreps,
                 edge_attrs_irreps=sh_irreps,
@@ -530,6 +566,8 @@ class RACEUnified(torch.nn.Module):
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
+                oeq_config=oeq_config,
+                l_separated_layer_norm=l_separated_layer_norm,
             )
             self.interactions.append(inter)
 
@@ -554,6 +592,7 @@ class RACEUnified(torch.nn.Module):
                         irrep_out=multihead_output_irreps,
                         num_heads=self.num_heads,
                         cueq_config=cueq_config,
+                        biases=True,
                     )
                 else:
                     readout = LinearReadoutBlock(
@@ -569,6 +608,7 @@ class RACEUnified(torch.nn.Module):
                     gate=gate,
                     irrep_out=self.output_irreps,
                     cueq_config=cueq_config,
+                    biases=True,
                 )
             self.readouts.append(readout)
 
@@ -866,10 +906,11 @@ class MACE(torch.nn.Module):
         MLP_irreps: e3nn.o3.Irreps = o3.Irreps("16x0e"),
         gate: Optional[Callable] = torch.nn.SiLU(),
         cueq_config: Optional[Dict[str, Any]] = None,
+        oeq_config: Optional[Dict[str, Any]] = None,
         regress_forces: str = "direct",
     ):
         super().__init__()
-    
+
         if active_fn in ["swish", "silu", "SiLU"]:
             self.act_fn = torch.nn.SiLU()
         elif active_fn in ["relu", "ReLU"]:
@@ -919,7 +960,7 @@ class MACE(torch.nn.Module):
                                                          normalize=True,
                                                          normalization="component")
         
-        ## 2) Interaction layer 
+        ## 2) Interaction layer
         inter = AgnosticResidualNonlinearInteractionBlock(
             node_attrs_irreps=node_attr_irreps,
             node_feats_irreps=node_feats_irreps,
@@ -930,6 +971,7 @@ class MACE(torch.nn.Module):
             avg_num_neighbors=avg_num_neighbors,
             radial_MLP=radial_MLP,
             cueq_config=cueq_config,
+            oeq_config=oeq_config,
         )
 
         # Use the appropriate self connection at the first layer for proper E0
@@ -975,6 +1017,7 @@ class MACE(torch.nn.Module):
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
                 cueq_config=cueq_config,
+                oeq_config=oeq_config,
             )
             self.interactions.append(inter)
             prod = EquivariantProductBasisBlock(
@@ -995,6 +1038,7 @@ class MACE(torch.nn.Module):
                         output_irreps, # o3.Irreps(f"{len(heads)}x0e")
                         len(heads),
                         cueq_config,
+                        biases=True,
                     )
                 ) # [n_nodes, len(heads)]
             else:

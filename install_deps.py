@@ -63,15 +63,20 @@ def main():
 
     print(f"Installing from: {find_links}")
 
-    # Install packages with the appropriate find-links
+    # The PyG C++ extensions are only needed by the optional group_averaging
+    # module (torch_scatter is imported in group_averaging/model/blocks.py and
+    # torch_cluster is needed by torch_geometric.nn.radius_graph in
+    # group_averaging/utils/ga_utils.py). The core BAM-torch path uses the
+    # pure-PyTorch scatter in bam_torch.utils.scatter and does not require any
+    # of these extensions. Run this script only if you intend to use
+    # `pip install -e ".[group_averaging]"`.
     try:
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "--find-links", find_links,
-            "pyg_lib", "torch_scatter", "torch_sparse",
-            "torch_cluster", "torch_spline_conv"
+            "torch_scatter", "torch_cluster"
         ])
-        print("Successfully installed pyg_lib and dependencies")
+        print("Successfully installed torch_scatter and torch_cluster")
     except subprocess.CalledProcessError as e:
         print(f"Error installing packages: {e}")
         print(f"You may need to manually install from: {find_links}")

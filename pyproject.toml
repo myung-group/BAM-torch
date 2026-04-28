@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "BAM-torch"
-version = "0.1.0.dev0"
+version = "0.2.1"
 description = "uncertainty-aware atomistic simulations at scale"
 authors = [
     {name = "Myung Group", email = "myung.group@gmail.com"}
@@ -19,32 +19,30 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.11"
 
-# XXX: torch, pyg_lib, torch_*
-# should have all been installed beforehand via --find-links <URL>
-# (either manually or with install_deps.py)
-# instead of having pip automatically install them based on this TOML file.
-# Those packages are only listed below as checks.
 dependencies = [
     "numpy",
     "scipy",
     "ase",
     "matscipy",
     "torch>=2.5.1",
-    "pyg_lib",
-    "torch_scatter",
-    "torch_sparse",
-    "torch_cluster",
-    "torch_spline_conv",
     "e3nn",
     "pytorch_warmup",
     "torch_geometric",
     "torch-ema"
 ]
 
+# The PyG C++ extensions (torch_scatter, torch_cluster, ...) are *not* required
+# by the core training/inference path — bam_torch.utils.scatter is a pure-PyTorch
+# scatter and torch_geometric's Data/Batch/DataLoader work without them.
+# They are only needed by the optional group_averaging module
+# (torch_scatter via group_averaging/model/blocks.py, torch_cluster via the
+# radius_graph call in group_averaging/utils/ga_utils.py). Install them via
+# install_deps.py against the matching PyG wheel index, then `pip install -e ".[group_averaging]"`.
 [project.optional-dependencies]
 cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12"]
+oeq = ["openequivariance"]
 laplace = ["laplace-torch", "torchmetrics", "curvlinops-for-pytorch==2.0.1"]
-group_averaging = ["mendeleev", "pandas"]
+group_averaging = ["mendeleev", "pandas", "torch_scatter", "torch_cluster"]
 
 [project.urls]
 Homepage = "https://github.com/myung-group/BAM-torch"

@@ -11,6 +11,7 @@ import os
 import sys
 import random
 import atexit
+import inspect
 import pprint
 import numpy as np
 from contextlib import nullcontext
@@ -20,7 +21,12 @@ from time import time
 from bam_torch.utils.logger import Logger
 from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
-from bam_torch.model.wrapper_ops import CuEquivarianceConfig
+from bam_torch.model.wrapper_ops import (
+    CuEquivarianceConfig,
+    OEQConfig,
+    CUET_AVAILABLE,
+    OEQ_AVAILABLE,
+)
 from bam_torch.model import MODEL_REGISTRY
 from .loss import RMSELoss, l2_regularization
 
@@ -86,61 +92,67 @@ class BaseTrainer:
             if self.ddp:
                 torch.distributed.barrier()
 
-            # Validate and record
-            param_context = (
-                self.ema.average_parameters() if self.ema is not None else nullcontext()
-            )
-            with param_context:
-                if (epoch+1)%self.log_interval == 0:
+            if (epoch+1)%self.log_interval == 0:
+                # Evaluate with EMA-averaged parameters
+                param_context = (
+                    self.ema.average_parameters() if self.ema is not None else nullcontext()
+                )
+                with param_context:
                     epoch_loss_valid = self.train_one_epoch(mode='valid')
                     if self.ddp:
                         torch.distributed.barrier()
 
-                    if self.rank == 0:
-                        # Update check point 
-                        if epoch_loss_valid['loss'] < self.loss_test_min:
-                            self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
-                            self.loss_test_min = epoch_loss_valid['loss']
-                            self.l_ckpt_saved = False
+                # Snapshot/log with live (non-EMA) parameters
+                if self.rank == 0:
+                    # Update check point
+                    if epoch_loss_valid['loss'] < self.loss_test_min:
+                        self.update_check_point(epoch, epoch_loss_train, epoch_loss_valid)
+                        self.loss_test_min = epoch_loss_valid['loss']
+                        self.l_ckpt_saved = False
 
-                        # Print epoch loss
-                        self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
+                    # Print epoch loss
+                    self.print_logger(epoch, epoch_loss_train, epoch_loss_valid)
 
-                        # Free GPU memory
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                        
-                    # Update scheduler (learning rate)
-                    metrics = None
-                    if self.json_data["scheduler"]["scheduler"] == "ReduceLROnPlateau":
-                        metrics = epoch_loss_valid['loss']
-                    self.scheduler.step(metrics, epoch)
-                
-                # Save check point
-                if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
-                    self.ckpt['train_scale_shift'] = {
-                        k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
-                            for k, v in self.ckpt['train_scale_shift'].items()
-                    }
-                    self.ckpt['valid_scale_shift'] = {
-                        k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
-                            for k, v in self.ckpt['valid_scale_shift'].items()
-                    }
-                    self.ckpt['valid_scale_shift_origin'] = torch.tensor(
-                        self.ckpt['valid_scale_shift_origin']
-                    ).mean()
-                    torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
-                    # torch.save(self.model, 'model.pt')
-                    self.l_ckpt_saved = True
+                    # Free GPU memory
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+                # Update scheduler (learning rate)
+                metrics = None
+                scheduler_cfg = self.json_data.get("scheduler", {})
+                if isinstance(scheduler_cfg, dict) \
+                        and scheduler_cfg.get("scheduler") == "ReduceLROnPlateau":
+                    metrics = epoch_loss_valid['loss']
+                self.scheduler.step(metrics, epoch)
+
+            # Save check point
+            if (epoch+1)%self.json_data['NN']['nsave'] == 0 and not self.l_ckpt_saved:
+                self.ckpt['train_scale_shift'] = {
+                    k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
+                        for k, v in self.ckpt['train_scale_shift'].items()
+                }
+                self.ckpt['valid_scale_shift'] = {
+                    k: (torch.stack(v).mean() if len(v) > 0 else torch.tensor(0.0, device=self.device))
+                        for k, v in self.ckpt['valid_scale_shift'].items()
+                }
+                self.ckpt['valid_scale_shift_origin'] = torch.tensor(
+                    self.ckpt['valid_scale_shift_origin']
+                ).mean()
+                torch.save(self.ckpt, self.json_data['NN']['fname_pkl'])
+                self.l_ckpt_saved = True
 
     def initial_test(self):
-        """Run a preliminary test epoch 
+        """Run a preliminary test epoch
         and record the initial reference loss (loss_test_min).
         """
-        epoch_loss_test = self.train_one_epoch(mode='test')
-        if self.ddp:
-            torch.distributed.barrier()
-        self.loss_test_min = epoch_loss_test['loss']
+        param_context = (
+            self.ema.average_parameters() if self.ema is not None else nullcontext()
+        )
+        with param_context:
+            epoch_loss_test = self.train_one_epoch(mode='test')
+            if self.ddp:
+                torch.distributed.barrier()
+            self.loss_test_min = epoch_loss_test['loss']
 
     def train_one_epoch(self, mode='train', data_loader=None):
         if mode == 'train':
@@ -596,32 +608,35 @@ class BaseTrainer:
         elif regress_forces == False:
             regress_forces = "false"
         
-        cueq_config = model_config.get('cueq_config')  # true or false
-        if cueq_config == None or cueq_config:
-            try:
-                import cuequivariance as cue
-                import cuequivariance_torch as cuet
-                CUET_AVAILABLE = True
-            except ImportError:
-                CUET_AVAILABLE = False
-            if CUET_AVAILABLE:
-                cueq_config = CuEquivarianceConfig(
-                    enabled=True,
-                    layout="ir_mul",
-                    group="O3_e3nn",
-                    optimize_all=True,
-                )
-                self.msg += f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m\n'
+        # Equivariant backend selection: cueq -> oeq -> e3nn fallback.
+        cueq_request = model_config.get('cueq_config')  # bool or None
+        oeq_request = model_config.get('oeq_config')    # bool or None
+        cueq_config = None
+        oeq_config = None
+
+        if (cueq_request is None or cueq_request) and CUET_AVAILABLE:
+            cueq_config = CuEquivarianceConfig(
+                enabled=True,
+                layout="ir_mul",
+                group="O3_e3nn",
+                optimize_all=True,
+            )
+            self.msg += f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m\n'
+        elif oeq_request and OEQ_AVAILABLE:
+            oeq_config = OEQConfig(
+                enabled=True,
+                optimize_all=True,
+            )
+            self.msg += f'\nequiv. lib.:\n\033[33m -- OpenEquivariance\033[0m\n'
         else:
-            cueq_config = None
             self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
         
         model_name = model_config["model"].lower()
         model_cls = MODEL_REGISTRY.get(model_name)
         if model_cls is None:
-            raise ValueError(f"Unknown model type: {cfg['model']}")
+            raise ValueError(f"Unknown model type: {model_name}")
 
-        model = model_cls(
+        model_kwargs = dict(
             cutoff=cutoff,
             avg_num_neighbors=avg_num_neighbors,
             num_species=num_species,
@@ -633,8 +648,29 @@ class BaseTrainer:
             output_irreps=output_irreps,
             active_fn=active_fn,
             regress_forces=regress_forces,
-            cueq_config=cueq_config
+            cueq_config=cueq_config,
         )
+        model_params = inspect.signature(model_cls).parameters
+        # Only forward if the chosen model implements separated layer-norm
+        if 'l_separated_layer_norm' in model_params:
+            model_kwargs['l_separated_layer_norm'] = model_config.get(
+                'l_separated_layer_norm', False
+            )
+        # Only forward oeq_config when the model accepts it
+        if 'oeq_config' in model_params:
+            model_kwargs['oeq_config'] = oeq_config
+        # Only forward interaction_block when the model accepts it.
+        # Note: only "fast" supports OEQ; "slow" runs on e3nn.
+        if 'interaction_block' in model_params:
+            interaction_block = model_config.get(
+                'interaction_block', 'slow'
+            )
+            model_kwargs['interaction_block'] = interaction_block
+            self.msg += (
+                f'\ninteraction block:\n'
+                f'\033[33m -- {interaction_block}\033[0m\n'
+            )
+        model = model_cls(**model_kwargs)
         return model
 
     def configure_optimizer(self):
@@ -710,11 +746,16 @@ class BaseTrainer:
         else:
             ema = None
         model_config = self.json_data['NN']
-        restart = model_config.get('restart') 
+        restart = model_config.get('restart')
         evaluate_config = self.json_data['predict']
         evaluate = evaluate_config.get('evaluate_tag')  # True or False(None)
-        if restart or evaluate:
+        if (restart or evaluate) \
+                and ema is not None \
+                and self.model_ckpt is not None \
+                and self.model_ckpt.get('ema_state') is not None:
             ema.load_state_dict(self.model_ckpt['ema_state'])
+            if evaluate:
+                ema.copy_to(self.model.parameters())
         return ema
 
     def get_params(self):
