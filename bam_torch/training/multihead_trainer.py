@@ -41,16 +41,16 @@ except ImportError:
 class MultiheadTrainer(BaseTrainer):
     """
     N-Head Multihead Finetuning Trainer
-    
+
     Inherits from BaseTrainer and overrides:
     - Model creation (uses RACEMultihead)
     - Data loading (multiple datasets with head indices)
     - Loss computation (per-head weighted loss)
     - Checkpoint handling (foundation model loading)
-    
+
     Compatible with GitHub latest BaseTrainer (setup() pattern)
     """
-    
+
     def __init__(self, json_data: Dict[str, Any], rank: int = 0, world_size: int = 1):
         # Multihead config pre-processing (needed before super().__init__)
         self.multihead_config = json_data.get("multihead", {})
@@ -81,7 +81,7 @@ class MultiheadTrainer(BaseTrainer):
         self._setup_batch_logs(json_data, rank)
 
         super().__init__(json_data, rank, world_size)
-    
+
     def _extract_foundation_config(self, json_data: Dict[str, Any], rank: int) -> Dict[str, Any]:
         """Return the input.json of the foundation model
         """
@@ -90,18 +90,18 @@ class MultiheadTrainer(BaseTrainer):
             raise ValueError("foundation_model must be specified in NN config for multihead finetuning")
         if not os.path.exists(foundation_path):
             raise FileNotFoundError(f"Foundation model not found: {foundation_path}")
-        
+
         foundation_ckpt = torch.load(foundation_path, map_location='cpu', weights_only=False)
         foundation_json = foundation_ckpt.get('input.json', {})
-        
+
         if rank == 0 and foundation_json:
             print(f"✓ Loaded foundation config from {foundation_path}")
-        
+
         return foundation_json
-    
+
     def setup(self):
         """Configure all core training components - Multihead version.
-        
+
         Overrides BaseTrainer.setup() to:
         1. Load foundation model after model creation
         2. Use multihead-specific dataloader
@@ -110,11 +110,11 @@ class MultiheadTrainer(BaseTrainer):
         self.set_random_seed()  # Reproducibility
         self.device = self.configure_device()
         self.model, self.n_params, _, self.start_epoch = self.configure_model()
-        
+
         # Load the foundation model (if not restart)
         if not self.json_data['NN'].get('restart', False):
             self._load_foundation_model()
-        
+
         self.optimizer = self.configure_optimizer()
         self.train_loader, self.valid_loader, self.uniq_element, self.enr_avg_per_element \
                        = self.configure_dataloader()
@@ -123,7 +123,7 @@ class MultiheadTrainer(BaseTrainer):
         self.log_config, self.log_interval, self.logger = self.configure_logger()
         self.loss_dict, self.ckpt = self.configure_checkpoint()
         self.ema = self.configure_exponential_moving_average()
-    
+
     def _setup_batch_logs(self, json_data: Dict[str, Any], rank: int):
         """Set Batch logs directory and log-file
         """
@@ -166,22 +166,22 @@ class MultiheadTrainer(BaseTrainer):
 
         if rank == 0:
             print(f"✓ Batch logs directory created: {batch_log_root}")
-    
+
     def _log_batch_size(self, mode: str, batch_idx: int, data, epoch: int = 0):
         """Report the batch size information to log-file
         """
         if not hasattr(self, 'batch_size_log') or self.batch_size_log.closed:
             return
-        
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # The number of graph in the batch
         num_graphs = data.ptr.numel() - 1 if hasattr(data, 'ptr') else 1
-        
+
         # The total number of nodes and edges
         total_nodes = data.num_nodes if hasattr(data, 'num_nodes') else len(data.positions)
         total_edges = data.edge_index.shape[1] if hasattr(data, 'edge_index') else 0
-        
+
         # Head configuration
         if hasattr(data, 'head'):
             head_counts = {}
@@ -191,7 +191,7 @@ class MultiheadTrainer(BaseTrainer):
             head_str = str(head_counts)
         else:
             head_str = "N/A"
-        
+
         log_line = f"{timestamp},{epoch},{mode},batch,{batch_idx},{num_graphs},{total_nodes},{total_edges},{head_str}\n"
         self.batch_size_log.write(log_line)
         self.batch_size_log.flush()
@@ -202,7 +202,7 @@ class MultiheadTrainer(BaseTrainer):
         Prioritize the foundation model configuration to ensure shape compatibility
         """
         model_config = self.json_data
-        
+
         # Use the foundation configuration first if available
         if self.foundation_config:
             fc = self.foundation_config
@@ -212,7 +212,7 @@ class MultiheadTrainer(BaseTrainer):
                 print(f"  - features_dim: {fc.get('features_dim', 'N/A')}")
                 print(f"  - nlayers: {fc.get('nlayers', 'N/A')}")
                 print(f"  - cutoff: {fc.get('cutoff', 'N/A')}")
-            
+
             # Load from the foundation config
             hidden_irreps_str = fc.get('hidden_channels', model_config['hidden_channels'])
             hidden_irreps = o3.Irreps(hidden_irreps_str)
@@ -229,14 +229,14 @@ class MultiheadTrainer(BaseTrainer):
             cutoff = model_config['cutoff']
             num_basis_func = model_config['num_radial_basis']
             max_ell = model_config['max_ell']
-        
+
         # Load the remaining (dataset-related) settings from input.json
         avg_num_neighbors = model_config['avg_num_neighbors']
         num_species = model_config['num_species']
-        
+
         output_irreps = model_config.get('output_channels', "1x0e")
         active_fn = model_config.get('active_fn', "identity")
-        
+
         regress_forces = model_config.get('regress_forces')
         if regress_forces == True:
             regress_forces = "autograd"
@@ -244,10 +244,10 @@ class MultiheadTrainer(BaseTrainer):
             regress_forces = "false"
 
         mlp_irreps = o3.Irreps(f"{features_dim}x0e")
-        
+
         # Generate the RACEUnified model (Single-head + Multihead)
         from bam_torch.model.models import RACEUnified
-        
+
         model = RACEUnified(
             cutoff=cutoff,
             avg_num_neighbors=avg_num_neighbors,
@@ -267,15 +267,15 @@ class MultiheadTrainer(BaseTrainer):
             cueq_config=None,
             l_separated_layer_norm=model_config.get('l_separated_layer_norm', False),
         )
-        
+
         self.msg += f'\n\033[33m -- Multihead model with {self.num_heads} heads: {self.heads}\033[0m\n'
-        
+
         return model
-    
+
     def _load_foundation_enr_avg(self):
         """
         Load enr_avg_per_element from the foundation model
-        
+
         Returns:
             enr_avg_per_element: {species_index: energy}
             uniq_element: {atomic_number: species_index}
@@ -285,61 +285,61 @@ class MultiheadTrainer(BaseTrainer):
             if self.rank == 0:
                 print("⚠️ No foundation model specified, cannot load foundation enr_avg_per_element")
             return None, None
-        
+
         try:
             foundation_ckpt = torch.load(foundation_path, map_location='cpu', weights_only=False)
-            
+
             enr_avg_per_element = foundation_ckpt.get('enr_avg_per_element')
             uniq_element = foundation_ckpt.get('uniq_element')
-            
+
             if enr_avg_per_element is None or uniq_element is None:
                 if self.rank == 0:
                     print("⚠️ Foundation model does not contain enr_avg_per_element or uniq_element")
                 return None, None
-            
+
             if self.rank == 0:
                 print(f"✓ Loaded foundation enr_avg_per_element ({len(enr_avg_per_element)} species)")
-            
+
             return enr_avg_per_element, uniq_element
-            
+
         except Exception as e:
             if self.rank == 0:
                 print(f"⚠️ Failed to load foundation enr_avg_per_element: {e}")
             return None, None
-    
+
     def _load_foundation_model(self):
         """Load foundation model weights and extend the readout layers
         """
         foundation_path = self.json_data['NN']['foundation_model']
-        
+
         if self.rank == 0:
             print(f"\n{'='*80}")
             print(f"Loading Foundation model: {foundation_path}")
             print(f"{'='*80}\n")
-        
+
         # BAM-torch pkl format: {'params': state_dict, ...}
         foundation_ckpt = torch.load(foundation_path, map_location='cpu', weights_only=False)
         foundation_state = foundation_ckpt['params']
-        
+
         # Refer present model
         model = self.model.module if self.ddp else self.model
-        
+
         self._load_from_state_dict(model, foundation_state, self.num_heads)
-    
-    
+
+
     def _load_from_state_dict(self, model, foundation_state, num_heads):
         """
-        Fallback: load parameters from state_dict 
-        
+        Fallback: load parameters from state_dict
+
         Use when only the state_dict is available (no model object)
         Reference: https://github.com/ACEsuit/mace/blob/main/mace/tools/finetuning_utils.py
-        
+
         Parameters structure of the foundation model's readout block:
         - readouts.X.linear_1.weight: [hidden_dim_0e * MLP_dim] = [128 * 64] = [8192]
         - readouts.X.linear_1.output_mask: [MLP_dim] = [64]
         - readouts.X.linear_2.weight: [MLP_dim * output_dim] = [64 * 1] = [64]
         - readouts.X.linear_2.output_mask: [output_dim] = [1]
-        
+
         Target model (num_heads=2):
         - readouts.X.linear_1.weight: [hidden_dim_0e * MLP_dim * num_heads] = [128 * 64 * 2] = [16384]
         - readouts.X.linear_1.output_mask: [MLP_dim * num_heads] = [128]
@@ -348,42 +348,42 @@ class MultiheadTrainer(BaseTrainer):
         """
         if self.rank == 0:
             print("Loading from state_dict (fallback method)...")
-        
+
         current_state = model.state_dict()
         loaded_count = 0
         readout_expanded = 0
         skipped_readout = []
         # Extract MLP_dim and hidden_dim_0e from the foundation NonLinearReadoutBlock
-        mlp_dim = next(p.numel() for n, p in foundation_state.items() 
+        mlp_dim = next(p.numel() for n, p in foundation_state.items()
                        if 'linear_2.weight' in n and p.numel() > 0)
-        linear_1_numel = next(p.numel() for n, p in foundation_state.items() 
+        linear_1_numel = next(p.numel() for n, p in foundation_state.items()
                               if 'linear_1.weight' in n and p.numel() > 0)
         hidden_dim_0e = linear_1_numel // mlp_dim
-        
+
         target_output_dim = num_heads
-        
+
         if self.rank == 0:
             print(f"  - hidden_dim_0e: {hidden_dim_0e} (from linear_1.weight / MLP_dim)")
             print(f"  - MLP_dim: {mlp_dim} (from linear_2.weight)")
             print(f"  - num_heads: {num_heads}")
-        
+
         for name, param in foundation_state.items():
             clean_name = name[7:] if name.startswith('module.') else name
-            
+
             if clean_name not in current_state:
                 continue
-            
+
             target_param = current_state[clean_name]
-            
-            # Readout parameters require extension 
+
+            # Readout parameters require extension
             if 'readouts' in clean_name:
                 if param.numel() == 0:
                     # Empty parameter (no bias)
                     continue
-                
+
                 expanded = None
                 scale_factor = 1.0
-                
+
                 if 'linear_1.weight' in clean_name:
                     # Foundation: [hidden_0e * MLP_dim] = [8192]
                     # Target: [hidden_0e * MLP_dim * num_heads] = [16384]
@@ -393,18 +393,18 @@ class MultiheadTrainer(BaseTrainer):
                     else:
                         # Fallback
                         expanded = param.repeat(num_heads)
-                        
+
                 elif 'linear_1.output_mask' in clean_name:
                     # Foundation: [MLP_dim] = [64]
                     # Target: [MLP_dim * num_heads] = [128]
                     expanded = param.repeat(num_heads)
-                    
+
                 elif 'linear_1.bias' in clean_name:
                     # Foundation: [] or [MLP_dim]
                     # Target: [MLP_dim * num_heads]
                     if param.numel() > 0:
                         expanded = param.repeat(num_heads)
-                    
+
                 elif 'linear_2.weight' in clean_name:
                     # Foundation: [MLP_dim * 1] = [64]
                     # Target: [MLP_dim * num_heads * num_heads] = [256]
@@ -417,18 +417,18 @@ class MultiheadTrainer(BaseTrainer):
                         expanded = expanded / scale_factor
                     else:
                         expanded = param.repeat(num_heads * num_heads)
-                        
+
                 elif 'linear_2.output_mask' in clean_name:
                     # Foundation: [1]
                     # Target: [num_heads] = [2]
                     expanded = param.repeat(num_heads)
-                    
+
                 elif 'linear_2.bias' in clean_name:
                     # Foundation: [] or [1]
                     # Target: [num_heads]
                     if param.numel() > 0:
                         expanded = param.repeat(num_heads)
-                    
+
                 elif 'linear.weight' in clean_name:
                     # LinearReadoutBlock: [hidden_dim_0e * output_dim]
                     if param.numel() % hidden_dim_0e == 0:
@@ -440,10 +440,10 @@ class MultiheadTrainer(BaseTrainer):
                             expanded = expanded / scale_factor
                     else:
                         expanded = param.repeat(num_heads)
-                
+
                 elif 'linear.output_mask' in clean_name:
                     expanded = param.repeat(num_heads)
-                
+
                 if expanded is not None:
                     if expanded.shape == target_param.shape:
                         current_state[clean_name].copy_(expanded)
@@ -465,9 +465,9 @@ class MultiheadTrainer(BaseTrainer):
                 if target_param.shape == param.shape:
                     current_state[clean_name].copy_(param)
                     loaded_count += 1
-        
+
         model.load_state_dict(current_state, strict=False)
-        
+
         if self.rank == 0:
             print(f"✓ Foundation model loaded")
             print(f"  - Loaded {loaded_count} parameters")
@@ -476,7 +476,7 @@ class MultiheadTrainer(BaseTrainer):
                 print(f"  - Readout skipped (shape mismatch): {len(skipped_readout)}")
                 for s in skipped_readout[:5]:
                     print(f"    {s}")
-    
+
     def configure_dataloader(self):
         """
         Override: Configure multihead data loaders (per-head + mixed).
@@ -514,23 +514,23 @@ class MultiheadTrainer(BaseTrainer):
         self.per_head_enr_avg = per_head_enr_avg
 
         return train_loader, valid_loader, uniq_element, enr_avg_per_element
-    
+
     def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN", {})
         loss_config = nn_config.get("loss_config", {})
-        
+
         if not loss_config:
             if self.json_data.get("regress_forces"):
                 loss_config = {'energy_loss': 'huber', 'force_loss': 'huber', 'stress_loss': 'huber'}
             else:
                 loss_config = {'energy_loss': 'huber'}
-        
+
         s_lambda = nn_config.get("str_lambda", 0)
         if loss_config.get('stress_loss') is None and s_lambda:
             loss_config['stress_loss'] = 'mse'
-        
+
         huber_delta = loss_config.get('huber_delta', 0.01)
-        
+
         loss_fn = {}
         for loss_key in ['energy_loss', 'force_loss', 'stress_loss']:
             loss_name = loss_config.get(loss_key)
@@ -544,9 +544,9 @@ class MultiheadTrainer(BaseTrainer):
                 loss_fn[loss_key] = HuberLoss(huber_delta=huber_delta)
             else:
                 loss_fn[loss_key] = None
-        
+
         return loss_fn, loss_config
-    
+
     def compute_loss(self, preds, data):
         """
         Override: compute weighted loss per head
@@ -556,9 +556,9 @@ class MultiheadTrainer(BaseTrainer):
         f_lambda = lambda_config.get('frc_lambda', 1.0)
         s_lambda = lambda_config.get('str_lambda', 1.0)
         lambd = lambda_config.get('l2_lambda', 0)
-        
+
         loss = {"loss": []}
-        
+
         # Load heads and weights from the config
         if 'config_head' in data:
             config_heads = data['config_head'].flatten()
@@ -580,17 +580,17 @@ class MultiheadTrainer(BaseTrainer):
                 config_heads = data['head'].flatten()
         else:
             config_heads = torch.zeros(preds['energy'].shape[0], dtype=torch.long, device=preds['energy'].device)
-        
+
         # Load weight
         if 'weight' in data:
             config_weights = data['weight'].flatten()
         else:
             config_weights = torch.ones_like(config_heads, dtype=torch.float)
-        
+
         # Energy loss - HuberLoss with num_atoms normalization (like mp_trainer_phg)
         energy_target = data["energy"].flatten()
         energy_pred = preds["energy"].flatten()
-        
+
         # Per-sample loss using HuberLoss (matching mp_trainer_phg)
         if self.loss_fn.get("energy_loss") is not None:
             loss["loss_e"] = self.loss_fn["energy_loss"](
@@ -600,7 +600,7 @@ class MultiheadTrainer(BaseTrainer):
                 num_atoms=data["num_nodes"]
             )
             loss["loss"].append(e_lambda * loss["loss_e"])
-        
+
         # Force loss - HuberLoss (matching mp_trainer_phg)
         if "forces" in preds and self.loss_fn.get('force_loss') is not None:
             force_target = data["forces"].flatten()
@@ -611,7 +611,7 @@ class MultiheadTrainer(BaseTrainer):
                 tag="forces"
             )
             loss["loss"].append(f_lambda * loss["loss_f"])
-        
+
         if "stress" in preds and preds["stress"] is not None and self.loss_fn.get('stress_loss') is not None:
             stress_target = data.get("stress")
             if stress_target is not None:
@@ -623,16 +623,16 @@ class MultiheadTrainer(BaseTrainer):
                     tag="stress"
                 )
                 loss["loss"].append(s_lambda * loss["loss_s"])
-        
+
         # L2 regularization
         if lambd:
             params = self.model.parameters()
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
-        
+
         # Total loss
         loss["loss"] = sum(loss["loss"])
-        
+
         # Per-head loss tracking (for logging only - using simple MSE for monitoring)
         loss["head_losses"] = {}
         unique_heads = torch.unique(config_heads)
@@ -650,11 +650,11 @@ class MultiheadTrainer(BaseTrainer):
                     head_energy_loss = ((head_energy_diff / head_num_atoms) ** 2).mean()
                 else:
                     head_energy_loss = (head_energy_diff ** 2).mean()
-                
+
                 head_loss_dict = {
                     "loss_e": head_energy_loss.detach()
                 }
-                
+
                 # Compute force loss for each head
                 head_force_loss = None
                 if "forces" in preds and self.loss_fn.get('force_loss') is not None:
@@ -666,23 +666,23 @@ class MultiheadTrainer(BaseTrainer):
                             force_diff = preds["forces"][atom_head_mask] - data["forces"][atom_head_mask]
                             head_force_loss = (force_diff ** 2).sum(dim=-1).mean()
                             head_loss_dict["loss_f"] = head_force_loss.detach()
-                
+
                 # Compute total loss per head (energy + force)
                 head_total_loss = e_lambda * head_energy_loss
                 if head_force_loss is not None:
                     head_total_loss = head_total_loss + f_lambda * head_force_loss
                 head_loss_dict["loss"] = head_total_loss.detach()
-                
+
                 loss["head_losses"][head_idx] = head_loss_dict
-        
+
         return loss
-    
+
     def scale_shift(self, preds, data, mode):
         """Override: apply scale_shift per head (GitHub BaseTrainer compatible).
         """
         energy_target = data["energy"].flatten()
         energy_predict = preds["energy"].flatten()
-        
+
         # Get the corresponding head per configuration
         if 'config_head' in data:
             config_heads = data['config_head'].flatten()
@@ -693,23 +693,23 @@ class MultiheadTrainer(BaseTrainer):
                 config_heads = torch.zeros(batch_size, dtype=torch.long, device=energy_target.device)
             else:
                 config_heads = torch.zeros_like(energy_target, dtype=torch.long)
-        
+
         unique_heads = torch.unique(config_heads)
-        
+
         for head_val in unique_heads:
             head_idx = int(head_val.item())
             head_mask = (config_heads == head_idx)
-            
+
             if not head_mask.any():
                 continue
-            
+
             # Compute shift per head
             head_target = energy_target[head_mask]
             head_predict = energy_predict[head_mask]
-            
+
             shift_enr = head_target.mean() - head_predict.mean()
             preds["energy"][head_mask] = head_predict + shift_enr
-            
+
             # Record scale_shift per-head
             if mode == 'train':
                 self.ckpt['train_scale_shift'].append(shift_enr.detach().cpu())
@@ -721,9 +721,9 @@ class MultiheadTrainer(BaseTrainer):
                 self.ckpt['per_head_scale_shift'][head_idx].append(shift_enr.detach().cpu().item())
             elif mode == 'valid':
                 self.ckpt['valid_scale_shift'].append(shift_enr.detach().cpu())
-        
+
         return preds
-    
+
     def train(self):
         """Main training loop for BAM models - Multihead version.
 
@@ -891,7 +891,7 @@ class MultiheadTrainer(BaseTrainer):
             print(f'  *** New best checkpoint saved: {fname} (val_loss: {val_loss:.6f}) ***')
         else:
             print(f'  Latest checkpoint saved: {fname}')
-    
+
     # Initial_test: use BaseTrainer as-is (pass the epoch argument to train_one_epoch)
     def initial_test(self):
         """Run a preliminary test epoch and record the initial reference loss."""
@@ -903,7 +903,7 @@ class MultiheadTrainer(BaseTrainer):
             if self.ddp:
                 torch.distributed.barrier()
             self.loss_test_min = epoch_loss_test['loss']
-    
+
     # Update_check_point: additionally save the EMA state
     def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):
         """Update checkpoint with current training state (+ EMA state + per-head E0s).
@@ -912,7 +912,7 @@ class MultiheadTrainer(BaseTrainer):
         # Store per-head E0s (used during evaluation)
         if hasattr(self, 'per_head_enr_avg'):
             self.ckpt['per_head_enr_avg'] = self.per_head_enr_avg
-    
+
     def train_one_epoch(self, mode='train', data_loader=None, epoch=0):
         """Train/validate one epoch — JAX-style per-head processing.
 

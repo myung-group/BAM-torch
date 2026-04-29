@@ -51,11 +51,11 @@ class HuberLoss(torch.nn.Module):
         super().__init__()
         # We store the huber_delta rather than a loss with fixed reduction.
         self.huber_delta = huber_delta
-        
+
     def forward(
         self, pred, target, tag, num_atoms = None, ddp: Optional[bool] = None
     ) -> torch.Tensor:
- 
+
         if tag == "energy":
             if ddp:
                 loss_energy = torch.nn.functional.huber_loss(
@@ -77,19 +77,19 @@ class HuberLoss(torch.nn.Module):
                 # print(' pred["energy"]  : ', pred["energy"] )
                 # print(' target["energy"] ', target["energy"] )
             total_loss = loss_energy
-        
+
         if tag == "forces":
             if ddp:
                 loss_forces = torch.nn.functional.huber_loss(
-                    pred, target, 
-                    reduction="none", 
+                    pred, target,
+                    reduction="none",
                     delta=self.huber_delta
                 )
                 loss_forces = reduce_loss(loss_forces, ddp)
             else:
                 loss_forces = torch.nn.functional.huber_loss(
-                    pred, target, 
-                    reduction="mean", 
+                    pred, target,
+                    reduction="mean",
                     delta=self.huber_delta
                 )
                 # print(' pred["forces"] : ', pred["forces"] )
@@ -99,21 +99,21 @@ class HuberLoss(torch.nn.Module):
         if tag == "stress":
             if ddp:
                 loss_stress = torch.nn.functional.huber_loss(
-                    pred, target, 
-                    reduction="none", 
+                    pred, target,
+                    reduction="none",
                     delta=self.huber_delta
                 )
                 loss_stress = reduce_loss(loss_stress, ddp)
             else:
                 loss_stress = torch.nn.functional.huber_loss(
-                    pred, target, 
-                    reduction="mean", 
+                    pred, target,
+                    reduction="mean",
                     delta=self.huber_delta
                 )
                 # print(' pred["stress"] : ', pred["stress"] )
                 # print(' target["stress"] : ', target["stress"] )
             total_loss = loss_stress
-        
+
         return total_loss
 
     def __repr__(self):

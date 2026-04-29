@@ -51,7 +51,7 @@ class BaseTrainer:
 
         # Run setup routines
         self.setup()
-    
+
     def setup(self):
         """Configure all core training components.
 
@@ -69,7 +69,7 @@ class BaseTrainer:
         self.log_config, self.log_interval, self.logger = self.configure_logger()
         self.loss_dict, self.ckpt = self.configure_checkpoint()
         self.ema = self.configure_exponential_moving_average()
-    
+
     def train(self):
         """Main training loop for BAM models.
         """
@@ -182,13 +182,13 @@ class BaseTrainer:
             # Predict energy, forces, and so on from model
             preds = self.model(data, backprop)
             preds = self.scale_shift(preds, data, mode)
-            
+
             loss_dict = self.compute_loss(preds, data)
             loss = loss_dict['loss']
             if backprop:
                 self.optimizer.zero_grad()
                 loss.backward()
-                #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
+                #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                 self.optimizer.step()
 
@@ -209,7 +209,7 @@ class BaseTrainer:
         energy_predict = preds["energy"].flatten()
         shift_enr = energy_target.mean() - energy_predict.mean()
         preds["energy"] = energy_predict + shift_enr
-        # Calculate element-wise scale-shift 
+        # Calculate element-wise scale-shift
         node_energy = preds["node_energy"].detach()
         energy = energy_predict.detach()
         batch = data["batch"]
@@ -228,7 +228,7 @@ class BaseTrainer:
                 self.ckpt['valid_scale_shift_origin'].append(shift_enr.detach().cpu())
         return preds
 
-    def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):       
+    def update_check_point(self, epoch, epoch_loss_train, epoch_loss_valid):
         self.loss_dict.update({
             'epoch': epoch + 1 + self.start_epoch,
             'train': epoch_loss_train['loss'],
@@ -247,7 +247,7 @@ class BaseTrainer:
             'loss': self.loss_dict,
             'ema_state': ema_state
         })
-    
+
     def print_logger(self, epoch, epoch_loss_train, epoch_loss_valid):
         # Get the last learning rate
         lr = self.scheduler.get_lr() \
@@ -258,8 +258,8 @@ class BaseTrainer:
             "date": date(),
             "epoch": epoch+1+self.start_epoch,
         }
-        self.logger.print_epoch_loss(step_dict, 
-                                    epoch_loss_train, 
+        self.logger.print_epoch_loss(step_dict,
+                                    epoch_loss_train,
                                     epoch_loss_valid,
                                     lr)
 
@@ -282,7 +282,7 @@ class BaseTrainer:
 
     def configure_logger_head(self):
         log_config = self.json_data.get("log_config")
-        
+
         # Set a default of log_config
         if log_config == None:
             if self.json_data["regress_forces"]:
@@ -300,7 +300,7 @@ class BaseTrainer:
                     'lr': ['lr'],
                     }
         return log_config
-    
+
     def configure_logger(self):
         """Logging configuration specification.
 
@@ -325,15 +325,15 @@ class BaseTrainer:
             logger = Logger(log_config, self.loss_config, log_length, fout)
             separator = logger.get_seperator()
             atexit.register(lambda: on_exit(
-                                        fout, 
-                                        separator, 
-                                        self.n_params, 
+                                        fout,
+                                        separator,
+                                        self.n_params,
                                         self.json_data,
                                         self.date1
                                     )
                             )
         return log_config, log_interval, logger
-    
+
     def get_unique_filename(self):
         """Manage log file naming for training and restart (re-training) runs.
 
@@ -349,11 +349,11 @@ class BaseTrainer:
 
         This mechanism ensures previous logs are never accidentally overwritten.
         """
-        train_config = self.json_data.get('train') 
-        fname = train_config.get('fname_log') 
+        train_config = self.json_data.get('train')
+        fname = train_config.get('fname_log')
         if fname == None:
             fname = "loss_train.out"
-        
+
         base, ext = os.path.splitext(fname) # "loss_train", ".out"
         count = 2
         # Make a unique filename
@@ -380,12 +380,12 @@ class BaseTrainer:
     def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config", {})
-        
+
         loss_fn = {}
         loss_fn['energy_loss'] = loss_config.get('energy_loss', 'mse')
         loss_fn['force_loss'] = loss_config.get('force_loss', 'mse')
         loss_fn['stress_loss'] = loss_config.get('stress_loss', None)
-        
+
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:
                 loss_fn[loss] = torch.nn.L1Loss(reduction=reduction)
@@ -416,7 +416,7 @@ class BaseTrainer:
                 preds["forces"].flatten(), force_target
             )
             loss["loss"].append(f_lambda * loss["loss_f"])
-        
+
         if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
             stress_target = data["stress"].flatten()
             loss["loss_s"] = self.loss_fn["stress_loss"](
@@ -434,15 +434,15 @@ class BaseTrainer:
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
 
-        # Get loss: 
-        # loss = (e_lambda * loss_e) + (f_lambda * loss_f) 
+        # Get loss:
+        # loss = (e_lambda * loss_e) + (f_lambda * loss_f)
         #        + (s_lambda * loss_s) + (lambd * loss_l2)
         loss["loss"] = sum(loss["loss"])
         return loss
 
     def set_random_seed(self):
         """ Initializes random seeds and settings to ensure reproducibility.
-        
+
         Parameters:
             rng_seed (int): The random seed value.
             cublas_config (str): Configuration for CUBLAS workspace (default: ":16:8").
@@ -454,8 +454,8 @@ class BaseTrainer:
         torch.cuda.manual_seed_all(rng_seed)
         torch.use_deterministic_algorithms(True)
         os.environ["CUBLAS_WORKSPACE_CONFIG"]= ":16:8"  # :4096:8
-        torch.backends.cudnn.deterministic = True  
-        torch.backends.cudnn.benchmark = False    
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     def configure_device(self):
         device_config = self.json_data['device']
@@ -490,9 +490,9 @@ class BaseTrainer:
 
     def save_input_parameters(self, input_json, fname=None):
         if fname == None:
-            train_config = input_json.get('train') 
+            train_config = input_json.get('train')
             if train_config:
-                fname = train_config.get('fname_log') 
+                fname = train_config.get('fname_log')
                 if fname == None:
                     fname = "loss_train.out"
             else:
@@ -500,12 +500,12 @@ class BaseTrainer:
 
             fname_ls = fname.rsplit('.', 1)
             fname = f'input_json_of_{fname_ls[0]}_{fname_ls[1]}.txt'
-        
+
         fout = open(fname, 'w')
         pprint.pprint(input_json, stream=fout)
 
         return fname
-    
+
     def configure_model(self):
         """ Configure model using model configuration dictionary.
         """
@@ -523,7 +523,7 @@ class BaseTrainer:
 
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
-        
+
         evaluate_config = self.json_data['predict']
         evaluate = evaluate_config.get('evaluate_tag')  # True or False(None)
 
@@ -533,7 +533,7 @@ class BaseTrainer:
             self.json_data['predict']['evaluate_tag'] = False
             model_ckpt = torch.load(
                 model_config["fname_pkl"],
-                map_location=self.device, 
+                map_location=self.device,
                 weights_only=False
             )
             start_epoch = model_ckpt['loss']['epoch']
@@ -553,13 +553,13 @@ class BaseTrainer:
                 sys.exit(1)
             self.msg += f'\n\033[32mrestarting training from the {model_config["fname_pkl"]}\033[0m\n'
             self.msg += f' -- restarting from the step where the loss was {model_ckpt["loss"]}\n'
-        
+
         if evaluate:  # True or False(None)
             rank = 0
             start_epoch = 0
             model_ckpt = torch.load(
-                evaluate_config["model"], 
-                map_location=self.device, 
+                evaluate_config["model"],
+                map_location=self.device,
                 weights_only=False
             )
             model.load_state_dict(model_ckpt['params'])
@@ -575,16 +575,16 @@ class BaseTrainer:
                 local_rank = self.rank % torch.cuda.device_count()
                 model = DDP(model, device_ids=[local_rank])
             self.msg += f'\n\033[32minitializing training, results will be saved in the {model_config["fname_pkl"]}\033[0m\n'
-        
+
         # Check the number of parameters
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self.msg += f'\nnumber of parameters:\n\033[33m -- model ({self.json_data["model"].lower()})  {n_params}\033[0m\n'
-        
+
         if rank == 0:
             print(self.msg)
 
         return model, n_params, model_ckpt, start_epoch
-        
+
     def set_model(self):
         model_config = self.json_data
 
@@ -599,7 +599,7 @@ class BaseTrainer:
         num_basis_func = model_config.get('num_radial_basis', 8)
         nlayers = model_config.get('nlayers', 3)
         max_ell = model_config.get('max_ell', 3)
-        
+
         output_irreps = model_config.get('output_channels', "1x0e")
         active_fn = model_config.get('active_fn', "identity")
         regress_forces = model_config.get('regress_forces', "auto")
@@ -607,7 +607,7 @@ class BaseTrainer:
             regress_forces = "autograd"
         elif regress_forces == False:
             regress_forces = "false"
-        
+
         # Equivariant backend selection: cueq -> oeq -> e3nn fallback.
         cueq_request = model_config.get('cueq_config')  # bool or None
         oeq_request = model_config.get('oeq_config')    # bool or None
@@ -630,7 +630,7 @@ class BaseTrainer:
             self.msg += f'\nequiv. lib.:\n\033[33m -- OpenEquivariance\033[0m\n'
         else:
             self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
-        
+
         model_name = model_config["model"].lower()
         model_cls = MODEL_REGISTRY.get(model_name)
         if model_cls is None:
@@ -692,24 +692,44 @@ class BaseTrainer:
 
     def set_optimizer(self):
         optim_config = self.json_data["NN"]
-        lr = optim_config.get('learning_rate')
-        if lr == None:
-            lr = 0.001
-        weight_decay = optim_config.get('weight_decay')
-        if weight_decay == None:
-            weight_decay = 0 # 1e-12
-        amsgrad = optim_config.get('amsgrad')  
-        if amsgrad == None:
-            amsgrad = True
+        lr = optim_config.get('learning_rate', 1.0e-3)
+        weight_decay = optim_config.get('weight_decay', 0)
+        amsgrad = optim_config.get('amsgrad', True)
         # We can modify this part
-        optimizer = torch.optim.Adam(
-            self.model.parameters(), 
-            lr=lr, 
-            weight_decay=weight_decay,
-            foreach=None,
-            fused=None,
-            amsgrad=amsgrad
-        )
+        optimizer_str = optim_config.get('optimizer', 'adam')
+        if optimizer_str in ['adam', 'Adam']:
+            optimizer = torch.optim.Adam(
+                self.model.parameters(),
+                lr=lr,
+                weight_decay=weight_decay,
+                foreach=None,
+                fused=None,
+                amsgrad=amsgrad
+            )
+        elif optimizer_str in ['adamw', 'AdamW']:
+            decay_params, no_decay_params = [], []
+            for name, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if p.ndim <= 1 or name.endswith('.bias'):
+                    no_decay_params.append(p)
+                else:
+                    decay_params.append(p)
+
+            optimizer = torch.optim.AdamW(
+                [{'params': decay_params, 'weight_decay': weight_decay},
+                 {'params': no_decay_params, 'weight_decay': 0.0}],
+                lr=lr,
+                foreach=None,
+                fused=None,
+                amsgrad=amsgrad
+            )
+        else:
+            raise ValueError(
+                f"Unknown optimizer '{optimizer_str}'. "
+                f"Expected one of: 'adam', 'Adam', 'adamw', 'AdamW'."
+            )
+
         return optimizer
 
     def configure_scheduler(self):
@@ -767,12 +787,12 @@ class BaseTrainer:
 
     def get_params(self):
         return self.n_params
-    
+
     def check_parameter_sync(self):
         for name, param in self.model.named_parameters():
             #print(f"Rank {self.rank}, Parameter name: {name}, Value: {param.data[0]}, Shape: {param.shape}, Num.: {param.numel()}")
             print(f"Rank {self.rank}, Parameter name: {name}, Shape: {param.shape}, Num.: {param.numel()}")
-    
+
     def move_to_device(self, data, device):
         if isinstance(data, dict):
             return {k: v.to(device) if hasattr(v, "to") else v for k, v in data.items()}

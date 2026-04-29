@@ -38,20 +38,20 @@ class MPTrainer(BaseTrainer):
         #with open(self.json_data['enr_avg_per_element'], 'r', encoding='utf-8') as file:
         #    content = file.read()
         #enr_avg_per_element, uniq_element = ast.literal_eval(content)
-        
+
         #return None, None, enr_avg_per_element, uniq_element
         return None, None, None, None
 
     def load_pickle_files_with_progress(self, filename, folder_path):
-        combined_list = []  
+        combined_list = []
         #files = [f for f in os.listdir(folder_path) if f.endswith(".pkl")]
         #for filename in tqdm(files, desc=f"Loading files from {folder_path}"):
         file_path = os.path.join(folder_path, filename)
         with open(file_path, "rb") as f:
             data = pickle.load(f)
-            if isinstance(data, list):  
+            if isinstance(data, list):
                 combined_list.extend(data)
-            else: 
+            else:
                 combined_list.append(data)
         return combined_list
 
@@ -89,7 +89,7 @@ class MPTrainer(BaseTrainer):
                 if backprop:
                     self.optimizer.zero_grad()
                     loss.backward()
-                    #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5) 
+                    #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                     self.optimizer.step()
 
@@ -111,7 +111,7 @@ class MPTrainer(BaseTrainer):
             del data_loader
 
         epoch_loss_dict = {key: torch.mean(torch.tensor(value)) \
-                           for key, value in epoch_loss_dict.items()}      
+                           for key, value in epoch_loss_dict.items()}
         return epoch_loss_dict
 
     def get_pkl_data_path(self):
@@ -122,18 +122,18 @@ class MPTrainer(BaseTrainer):
             train_dir_path = ntrain
             if os.path.isdir(train_dir_path):
                 train_files = [
-                    os.path.join(train_dir_path, f) 
-                    for f in os.listdir(train_dir_path) 
+                    os.path.join(train_dir_path, f)
+                    for f in os.listdir(train_dir_path)
                     if f.endswith(".pkl")
                 ]
             else:
                 train_files = [train_dir_path]
-            
+
             valid_dir_path = nvalid
-            if os.path.isdir(valid_dir_path):    
+            if os.path.isdir(valid_dir_path):
                 valid_files = [
-                    os.path.join(valid_dir_path, f) 
-                    for f in os.listdir(valid_dir_path) 
+                    os.path.join(valid_dir_path, f)
+                    for f in os.listdir(valid_dir_path)
                     if f.endswith(".pkl")
                 ]
             else:
@@ -142,14 +142,14 @@ class MPTrainer(BaseTrainer):
             train_dir_path = dir_path
             if os.path.isdir(train_dir_path):
                 train_files = [
-                    os.path.join(train_dir_path, f) 
-                    for f in os.listdir(train_dir_path) 
+                    os.path.join(train_dir_path, f)
+                    for f in os.listdir(train_dir_path)
                     if f.endswith(".pkl")
                 ]
             else:
                 train_files = [train_dir_path]
             valid_files = deepcopy(train_files)
-        
+
         return train_files, valid_files
 
     def configure_dataloader_from_pkl(self, file_path, mode):
@@ -157,7 +157,7 @@ class MPTrainer(BaseTrainer):
         match = re.search(r"_(\d+)\.pkl$", file_path)
         if match:
             file_number = int(match.group(1))
-        
+
         sampled_dataset_save_folder = Path(f"./{mode}_datasets-{self.rank}")
         sampled_dataset_file_name = f"{mode}-{file_number}.pkl"
         sampled_dataset_file_path = sampled_dataset_save_folder / sampled_dataset_file_name
@@ -173,12 +173,12 @@ class MPTrainer(BaseTrainer):
         else:
             t1 = time()
             os.makedirs(sampled_dataset_save_folder, exist_ok=True)
-    
+
             with open(file_path, "rb") as f:
                 data = pickle.load(f)
             if not isinstance(data, list):
                 data = [data]
-            
+
             ntrain = self.json_data.get('ntrain')
             nvalid = self.json_data.get('nvalid')
             ntest = self.json_data.get('ntest')
@@ -215,7 +215,7 @@ class MPTrainer(BaseTrainer):
                         pickle.dump(test_data, f)
                 else:
                     data = [data[i] for i in idx_valid]
-            
+
             if mode != 'test':
                 with open(sampled_dataset_file_path, "wb") as f:
                     pickle.dump(data, f)
@@ -224,7 +224,7 @@ class MPTrainer(BaseTrainer):
         return data_loader
 
     def get_dataloader_from_data(self, graphset):
-        data_sampler = DistributedBalancedAtomCountBatchSampler(        
+        data_sampler = DistributedBalancedAtomCountBatchSampler(
             dataset=graphset,
             batch_size=self.json_data['nbatch'],
             num_replicas=self.world_size,
@@ -245,24 +245,24 @@ class MPTrainer(BaseTrainer):
             sampler=data_sampler
         )
         return data_loader
-    
+
     def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config")
         if loss_config == None:
             if self.json_data["regress_forces"]:
-                loss_config = {'energy_loss': 'huber', 
-                               'force_loss': 'huber', 
+                loss_config = {'energy_loss': 'huber',
+                               'force_loss': 'huber',
                                'stress_loss' : 'huber'}
             else:
                 loss_config = {'energy_loss': 'huber'}
-        
+
         loss_fn = {}
         loss_fn['energy_loss'] = loss_config.get('energy_loss')
         loss_fn['force_loss'] = loss_config.get('force_loss')
         loss_fn['stress_loss'] = loss_config.get('stress_loss')
         huber_delta = loss_config.get('huber_delta')
-        
+
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:
                 loss_fn[loss] = torch.nn.L1Loss(reduction=reduction)
@@ -274,7 +274,7 @@ class MPTrainer(BaseTrainer):
                 loss_fn[loss] = HuberLoss(huber_delta=huber_delta)
 
         return loss_fn, loss_config
-    
+
     def compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
         e_lambda = lambda_config.get('enr_lambda')
@@ -292,7 +292,7 @@ class MPTrainer(BaseTrainer):
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
-        loss["loss_e"] = self.loss_fn["energy_loss"](preds["energy"].flatten(), 
+        loss["loss_e"] = self.loss_fn["energy_loss"](preds["energy"].flatten(),
                                                      energy_target,
                                                      tag="energy",
                                                      num_atoms=data["num_nodes"])
@@ -300,13 +300,13 @@ class MPTrainer(BaseTrainer):
 
         if "forces" in preds:
             force_target = data["forces"].flatten()
-            loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(), 
+            loss["loss_f"] = self.loss_fn["force_loss"](preds["forces"].flatten(),
                                                         force_target,
                                                         tag="forces")
             loss["loss"].append(f_lambda * loss["loss_f"])
         if "stress" in preds:
             stress_target = data["stress"].flatten()
-            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(), 
+            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(),
                                                          stress_target,
                                                          tag="stress")
             loss["loss"].append(s_lambda * loss["loss_s"])
@@ -362,7 +362,7 @@ class MPTrainer_V2(BaseTrainer):
         enr_avg_per_element, uniq_element = ast.literal_eval(content)
 
         return None, None, uniq_element, enr_avg_per_element
-    
+
     # multi-node version
     def load_pickle_files(self, filename, folder_path):
         file_path = os.path.join(folder_path, filename)
@@ -376,7 +376,7 @@ class MPTrainer_V2(BaseTrainer):
         """
         from torch.nn.parallel import DistributedDataParallel as DDP
         import sys
-        
+
         model = self.set_model() # Set self.model
         model.to(self.device)
 
@@ -390,7 +390,7 @@ class MPTrainer_V2(BaseTrainer):
 
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
-        
+
         evaluate_config = self.json_data['predict']
         evaluate = evaluate_config.get('evaluate_tag')  # True or False(None)
 
@@ -416,7 +416,7 @@ class MPTrainer_V2(BaseTrainer):
                 sys.exit(1)
             self.msg = f'\n\033[32mrestarting training from the {model_config["fname_pkl"]}\033[0m\n'
             self.msg += f' -- restarting from the step where the loss was {model_ckpt["loss"]}\n'
-        
+
         if evaluate:  # True or False(None)
             rank = 0
             start_epoch = 0
@@ -434,11 +434,11 @@ class MPTrainer_V2(BaseTrainer):
                 local_rank = int(os.environ.get('SLURM_LOCALID', self.rank % torch.cuda.device_count()))
                 model = DDP(model, device_ids=[local_rank])
             self.msg = f'\n\033[32minitializing training, results will be saved in the {model_config["fname_pkl"]}\033[0m\n'
-        
+
         # Check the number of parameters
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         self.msg += f'\nnumber of parameters:\n\033[33m -- model ({self.json_data["model"]})  {n_params}\033[0m\n'
-        
+
         if rank == 0:
             print(self.msg)
 
@@ -453,7 +453,7 @@ class MPTrainer_V2(BaseTrainer):
                     k: [] for k in self.enr_avg_per_element.keys()
             }
             # data_files = train_files
-            folder_path = self.json_data["ntrain"]       
+            folder_path = self.json_data["ntrain"]
         else:
             self.model.eval()
             backprop = False
@@ -539,13 +539,13 @@ class MPTrainer_V2(BaseTrainer):
                     loss.backward()
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
                     self.optimizer.step()
-                    
+
                     if self.ema is not None:
                         self.ema.update()
 
                 for l in loss_log_config:
                     epoch_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
-                
+
                 data.clear()
                 del data, preds, loss_dict
                 torch.cuda.empty_cache()
@@ -565,7 +565,7 @@ class MPTrainer_V2(BaseTrainer):
             except Exception as e:
                 print(f"ERROR in barrier: {e}", file=self.gpu_test_log)
                 self.gpu_test_log.flush()
-       
+
         final_epoch_loss_dict = {}
         for key in epoch_loss_dict:
             tensor_list = epoch_loss_dict[key]
@@ -598,7 +598,7 @@ class MPTrainer_V2(BaseTrainer):
 
             final_epoch_loss_dict[key] = final_avg_loss
         self.gpu_test_log.flush()
-    
+
         return final_epoch_loss_dict
 
     def configure_loss(self, reduction='mean'):
@@ -690,7 +690,7 @@ class MPTrainer_V2(BaseTrainer):
                 preds["forces"].flatten(), force_target
             )
             loss["loss"].append(f_lambda * loss["loss_f"])
-        
+
         if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
             stress_target = data["stress"].flatten()
             loss["loss_s"] = self.loss_fn["stress_loss"](
@@ -708,8 +708,8 @@ class MPTrainer_V2(BaseTrainer):
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
 
-        # Get loss: 
-        # loss = (e_lambda * loss_e) + (f_lambda * loss_f) 
+        # Get loss:
+        # loss = (e_lambda * loss_e) + (f_lambda * loss_f)
         #        + (s_lambda * loss_s) + (lambd * loss_l2)
         loss["loss"] = sum(loss["loss"])
         return loss
