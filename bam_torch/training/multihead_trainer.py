@@ -31,6 +31,12 @@ except ImportError:
 from .base_trainer import BaseTrainer
 from .loss import RMSELoss, HuberLoss, l2_regularization
 from bam_torch.utils.utils import date, get_dataloader_multihead
+from bam_torch.model.wrapper_ops import (
+    CuEquivarianceConfig,
+    OEQConfig,
+    CUET_AVAILABLE,
+    OEQ_AVAILABLE,
+)
 
 try:
     from torch_ema import ExponentialMovingAverage
@@ -245,10 +251,45 @@ class MultiheadTrainer(BaseTrainer):
 
         mlp_irreps = o3.Irreps(f"{features_dim}x0e")
 
+        # Architecture-defining options must match the foundation model so that
+        # state_dict shapes/keys line up. Prefer foundation values; fall back
+        # to input.json if the foundation config is missing.
+        fc = self.foundation_config or {}
+        interaction_block = fc.get(
+            'interaction_block',
+            model_config.get('interaction_block', 'slow'),
+        )
+        cueq_request = fc.get('cueq_config', model_config.get('cueq_config'))
+        oeq_request = fc.get('oeq_config', model_config.get('oeq_config'))
+        l_separated_layer_norm = fc.get(
+            'l_separated_layer_norm',
+            model_config.get('l_separated_layer_norm', False),
+        )
+
+        cueq_config = None
+        oeq_config = None
+        if (cueq_request is None or cueq_request) and CUET_AVAILABLE:
+            cueq_config = CuEquivarianceConfig(
+                enabled=True,
+                layout="ir_mul",
+                group="O3_e3nn",
+                optimize_all=True,
+            )
+        elif oeq_request and OEQ_AVAILABLE:
+            oeq_config = OEQConfig(
+                enabled=True,
+                optimize_all=True,
+            )
+
+        if self.rank == 0:
+            print(f"  - interaction_block: {interaction_block}")
+            print(f"  - cueq_config: {'on' if cueq_config else 'off'}")
+            print(f"  - oeq_config: {'on' if oeq_config else 'off'}")
+
         # Generate the RACEUnified model (Single-head + Multihead)
         from bam_torch.model.models import RACEUnified
 
-        model = RACEUnified(
+        race_kwargs = dict(
             cutoff=cutoff,
             avg_num_neighbors=avg_num_neighbors,
             num_species=num_species,
@@ -264,9 +305,19 @@ class MultiheadTrainer(BaseTrainer):
             regress_forces=regress_forces,
             compute_stress=True,
             heads=self.heads,
-            cueq_config=None,
-            l_separated_layer_norm=model_config.get('l_separated_layer_norm', False),
+            cueq_config=cueq_config,
+            oeq_config=oeq_config,
+            interaction_block=interaction_block,
+            l_separated_layer_norm=l_separated_layer_norm,
         )
+
+        radial_polynomial_p = fc.get(
+            'radial_polynomial_p', model_config.get('radial_polynomial_p')
+        )
+        if radial_polynomial_p is not None:
+            race_kwargs['radial_polynomial_p'] = radial_polynomial_p
+
+        model = RACEUnified(**race_kwargs)
 
         self.msg += f'\n\033[33m -- Multihead model with {self.num_heads} heads: {self.heads}\033[0m\n'
 
@@ -348,6 +399,38 @@ class MultiheadTrainer(BaseTrainer):
         """
         if self.rank == 0:
             print("Loading from state_dict (fallback method)...")
+
+        # ----- BEGIN legacy-checkpoint shim (REMOVE WHEN MATURE) -----
+        # Earlier multihead models used LinearReadoutBlock at layers 0..n-2
+        # (key: `readouts.X.linear.weight` / `.output_mask`) and a
+        # NonLinearReadoutBlock only at the last layer. The current code uses
+        # NonLinearReadoutBlock at every layer (`linear_1` + `linear_2`).
+        #
+        # Legacy `linear.weight` cannot be losslessly mapped onto the new
+        # MLP+activation+linear stack, so we drop those keys here and rely on
+        # default init for the affected `linear_1`/`linear_2`. The remaining
+        # parameters (interactions, products, embeddings, last-layer readout)
+        # still load normally below.
+        legacy_keys = [
+            n for n in foundation_state.keys()
+            if 'readouts.' in n and (
+                n.endswith('.linear.weight')
+                or n.endswith('.linear.output_mask')
+            )
+        ]
+        if legacy_keys:
+            for n in legacy_keys:
+                foundation_state.pop(n, None)
+            if self.rank == 0:
+                print(
+                    f"  ⚠️ Dropped {len(legacy_keys)} legacy LinearReadoutBlock "
+                    f"keys from foundation state (old multihead structure)."
+                )
+                print(
+                    "     Affected early-layer readouts will use default init; "
+                    "retrain a few epochs to recover."
+                )
+        # ----- END legacy-checkpoint shim -----
 
         current_state = model.state_dict()
         loaded_count = 0

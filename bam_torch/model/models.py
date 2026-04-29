@@ -582,28 +582,20 @@ class RACEUnified(torch.nn.Module):
             )
             self.products.append(prod)
 
-            # ⭐ Readout: 
-	    # Multi-head : NonLinear on final layer only; 
-	    # Single-head: NonLinear on every layer
+            # Readout: NonLinear on every layer for both single-head and
+            # multihead so the parameter structure matches a RACE foundation
+            # (NonLinearReadoutBlock at every layer).
             if self.is_multihead:
-                if i == nlayers - 1:
-                    readout = NonLinearReadoutBlock(
-                        irreps_in=hidden_irreps,
-                        MLP_irreps=multihead_MLP_irreps,
-                        gate=gate,
-                        irrep_out=multihead_output_irreps,
-                        num_heads=self.num_heads,
-                        cueq_config=cueq_config,
-                        biases=True,
-                    )
-                else:
-                    readout = LinearReadoutBlock(
-                        irreps_in=hidden_irreps,
-                        irrep_out=multihead_output_irreps,
-                        cueq_config=cueq_config,
-                    )
+                readout = NonLinearReadoutBlock(
+                    irreps_in=hidden_irreps,
+                    MLP_irreps=multihead_MLP_irreps,
+                    gate=gate,
+                    irrep_out=multihead_output_irreps,
+                    num_heads=self.num_heads,
+                    cueq_config=cueq_config,
+                    biases=True,
+                )
             else:
-                # Single-head: apply NonLinear to all layers (same as RACE)
                 readout = NonLinearReadoutBlock(
                     irreps_in=hidden_irreps,
                     MLP_irreps=MLP_irreps,
