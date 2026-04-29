@@ -656,6 +656,13 @@ class BaseTrainer:
             model_kwargs['l_separated_layer_norm'] = model_config.get(
                 'l_separated_layer_norm', False
             )
+        # Only forward radial_polynomial_p when set; otherwise each model
+        # falls back to its own default (2 for RACE/RACEUnified, 6 for MACE).
+        if 'radial_polynomial_p' in model_params \
+                and 'radial_polynomial_p' in model_config:
+            model_kwargs['radial_polynomial_p'] = model_config[
+                'radial_polynomial_p'
+            ]
         # Only forward oeq_config when the model accepts it
         if 'oeq_config' in model_params:
             model_kwargs['oeq_config'] = oeq_config

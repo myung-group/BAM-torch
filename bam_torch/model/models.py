@@ -73,6 +73,7 @@ class RACE(torch.nn.Module):
         compute_stress: bool = True,
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
+        radial_polynomial_p: int = 2,
     ):
         super().__init__()
 
@@ -112,7 +113,7 @@ class RACE(torch.nn.Module):
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=1.0,
             num_bessel=num_basis_func,
-            num_polynomial_cutoff=2,   # default of BAM-jax
+            num_polynomial_cutoff=radial_polynomial_p,
             radial_type="bessel",
             distance_transform=None,
         )
@@ -458,6 +459,7 @@ class RACEUnified(torch.nn.Module):
         heads: Optional[List[str]] = None,  # ⭐ Multihead support
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
+        radial_polynomial_p: int = 2,
     ):
         super().__init__()
     
@@ -507,11 +509,11 @@ class RACEUnified(torch.nn.Module):
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=1.0,
             num_bessel=num_basis_func,
-            num_polynomial_cutoff=2,
+            num_polynomial_cutoff=radial_polynomial_p,
             radial_type="bessel",
             distance_transform=None,
         )
-        
+
         edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
         #num_features = hidden_irreps.count(o3.Irrep(0, 1))
@@ -908,6 +910,7 @@ class MACE(torch.nn.Module):
         cueq_config: Optional[Dict[str, Any]] = None,
         oeq_config: Optional[Dict[str, Any]] = None,
         regress_forces: str = "direct",
+        radial_polynomial_p: int = 6,
     ):
         super().__init__()
 
@@ -947,7 +950,7 @@ class MACE(torch.nn.Module):
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=1.0,
             num_bessel=num_basis_func,
-            num_polynomial_cutoff=6,   # default of BAM-jax
+            num_polynomial_cutoff=radial_polynomial_p,
             radial_type="bessel",
             distance_transform=None,
         )
