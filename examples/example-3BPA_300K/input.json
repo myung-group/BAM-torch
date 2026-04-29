@@ -21,9 +21,12 @@
     "nbatch" : 2,
     "nlayers" : 3,
     "features_dim" : 64,
+    "radial_polynomial_p" : 2,
     "active_fn": "identity",
     "pbc" : true,
     "NN" : {
+            "__optimizer_option" : ["Adam", "AdamW"],
+            "optimizer" : "Adam",
             "data_seed" :  10,
 	    "init_seed" :  11,
             "learning_rate" : 0.01,
