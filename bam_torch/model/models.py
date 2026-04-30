@@ -1143,9 +1143,8 @@ class MACE(torch.nn.Module):
                 dim=-1,
                 dim_size=num_graphs,
             ) 
-        n_node = int(data.num_nodes / num_graphs)
-        n_nodes = torch.tensor([n_node]*num_graphs, device=node_energy_var.device)
-        energy_var = node_energy_var/n_nodes
+        n_nodes = torch.unique(data["batch"], return_counts=True)[1]
+        energy_var = node_energy_var / n_nodes
 
         preds = {}
         preds["energy"] = node_energy
