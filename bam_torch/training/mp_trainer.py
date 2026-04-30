@@ -73,6 +73,7 @@ class MPTrainer(BaseTrainer):
                     k: [] for k in self.enr_avg_per_element.keys()
                 }
             self.ckpt['valid_scale_shift_origin'] = []
+            data_files = valid_files
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for filename in data_files:
