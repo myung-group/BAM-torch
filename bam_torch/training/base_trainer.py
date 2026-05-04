@@ -627,6 +627,8 @@ class BaseTrainer:
                 enabled=True,
                 optimize_all=True,
             )
+            if model_config.get('oeq_conv_fusion', False):
+                oeq_config.conv_fusion = "atomic"
             self.msg += f'\nequiv. lib.:\n\033[33m -- OpenEquivariance\033[0m\n'
         else:
             self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'

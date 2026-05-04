@@ -278,18 +278,10 @@ class MPTrainer(BaseTrainer):
 
     def compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
-        e_lambda = lambda_config.get('enr_lambda')
-        f_lambda = lambda_config.get('frc_lambda')
-        s_lambda = lambda_config.get('str_lambda')
-        lambd = lambda_config.get('l2_lambda')
-        if e_lambda == None:
-            e_lambda = 1
-        if f_lambda == None:
-            f_lambda = 1
-        if s_lambda == None:
-            s_lambda = 1
-        if lambd == None:
-            lambd == 0
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 1)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
