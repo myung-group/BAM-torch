@@ -356,6 +356,7 @@ class BaseTrainer:
 
         base, ext = os.path.splitext(fname) # "loss_train", ".out"
         count = 2
+        old_name = fname
         # Make a unique filename
         while os.path.exists(fname): # if exist the file of ```fname``` in this directory
             old_name = fname
@@ -527,6 +528,10 @@ class BaseTrainer:
         evaluate_config = self.json_data['predict']
         evaluate = evaluate_config.get('evaluate_tag')  # True or False(None)
 
+        rank = self.rank
+        start_epoch = 0
+        model_ckpt = None
+
         if restart:
             rank = self.rank
             evaluate = False
@@ -688,7 +693,7 @@ class BaseTrainer:
         optimizer = self.set_optimizer()
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
-        if restart:
+        if restart and self.model_ckpt is not None:
             optimizer.load_state_dict(self.model_ckpt['opt_state'])
         return optimizer
 
@@ -738,7 +743,7 @@ class BaseTrainer:
         scheduler = self.set_scheduler()
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
-        if restart:
+        if restart and self.model_ckpt is not None:
             scheduler.load_state_dict(self.model_ckpt['scheduler'])
         return scheduler
 
