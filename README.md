@@ -45,33 +45,32 @@ $ conda activate bam_torch
 
 Equivalent environments have also been tested with [virtualenv](https://virtualenv.pypa.io/) and [venv](https://docs.python.org/library/venv.html).
 
-### Step 2: Install BAM
+### Step 2: Install Core Dependencies
+
+As of October 2025, [PyTorch Geometric](https://pyg.org/) (PyG) supports PyTorch up to version 2.8.0.  
+Check their [wheels page](https://data.pyg.org/whl/) for any updates (near the bottom).  
+We should therefore manually install a version of PyTorch between 2.5.1 and 2.8.0.  
+Running `install_deps.py` will automatically detect the version of CUDA linked to PyTorch, and then install the version of PyG compatible with that combination of CUDA and PyTorch.
 
 ```bash
 $ git clone https://github.com/myung-group/BAM-torch
 $ cd BAM-torch
+$ pip install "torch<=2.8"
+$ python install_deps.py
+```
+
+### Step 3: Install BAM
+
+```bash
 $ pip install -e .
 ```
 
-The core training and inference path uses a pure-PyTorch scatter
-(`bam_torch/utils/scatter.py`) and does not need PyG's C++ extensions
-(`torch_scatter`, `torch_cluster`, `torch_sparse`, `torch_spline_conv`,
-`pyg_lib`). Only the optional `group_averaging` module imports
-`torch_scatter` and `torch_cluster`; install those when you opt in
-(see Step 3).
-
-### Step 3: Install optional components as needed
+### Step 4: Install optional components as needed
 
 For low-level acceleration of equivariant neural networks, use [cuEquivariance](https://github.com/NVIDIA/cuEquivariance).
 
 ```bash
 $ pip install -e ".[cueq]"
-```
-
-For an alternative equivariant-kernel backend, use [OpenEquivariance](https://github.com/PASSIONLab/OpenEquivariance).
-
-```bash
-$ pip install -e ".[oeq]"
 ```
 
 To enable Laplace approximations for neural networks, use [laplace-torch](https://aleximmer.com/Laplace/).
@@ -80,10 +79,9 @@ To enable Laplace approximations for neural networks, use [laplace-torch](https:
 $ pip install -e ".[laplace]"
 ```
 
-To enable group averaging for graph neural networks, use [mendeleev](https://github.com/lmmentel/mendeleev). This extra also pulls in `torch_scatter` and `torch_cluster`, which need to come from the matching PyG wheel index — run `install_deps.py` once first to fetch the correct CUDA/PyTorch build:
+To enable group averaging for graph neural networks, use [mendeleev](https://github.com/lmmentel/mendeleev).
 
 ```bash
-$ python install_deps.py
 $ pip install -e ".[group_averaging]"
 ```
 
@@ -309,38 +307,6 @@ R: Random samples B: High BALD score samples.
     }
 }
 ```
-
-### Fast RACE (OpenEquivariance-accelerated)
-
-The RACE interaction block has two variants, selected via `interaction_block`:
-
-| Value          | Class                              | Tensor product                | Acceleration backends |
-|:---------------|:-----------------------------------|:------------------------------|:----------------------|
-| `"slow"` (default) | `ConcatenateRaceInteractionBlock` | Unweighted `FullTensorProduct` + concatenation | e3nn only |
-| `"fast"`       | `RaceInteractionBlock`             | Weighted channel-wise `TensorProduct` | e3nn / cuEquivariance / OpenEquivariance |
-
-Only the `"fast"` variant can be accelerated, because OpenEquivariance and
-cuEquivariance both require weighted tensor-product paths. To enable
-[OpenEquivariance](https://github.com/PASSIONLab/OpenEquivariance):
-
-```bash
-$ pip install -e ".[oeq]"
-```
-
-Then in `input.json`:
-
-```json
-{
-    "interaction_block": "fast",
-    "oeq_config": true,
-    "cueq_config": false
-}
-```
-
-The trainer logs which interaction block is in use (`interaction block: -- fast`)
-and which equivariant library was selected (`equiv. lib.: -- OpenEquivariance`)
-at startup. Note that backend selection follows `cueq → oeq → e3nn`, so set
-`cueq_config: false` to fall through to OEQ.
 
 ## Datasets
 

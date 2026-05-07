@@ -86,10 +86,10 @@ def get_pbc_distances(
     # correct for pbc
     #neighbors = neighbors.to(cell.device)
     b, _, _ = cell.shape
-    cell_offsets = cell_offsets.view(b, -1, 3)
-    b, e_size, _ = cell_offsets.shape
-    expanded_cell = torch.repeat_interleave(cell, repeats=e_size, dim=0)
-    expanded_cell = expanded_cell.reshape(b, e_size, 3, 3)
+    cell_offsets = cell_offsets.view(b, -1, 3) # B, e_size, 3
+    b, e_size, _ = cell_offsets.shape 
+    expanded_cell = torch.repeat_interleave(cell, repeats=e_size, dim=0) # E, 3, 3
+    expanded_cell = expanded_cell.reshape(b, e_size, 3, 3) # B, e_size, 3, 3
     offsets = torch.einsum('bni,bnij->bnj', cell_offsets, expanded_cell).view(-1, 3)
     #print(rel_pos.shape)
     #print(offsets.shape)
@@ -97,12 +97,13 @@ def get_pbc_distances(
 
     # compute distances
     distances = rel_pos.norm(dim=-1) #.clamp(min=1e-8)
-
+    #print(f"dist-3: {distances}")
     # redundancy: remove zero distances
     nonzero_idx = torch.arange(len(distances), device=distances.device)[distances != 0]
     #nonzero_idx = torch.arange(len(distances), device=distances.device)
     edge_index = edge_index[:, nonzero_idx]
     distances = distances[nonzero_idx]
+
 
     out = {
         "edge_index": edge_index,
@@ -145,7 +146,7 @@ def base_preprocess(data, cutoff=6.0, max_num_neighbors=40):
     )
     rel_pos = data.pos[edge_index[0]] - data.pos[edge_index[1]]
     return (
-        data.atomic_numbers.long(),
+        data.species.long() if hasattr(data, 'species') else data.atomic_numbers.long(),
         data.batch,
         edge_index,
         rel_pos,

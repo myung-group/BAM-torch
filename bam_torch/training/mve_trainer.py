@@ -9,25 +9,25 @@ class MVETrainer(BaseTrainer):
     """
     def __init__(self, json_data, rank, world_size):
         super().__init__(json_data, rank, world_size)
-
+    
     def configure_loss(self, reduction='mean'):
         nn_config = self.json_data.get("NN")
         loss_config = nn_config.get("loss_config")
         if loss_config == None:
             if self.json_data["regress_forces"]:
                 loss_config = {
-                    'energy_loss': 'nll',
-                    'force_loss': 'nll',
+                    'energy_loss': 'nll', 
+                    'force_loss': 'nll', 
                     'stress_loss': 'mse'
                 }
             else:
                 loss_config = {'energy_loss': 'nll'}
-
+        
         loss_fn = {}
         loss_fn['energy_loss'] = loss_config.get('energy_loss')
         loss_fn['force_loss'] = loss_config.get('force_loss')
         loss_fn['stress_loss'] = loss_config.get('stress_loss')
-
+        
         for loss, loss_name in loss_fn.items():
             if loss_name in ['l1', 'L1', 'mae', 'MAE']:
                 loss_fn[loss] = torch.nn.L1Loss(reduction=reduction)
@@ -64,7 +64,7 @@ class MVETrainer(BaseTrainer):
                 loss['log_f'] = loss_frc['log_f']
                 loss['frc_var'] = loss_frc['frc_var']
             if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
-                loss['loss_s'] = self.loss_fn["stress_loss"](preds['stress'].flatten(),
+                loss['loss_s'] = self.loss_fn["stress_loss"](preds['stress'].flatten(), 
                                                              data['stress'].flatten())
                 loss["loss"].append(s_lambda * loss["loss_s"])
             elif (hasattr(self.model, "training_mode_for_lammps") \
@@ -72,7 +72,7 @@ class MVETrainer(BaseTrainer):
                 loss["loss_s"] = torch.tensor(
                     0.0, device=preds["stress"].device, requires_grad=True
                 )
-
+            
             if lambd != 0:
                 params = self.model.parameters()
                 loss["loss_l2"] = l2_regularization(params)
@@ -81,7 +81,7 @@ class MVETrainer(BaseTrainer):
 
         else:
             loss = self._compute_loss(preds, data)
-
+        
         return loss
 
     def _compute_loss(self, preds, data):
@@ -104,7 +104,7 @@ class MVETrainer(BaseTrainer):
                 preds["forces"].flatten(), force_target
             )
             loss["loss"].append(f_lambda * loss["loss_f"])
-
+        
         if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
             stress_target = data["stress"].flatten()
             loss["loss_s"] = self.loss_fn["stress_loss"](
@@ -121,7 +121,7 @@ class MVETrainer(BaseTrainer):
             params = self.model.parameters()
             loss["loss_l2"] = l2_regularization(params)
             loss["loss"].append(lambd * loss["loss_l2"])
-
+            
         loss["loss"] = sum(loss["loss"])
         if "energy_var" in preds:
             loss["enr_var"] = preds["energy_var"].mean()
@@ -134,8 +134,8 @@ class MVETrainer(BaseTrainer):
         if log_config == None:
             if self.json_data["regress_forces"]:
                 log_config = {
-                    'step': ['date', 'epoch'],
-                    'train': ['loss', 'loss_e', 'loss_f', 'log_e', 'log_f', 'loss_s', 'enr_var', 'frc_var', 'loss_l2'],
+                    'step': ['date', 'epoch'],  
+                    'train': ['loss', 'loss_e', 'loss_f', 'log_e', 'log_f', 'loss_s', 'enr_var', 'frc_var', 'loss_l2'], 
                     'valid': ['loss', 'loss_e', 'loss_f', 'log_e', 'log_f'],
                     'lr': ['lr'],
                     }  # loss_l2

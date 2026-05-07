@@ -471,7 +471,7 @@ class EquivariantInterface(torch.nn.Module):
     def _forward_prob(self, data, k: int):
         # k is the number of interface samples
         #data["cell"].requires_grad_(True)
-        data["positions"].requires_grad_(True)
+       # data["positions"].requires_grad_(True)
         x = data.positions
         x = x - x.mean(dim=0, keepdim=True)
         num_edges = data.num_edges

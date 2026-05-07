@@ -39,6 +39,7 @@ class GAEvaluator(GATrainer):
         self.data_loader, self.uniq_element, self.enr_avg_per_element = self.configure_dataloader()
         self.loss_fn, self.loss_config = self.configure_loss()
         self.log_config, self.log_interval, self.logger, self.fout = self.configure_logger()
+        #self.ema = self.configure_exponential_moving_average()
 
     def evaluate(self, element_wise=True):
         self.logger.print_logger_head()
@@ -63,30 +64,43 @@ class GAEvaluator(GATrainer):
         }
         rotation_matrices = []
         permute_matrices = []
+        elapsed_time = []
         pbc = self.json_data.get('pbc') 
         if pbc == None:
             pbc = True
 
         for i, data in enumerate(self.data_loader):
             data = data.to(self.device)
-            # t1 = time()
+            data.positions.requires_grad_(True)
+            data.cell.requires_grad_(True)
+            t1 = time()
             batch, entropy_loss = self.transform(
                 data=data, 
                 equiv_model=self.equiv_model, # for the probabilistic symmetrization
                 n_samples=self.json_data.get("nsamples") # for the probabilistic symmetrization
             )
-            rotation_matrices.append(batch.fa_rot[1].detach().cpu())
-            permute_matrices.append(batch.fa_rot[0].detach().cpu())
+            if "prob" in self.ga_method:
+                rotation_matrices.append(batch.fa_rot[1].detach().cpu())
+                permute_matrices.append(batch.fa_rot[0].detach().cpu())
+            else:
+                rotation_matrices.append(torch.ones(1, 1, 3, 3))
+                permute_matrices.append(torch.ones(1, 1, 3, 3))
+
+            #param_context = (
+            #    self.ema.average_parameters() if self.ema is not None else nullcontext()
+            #)
+            #with param_context:
             preds = self.model_forward_cls(
                 batch=batch,  # transform the PyG graph data
                 model=self.model,
                 frame_averaging=self.group_averaging, 
-                mode="eval",      
+                mode='valid',      
                 crystal_task=pbc,
-                edge_mask=None
+                edge_mask=None,
+                permute=self.permute
             )
             # print(f'Elapsed time of 1 epoch: {time()-t1}')
-            
+            elapsed_time.append(time()-t1)
             species = data['species']
             node_enr_avg = torch.tensor([self.enr_avg_per_element[int(iz)] for iz in species]).sum()
             if element_wise:
@@ -148,6 +162,7 @@ class GAEvaluator(GATrainer):
         print(f"MEAN_LOSS: {total_loss_dict['loss']:<11.5g}")
         print(f"MEAN_LOSS(E): {total_loss_dict['loss_e']:<11.5g}")
         print(f"MEAN_LOSS(F): {total_loss_dict['loss_f']:<11.5g}\n")
+        print(f"MEAN_ELAPSED_TIME(S): {torch.tensor(elapsed_time).mean():<11.5g}\n")
         torch.save(test_values, "test_values.pkl")
         np.save("group_reps_ks.npy", np.array(rotation_matrices))
         np.save("group_reps_hs.npy", np.array(permute_matrices))
@@ -241,3 +256,65 @@ class GAEvaluator(GATrainer):
                         )
         return log_config, log_interval, logger, fout
     
+    def compute_loss(self, preds, data):
+        lambda_config = self.json_data["NN"]
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 30)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
+
+        cosine_sim = lambda_config.get('cosine_sim', False)
+        energy_grad_mult = lambda_config.get('energy_grad_mult', 10)
+        energy_grad_loss = lambda_config.get('energy_grad_loss', False)
+
+        loss = {"loss": []}
+        energy_target = data["energy"].flatten()
+        loss["loss_e"] = self.loss_fn["energy_loss"](
+            preds["energy"].flatten(), energy_target
+        )
+        loss["loss"].append(e_lambda * loss["loss_e"])
+
+        if "forces" in preds and self.loss_fn.get("force_loss") is not None:
+            force_target = data["forces"].flatten()
+            loss["loss_f"] = self.loss_fn["force_loss"](
+                preds["forces"].flatten(), force_target
+            )
+            loss["loss"].append(f_lambda * loss["loss_f"])
+                
+        # This is for frame-averaging or probabilistic-symmetrization
+        if "forces_grad_target" in preds:
+            energy_grad_loss = True
+            grad_target = preds["forces_grad_target"]
+            force_target = data["forces"].flatten()
+            if cosine_sim:
+                cos = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
+                loss["loss_grad"] = -torch.mean(cos(preds["forces"], grad_target))
+            else:
+                loss["loss_grad"] = self.loss_fn["force_loss"](
+                    grad_target.flatten(), force_target
+                )
+            if energy_grad_loss:
+                loss["loss"].append(energy_grad_mult * loss["loss_grad"])
+        
+        if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
+            stress_target = data["stress"].flatten()
+            loss["loss_s"] = self.loss_fn["stress_loss"](
+                preds["stress"].flatten(), stress_target
+            )
+            loss["loss"].append(s_lambda * loss["loss_s"])
+        elif (hasattr(self.model, "training_mode_for_lammps") \
+                and self.model.training_mode_for_lammps):
+            loss["loss_s"] = torch.tensor(
+                0.0, device=preds["stress"].device, requires_grad=True
+            )
+
+        if lambd != 0:
+            params = self.model.parameters()
+            loss["loss_l2"] = l2_regularization(params)
+            loss["loss"].append(lambd * loss["loss_l2"])
+            
+        # Get loss: 
+        # loss = (e_lambda * loss_e) + (f_lambda * loss_f) 
+        #        + (s_lambda * loss_s) + (lambd * loss_l2)
+        loss["loss"] = sum(loss["loss"])
+        return loss

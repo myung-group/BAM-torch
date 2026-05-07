@@ -111,6 +111,11 @@ class FrameAveraging(Transform):
                 = self.pa_func(data, equiv_model, n_samples, self.fa_method, self.permute)
             return data, entropy_loss
 
+        elif self.fa_method == "prob_rot":
+            data.fa_pos, data.fa_cell, data.fa_rot, data.fa_species, data.fa_edge_index, entropy_loss \
+                = self.pa_func(data, equiv_model, n_samples, self.fa_method, self.permute)
+            return data, entropy_loss
+
         else:
             data.fa_pos, data.fa_cell, data.fa_rot = self.fa_func(
                 data.positions, data.cell if hasattr(data, "cell") else None, self.fa_method

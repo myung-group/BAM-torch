@@ -21,7 +21,11 @@ from bam_torch.group_averaging.utils.ga_utils import (
     pbc_preprocess, 
     base_preprocess
 )
-
+from bam_torch.utils.output_utils import (
+    get_outputs, 
+    get_symmetric_displacement,
+    remove_net_torque
+)
 
 class FAENet(nn.Module):
     r"""Non-symmetry preserving GNN model for 3D atomic systems,
@@ -161,7 +165,7 @@ class FAENet(nn.Module):
         self.distance_expansion = GaussianSmearing(0.0, self.cutoff, self.num_gaussians)
 
         # Radial basis based on "Soft envelope * bessel function"
-        
+
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=1.0,
             num_bessel=self.num_gaussians,
@@ -246,24 +250,45 @@ class FAENet(nn.Module):
         grad_forces = forces = None
 
         # energy gradient w.r.t. positions will be computed
-        if mode == "train" or self.regress_forces == "auto":
-            data.pos.requires_grad_(True)
 
+        data.pos.requires_grad_(True)
+        #data.positions.requires_grad_(True)
+        data.cell.requires_grad_(True)
         # predict energy
         preds = self.energy_forward(data, preproc)
-        if self.regress_forces:
+
+        if "auto" in self.regress_forces:
+            num_graphs = data["ptr"].numel() - 1
+            forces, virials, stress, hessian = get_outputs(
+                energy=preds["energy"],
+                positions=data.pos,
+                cell=data["cell"],
+                batch_idx=data["batch"],
+                num_graphs=num_graphs,
+                training=True,
+                compute_force=True,
+                compute_virials=True,
+                compute_stress=True,
+                compute_hessian=False,
+                displacement=None
+            )
+            preds["forces"] = forces
+            preds["stress"] = stress
+            preds["virials"] = virials
+
+        elif self.regress_forces:
             if self.regress_forces in {"direct", "direct_with_gradient_target"}:
                 # predict forces
                 forces = self.forces_forward(preds)
 
-            if mode == "train" or self.regress_forces == "auto":
-                if "gemnet" in self.__class__.__name__.lower():
-                    # gemnet forces are already computed
-                    grad_forces = forces
-                else:
-                    # compute forces from energy gradient
-                    # preds["energy"].requires_grad_(True)
-                    grad_forces = self.forces_as_energy_grad(data.pos, preds["energy"])
+
+            if "gemnet" in self.__class__.__name__.lower():
+                # gemnet forces are already computed
+                grad_forces = forces
+            else:
+                # compute forces from energy gradient
+                # preds["energy"].requires_grad_(True)
+                grad_forces = self.forces_as_energy_grad(data.pos, preds["energy"])
 
             if self.regress_forces == "auto":
                 # predicted forces are the energy gradient
@@ -271,14 +296,15 @@ class FAENet(nn.Module):
             elif self.regress_forces in {"direct", "direct_with_gradient_target"}:
                 # predicted forces are the model's direct forces
                 preds["forces"] = forces
-                if mode == "train":
-                    # Store the energy gradient as target for "direct_with_gradient_target"
-                    # Use it as a metric only in "direct" mode.
-                    preds["forces_grad_target"] = grad_forces#.detach()
-            else:
-                raise ValueError(
-                    f"Unknown forces regression mode {self.regress_forces}"
-                )
+
+                # Store the energy gradient as target for "direct_with_gradient_target"
+                # Use it as a metric only in "direct" mode.
+                preds["forces_grad_target"] = grad_forces#.detach()
+            #else:
+            #    raise ValueError(
+            #        f"Unknown forces regression mode {self.regress_forces}"
+            #    )
+
         if not self.pred_as_dict:
             return preds["energy"]
         #print(f'ture_forces: \n{data.forces}')
@@ -300,10 +326,12 @@ class FAENet(nn.Module):
         """
         # Pre-process data (e.g. pbc, cutoff graph, etc.)
         # Should output all necessary attributes, in correct format.
+
         if preproc:
             z, batch, edge_index, rel_pos, edge_weight = self.preprocess(
                 data, self.cutoff, self.max_num_neighbors,
             )
+
         else:
             rel_pos = data.positions[data.edge_index[0]] - data.positions[data.edge_index[1]]
             z, batch, edge_index, rel_pos, edge_weight = (
@@ -313,12 +341,11 @@ class FAENet(nn.Module):
                 rel_pos,
                 rel_pos.norm(dim=-1),
             )
-        #torch.set_printoptions(profile="full")
-        #rel_pos = data.rel_pos.view(-1, 3)
-        #distances = torch.linalg.vector_norm(rel_pos, dim=-1)
-        #nonzero_idx = torch.arange(len(distances), device=distances.device)[distances != 0]
-        #edge_weight = distances[nonzero_idx]
-        #rel_pos = rel_pos[nonzero_idx]
+
+
+        #rel_pos, edge_weight, edge_index = get_relative_vectors_with_pbc(data)
+        #z = data.species.long()
+        #batch = data.batch
         edge_attr = self.distance_expansion(edge_weight)  # RBF of pairwise distances
         #print("edge_attr ", edge_attr)
         """
@@ -338,7 +365,6 @@ class FAENet(nn.Module):
             alpha = self.w_lin(h)
         else:
             alpha = None
-
         # Interaction blocks
         energy_skip_co = []
         for interaction in self.interaction_blocks:
@@ -423,3 +449,31 @@ class FAENet(nn.Module):
     def num_params(self):
         return sum(p.numel() for p in self.parameters())
 
+def get_relative_vectors_with_pbc(data):
+    shift_v = data.shift_v
+    cell = data.cell
+    B, _, _ = cell.shape
+    cell_offsets = data.edges
+    cell_offsets = cell_offsets.view(B, -1, 3)
+    B, E, _ = cell_offsets.shape
+
+    pos_mean = data.pos_mean # B, 1, 3
+    B, _, _ = pos_mean.shape
+
+    edge_index = data.edge_index
+    iatoms = data.edge_index[0]
+    jatoms = data.edge_index[1]
+
+    pos = data.pos
+    rel_pos = pos[jatoms] - pos[iatoms] 
+    rel_pos = rel_pos + shift_v
+    edge_weight = torch.linalg.vector_norm(rel_pos, dim=-1)
+    
+    nonzero_idx = torch.arange(len(edge_weight), device=edge_weight.device)[edge_weight != 0]
+    edge_weight = edge_weight[nonzero_idx]
+    edge_index = edge_index[:, nonzero_idx]
+    rel_pos = rel_pos[nonzero_idx]
+
+    #edge_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
+    #data.edge_index = edge_index
+    return rel_pos, edge_weight, edge_index

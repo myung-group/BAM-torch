@@ -20,6 +20,7 @@ class Logger:
             self.space = 16
         self.logger_config, self.separator = self.configure_logger()
         self.fout = fout
+        #self.set_space()
 
     def configure_logger(self):
         if self.loss_config != None:
@@ -144,3 +145,8 @@ class Logger:
         self.fout.flush()
         print(LINE)
 
+    def set_space(self):
+        lst = list(self.log_config.values())
+        max_len = max(len(s) for sub in lst for s in sub)
+        if self.space <= max_len:
+            self.space = max_len + 5

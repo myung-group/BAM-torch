@@ -141,6 +141,7 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
         num_edges = iatoms.shape[0]
 
         # Sort neighbors by distance, remove edges larger than max_neighbors
+        """
         if max_neigh != None:
             Rij, dist = get_relative_vector(atoms, iatoms, jatoms, Sij)
             nonmax_idx = []
@@ -153,7 +154,7 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             jatoms = jatoms[nonmax_idx]
             num_edges = iatoms.shape[0]
             Sij = Sij[nonmax_idx]
-        
+        """
         # Generate Graph data set
         graph = Data(
             positions=torch.tensor(crds, dtype=torch.float32),   # node features
@@ -162,11 +163,11 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             edges=torch.tensor(Sij, dtype=torch.float32),# edge features
             num_nodes=num_nodes,             
             num_edges=num_edges,
-            energy=torch.tensor([enr], dtype=torch.float32),
+            energy=torch.tensor(enr, dtype=torch.float32),
             cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
             edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),  # senders, recerivers
             stress=torch.tensor(stress, dtype=torch.float32),
-            volume=torch.tensor([volume] if np.isscalar(volume) else volume, dtype=torch.float32)
+            volume=torch.tensor(volume)
         )                          
         graph_list.append(graph)
 
@@ -249,9 +250,16 @@ def get_dataloader(fname, ntrain, nvalid,
     
     loaders = []
     for dataset in [train_data, valid_data]:
-        graphset = get_graphset(dataset, cutoff, uniq_element,
+        graphset = get_graphset(dataset, cutoff, uniq_element, 
                                 enr_avg_per_element, enr_var,
                                 regress_forces, max_neigh)
+        pad_nodes_to = 0 # nbatch * max_nodes 
+        pad_edges_to = 0 # nbatch * max_edges
+        for graph in graphset:
+            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+            pad_edges_to = max(graph.num_edges, pad_edges_to)
+        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+        #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:
             data_sampler = DistributedSampler(
@@ -407,63 +415,27 @@ def get_dataloader_multihead(datasets_config, cutoff, nbatch, regress_forces=Tru
         if rank == 0:
             print(f"  - Train: {len(train_data)}, Valid: {len(valid_data)} graphs")
     
-    # --- Per-head DataLoaders (JAX-style separate streams) ---
-    per_head_train_loaders = {}
-    per_head_valid_loaders = {}
-    per_head_train_graphs = {}
-    per_head_valid_graphs = {}
-
-    # Separate graphs by head index
-    for g in all_train_graphs:
-        h = int(g.head.item())
-        per_head_train_graphs.setdefault(h, []).append(g)
-    for g in all_valid_graphs:
-        h = int(g.head.item())
-        per_head_valid_graphs.setdefault(h, []).append(g)
-
-    for h in sorted(set(list(per_head_train_graphs.keys()) + list(per_head_valid_graphs.keys()))):
-        # Train loader per head
-        train_gs = per_head_train_graphs.get(h, [])
-        random.shuffle(train_gs)
-        sampler_t = DistributedSampler(train_gs, num_replicas=world_size, rank=rank) if world_size > 1 else None
-        per_head_train_loaders[h] = DataLoader(
-            train_gs, nbatch, shuffle=(sampler_t is None),
-            drop_last=False, pin_memory=True, sampler=sampler_t
-        )
-        # Valid loader per head
-        valid_gs = per_head_valid_graphs.get(h, [])
-        sampler_v = DistributedSampler(valid_gs, num_replicas=world_size, rank=rank) if world_size > 1 else None
-        per_head_valid_loaders[h] = DataLoader(
-            valid_gs, nbatch, shuffle=False,
-            drop_last=False, pin_memory=True, sampler=sampler_v
-        )
-
-    # --- Mixed DataLoaders (backward-compatible) ---
+    # Shuffle and create DataLoaders
     random.shuffle(all_train_graphs)
+    
     data_sampler_train = None
     data_sampler_valid = None
     if world_size > 1:
         data_sampler_train = DistributedSampler(all_train_graphs, num_replicas=world_size, rank=rank)
         data_sampler_valid = DistributedSampler(all_valid_graphs, num_replicas=world_size, rank=rank)
-
+    
     train_loader = DataLoader(all_train_graphs, nbatch, shuffle=(data_sampler_train is None),
                               drop_last=False, pin_memory=True, sampler=data_sampler_train)
     valid_loader = DataLoader(all_valid_graphs, nbatch, shuffle=False,
                               drop_last=False, pin_memory=True, sampler=data_sampler_valid)
-
+    
     if rank == 0:
         print(f"\n✓ Multihead Dataloaders created")
         print(f"  - Total train: {len(all_train_graphs)}, valid: {len(all_valid_graphs)}")
-        for h in sorted(per_head_train_loaders.keys()):
-            n_t = len(per_head_train_graphs.get(h, []))
-            n_v = len(per_head_valid_graphs.get(h, []))
-            print(f"  - Head {h}: train {n_t}, valid {n_v}")
         print(f"  - Batch size: {nbatch}")
         print(f"  - Per-head E0s stored for {len(per_head_enr_avg)} heads")
-
-    return (train_loader, valid_loader,
-            per_head_train_loaders, per_head_valid_loaders,
-            global_uniq_element, global_enr_avg_per_element, per_head_enr_avg)
+    
+    return train_loader, valid_loader, global_uniq_element, global_enr_avg_per_element, per_head_enr_avg
 
 
 def get_graphset_to_predict(data, cutoff, uniq_element, 
@@ -502,6 +474,7 @@ def get_graphset_to_predict(data, cutoff, uniq_element,
         num_edges = iatoms.shape[0]
         
         # Sort neighbors by distance, remove edges larger than max_neighbors
+        """
         if max_neigh != None:
             Rij, dist = get_relative_vector(atoms, iatoms, jatoms, Sij)
             nonmax_idx = []
@@ -514,7 +487,7 @@ def get_graphset_to_predict(data, cutoff, uniq_element,
             jatoms = jatoms[nonmax_idx]
             num_edges = iatoms.shape[0]
             Sij = Sij[nonmax_idx]
-        
+        """
         # Generate Graph data set
         graph = Data(
             positions=torch.tensor(crds, dtype=torch.float32),   # node features
@@ -553,13 +526,13 @@ def get_dataloader_to_predict(fname, ndata, nbatch,
 
     graphset = get_graphset_to_predict(traj, cutoff, uniq_element, 
                                        regress_forces, max_neigh)
-    #pad_nodes_to = 0 # nbatch * max_nodes 
-    #pad_edges_to = 0 # nbatch * max_edges
-    #for graph in graphset:
-    #    pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-    #    pad_edges_to = max(graph.num_edges, pad_edges_to)
-    #padded_graphset = get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to)
-    padded_graphset = graphset
+    pad_nodes_to = 0 # nbatch * max_nodes 
+    pad_edges_to = 0 # nbatch * max_edges
+    for graph in graphset:
+        pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
+        pad_edges_to = max(graph.num_edges, pad_edges_to)
+    padded_graphset = get_graphset_with_pad(graphset, pad_nodes_to, pad_edges_to)
+    #padded_graphset = graphset
     loader = DataLoader(padded_graphset,
                         nbatch,
                         shuffle=False,
@@ -650,9 +623,16 @@ def on_exit(fout, separator_bottom, n_params, json_data, date1):
     print(f' - {"MODEL(TOTAL)":14} {n_params}', file=fout)
     #print(f' -- {"EQUIV. MODEL":13} {interface_n_params}', file=fout)
     #print(f' -- {"BACKBONE":13} {backbone_n_params}', file=fout)
-    print(f' --- {"HIDDEN.":12} {json_data["hidden_channels"]}', file=fout)
-    print(f' --- {"FEATS. DIM.":12} {json_data["features_dim"]}', file=fout)
-    print(f' --- {"RADI. BASIS.":12} {json_data["num_radial_basis"]}', file=fout)
+    if json_data.get("hidden_channels"):
+        print(f' --- {"HIDDEN.":12} {json_data["hidden_channels"]}', file=fout)
+    if json_data.get("descriptor_hidden"):
+        print(f' --- {"DESC. HIDDEN":12} {json_data["descriptor_hidden"]}', file=fout)
+    if json_data.get("fitting_hidden"):
+        print(f' --- {"FIT. HIDDEN":12} {json_data["fitting_hidden"]}', file=fout)
+    if json_data.get("features_dim"):
+        print(f' --- {"FEATS. DIM.":12} {json_data["features_dim"]}', file=fout)
+    if json_data.get("num_radial_basis"):
+        print(f' --- {"RADI. BASIS.":12} {json_data["num_radial_basis"]}', file=fout)
     if json_data.get("nsamples"):
         print(f'\n* NUMBER OF "g" PER DATA:\n   {" ":14} {json_data.get("nsamples")}', file=fout)
     print(f'\n* SEED NUMBER:', file=fout)
@@ -719,3 +699,166 @@ def calculate_time_difference(date1, date2):
     return day, days, hours, minutes, seconds
 
 
+# ---------------------------------------------------------------------------
+# DeePMD raw format data loading (for DPLR paper reproduction)
+# ---------------------------------------------------------------------------
+
+def load_deepmd_raw_with_dipole(data_dir, cutoff, sel_type=None,
+                                 regress_forces=True, show_progress=False):
+    """Load a DeePMD raw-format directory into a list of PyG Data objects.
+
+    Reads coord.raw, energy.raw, force.raw, box.raw, type.raw, type_map.raw,
+    and optionally atomic_dipole.raw for Deep Wannier training.
+
+    Args:
+        data_dir: Path to directory containing .raw files
+        cutoff: Neighbor list cutoff distance
+        sel_type: List of type indices for dipole atoms (e.g. [2,3,4]).
+                  If provided and atomic_dipole.raw exists, dipole data is loaded.
+        regress_forces: Whether to load force data
+        show_progress: Show tqdm progress bar
+
+    Returns:
+        List of torch_geometric.data.Data objects with:
+            positions, species, forces, energy, cell, edge_index, edges,
+            num_nodes, num_edges, stress, volume
+            + atomic_dipole [N_sel, 3] and dipole_atom_idx [N_sel] if dipole data available
+    """
+    from pathlib import Path
+
+    data_dir = Path(data_dir)
+
+    # Read type map and types
+    with open(data_dir / "type_map.raw") as f:
+        type_map = [line.strip() for line in f if line.strip()]
+
+    type_raw = np.loadtxt(data_dir / "type.raw", dtype=int).flatten()
+    n_atoms = len(type_raw)
+    species = type_raw  # already integer indices
+
+    # Read frames
+    energy_data = np.loadtxt(data_dir / "energy.raw").flatten()
+    n_frames = len(energy_data)
+    coord_data = np.loadtxt(data_dir / "coord.raw").reshape(n_frames, n_atoms, 3)
+    box_data = np.loadtxt(data_dir / "box.raw").reshape(n_frames, 3, 3)
+
+    force_data = None
+    if regress_forces and (data_dir / "force.raw").exists():
+        force_data = np.loadtxt(data_dir / "force.raw").reshape(n_frames, n_atoms, 3)
+
+    # Dipole data (for DW training)
+    dipole_data = None
+    dipole_atom_indices = None
+    if sel_type is not None and (data_dir / "atomic_dipole.raw").exists():
+        raw_dipole = np.loadtxt(data_dir / "atomic_dipole.raw")
+        n_dipole_atoms = raw_dipole.shape[1] // 3
+        dipole_data = raw_dipole.reshape(n_frames, n_dipole_atoms, 3)
+        # Determine which atom indices correspond to sel_type
+        dipole_atom_indices = np.where(np.isin(species, sel_type))[0]
+        assert len(dipole_atom_indices) == n_dipole_atoms, \
+            f"Mismatch: {len(dipole_atom_indices)} sel_type atoms vs {n_dipole_atoms} dipole entries"
+
+    # Build graph list
+    from ase import Atoms
+    graph_list = []
+    iterator = tqdm(range(n_frames), desc="Loading DeePMD", leave=False) if show_progress else range(n_frames)
+
+    for i in iterator:
+        crds = coord_data[i]
+        cell = box_data[i]
+        # Build ASE atoms for neighbor list
+        atoms = Atoms(
+            symbols=[type_map[t] for t in species],
+            positions=crds,
+            cell=cell,
+            pbc=True,
+        )
+        iatoms, jatoms, Sij = neighbour_list(
+            quantities='ijS', atoms=atoms, cutoff=cutoff
+        )
+
+        frc = force_data[i] if force_data is not None else np.zeros((n_atoms, 3))
+        volume = atoms.get_volume()
+        stress = np.zeros(6)
+
+        graph = Data(
+            positions=torch.tensor(crds, dtype=torch.float32),
+            species=torch.tensor(species, dtype=torch.long),
+            forces=torch.tensor(frc, dtype=torch.float32),
+            edges=torch.tensor(Sij, dtype=torch.float32),
+            num_nodes=n_atoms,
+            num_edges=len(iatoms),
+            energy=torch.tensor(energy_data[i], dtype=torch.float32),
+            cell=torch.tensor(cell, dtype=torch.float32).view(1, 3, 3),
+            edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),
+            stress=torch.tensor(stress, dtype=torch.float32),
+            volume=torch.tensor(volume),
+        )
+
+        if dipole_data is not None:
+            graph.atomic_dipole = torch.tensor(dipole_data[i], dtype=torch.float32)
+            graph.dipole_atom_idx = torch.tensor(dipole_atom_indices, dtype=torch.long)
+
+        graph_list.append(graph)
+
+    return graph_list, type_map
+
+
+def get_dataloader_for_dipole(data_dirs, cutoff, sel_type, nbatch=1,
+                               train_ratio=0.9, seed=42,
+                               rank=0, world_size=1):
+    """Create train/valid DataLoaders from DeePMD raw directories with dipole data.
+
+    Args:
+        data_dirs: List of paths to DeePMD raw directories
+        cutoff: Neighbor cutoff
+        sel_type: Atom types for dipole prediction [2, 3, 4]
+        nbatch: Batch size
+        train_ratio: Train/valid split ratio
+        seed: Random seed
+        rank, world_size: For distributed training
+
+    Returns:
+        train_loader, valid_loader, type_map
+    """
+    all_graphs = []
+    type_map = None
+
+    for d in data_dirs:
+        graphs, tm = load_deepmd_raw_with_dipole(
+            d, cutoff, sel_type=sel_type, show_progress=(rank == 0)
+        )
+        all_graphs.extend(graphs)
+        if type_map is None:
+            type_map = tm
+
+    # Shuffle and split
+    n = len(all_graphs)
+    torch.manual_seed(seed)
+    idx = torch.randperm(n)
+    n_train = int(n * train_ratio)
+
+    train_graphs = [all_graphs[i] for i in idx[:n_train]]
+    valid_graphs = [all_graphs[i] for i in idx[n_train:]]
+
+    if rank == 0:
+        print(f"Dipole data: {n} total, {len(train_graphs)} train, {len(valid_graphs)} valid")
+
+    # Pad graphs
+    pad_nodes_to = max(g.num_nodes for g in all_graphs)
+    pad_edges_to = max(g.num_edges for g in all_graphs)
+    train_graphs = get_graphset_with_pad(deepcopy(train_graphs), pad_nodes_to, pad_edges_to)
+    valid_graphs = get_graphset_with_pad(deepcopy(valid_graphs), pad_nodes_to, pad_edges_to)
+
+    loaders = []
+    for graphset in [train_graphs, valid_graphs]:
+        sampler = None
+        if world_size > 1:
+            sampler = DistributedSampler(graphset, num_replicas=world_size, rank=rank)
+        loader = DataLoader(
+            graphset, nbatch, shuffle=False, drop_last=False,
+            pin_memory=True, num_workers=0, sampler=sampler,
+        )
+        loaders.append(loader)
+
+    return loaders[0], loaders[1], type_map

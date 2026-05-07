@@ -44,6 +44,7 @@ class Evaluator(BaseTrainer):
         self.data_loader, self.uniq_element, self.enr_avg_per_element = self.configure_dataloader()
         self.loss_fn, self.loss_config = self.configure_loss()
         self.log_config, self.log_interval, self.logger, self.fout = self.configure_logger()
+        self.ema = self.configure_exponential_moving_average()
 
     def evaluate(self, element_wise=True):
         self.logger.print_logger_head()
@@ -63,62 +64,68 @@ class Evaluator(BaseTrainer):
             'exact_force_y': [],
             'exact_force_z': [],
         }
-        for i, data in enumerate(self.data_loader):
-            data = data.to(self.device)
-            # Get node_enr_avg
-            species = data['species']
-            node_enr_avg = torch.tensor(
-                [self.enr_avg_per_element[int(iz)] for iz in species],
-            ).sum()
-            # Predict energy, forces, and so on
-            preds = self.model(data, backprop=False)
-            # Correct the energy
-            if element_wise:
-                e_corr = torch.tensor(
-                    [e_corr_[int(iz)] for iz in species]
+        param_context = (
+            self.ema.average_parameters() if self.ema is not None else nullcontext()
+        )
+
+        with param_context:
+            for i, data in enumerate(self.data_loader):
+                data = data.to(self.device)
+                # Get node_enr_avg
+                species = data['species']
+                node_enr_avg = torch.tensor(
+                    [self.enr_avg_per_element[int(iz)] for iz in species],
                 ).sum()
-            else:
-                e_corr = e_corr_
-            preds['energy'] = preds["energy"] + node_enr_avg + e_corr
+                # Predict energy, forces, and so on
+                preds = self.model(data, backprop=False)
+                # Correct the energy
+                if element_wise:
+                    e_corr = torch.tensor(
+                        [e_corr_[int(iz)] for iz in species]
+                    ).sum()
+                else:
+                    e_corr = e_corr_
 
-            test_values['energy'].append(preds['energy'].detach().cpu())
-            test_values['force_x'].append(preds['forces'][:,0].detach().cpu())
-            test_values['force_y'].append(preds['forces'][:,1].detach().cpu())
-            test_values['force_z'].append(preds['forces'][:,2].detach().cpu())
-            test_values['exact_energy'].append(data['energy'].detach().cpu())
-            test_values['exact_force_x'].append(data['forces'][:,0].detach().cpu())
-            test_values['exact_force_y'].append(data['forces'][:,1].detach().cpu())
-            test_values['exact_force_z'].append(data['forces'][:,2].detach().cpu())  
+                preds['energy'] = preds["energy"] + node_enr_avg + e_corr
 
-            loss_dict = self.compute_loss(preds, data)
+                test_values['energy'].append(preds['energy'].detach().cpu())
+                test_values['force_x'].append(preds['forces'][:,0].detach().cpu())
+                test_values['force_y'].append(preds['forces'][:,1].detach().cpu())
+                test_values['force_z'].append(preds['forces'][:,2].detach().cpu())
+                test_values['exact_energy'].append(data['energy'].detach().cpu())
+                test_values['exact_force_x'].append(data['forces'][:,0].detach().cpu())
+                test_values['exact_force_y'].append(data['forces'][:,1].detach().cpu())
+                test_values['exact_force_z'].append(data['forces'][:,2].detach().cpu())  
 
-            for l in eval_loss_dict.keys():
-                eval_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
+                loss_dict = self.compute_loss(preds, data)
 
-            # Print evaluation loss and predicted vs. exact energies.
-            step_dict = {
-                    "date": date(),
-                    "data": i,
-                }
+                for l in eval_loss_dict.keys():
+                    eval_loss_dict[l].append(loss_dict.get(l, torch.nan).detach().cpu())
 
-            for l in loss_dict.keys():
-                loss_dict[l] = loss_dict.get(l).detach().cpu()
-            loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
+                # Print evaluation loss and predicted vs. exact energies.
+                step_dict = {
+                        "date": date(),
+                        "data": i,
+                    }
 
-            del loss_dict['loss']
-            target['energy'] = data['energy']
-            self.logger.print_epoch_loss(step_dict, 
-                                         loss_dict, 
-                                         target,
-                                         lr=None)
-            # Free memory
-            del data, preds, loss_dict
-            torch.cuda.empty_cache()
-            if i % 100 == 0:
-                gc.collect()
+                for l in loss_dict.keys():
+                    loss_dict[l] = loss_dict.get(l).detach().cpu()
+                loss_dict['energy'] = float(preds['energy'][0].detach().cpu())
 
-        eval_loss_dict = {key: torch.mean(torch.tensor(value)) \
-                        for key, value in eval_loss_dict.items()}
+                del loss_dict['loss']
+                target['energy'] = data['energy']
+                self.logger.print_epoch_loss(step_dict, 
+                                            loss_dict, 
+                                            target,
+                                            lr=None)
+                # Free memory
+                del data, preds, loss_dict
+                torch.cuda.empty_cache()
+                if i % 100 == 0:
+                    gc.collect()
+
+            eval_loss_dict = {key: torch.mean(torch.tensor(value)) \
+                            for key, value in eval_loss_dict.items()}
         
         separator = self.logger.get_seperator()
         print(separator, file=self.fout)
@@ -174,6 +181,11 @@ class Evaluator(BaseTrainer):
                 self.model_ckpt,
                 json_data['regress_forces']
         )
+        if self.json_data.get('enr_avg_per_element') is not None:
+            enr_avg_per_element_ls = self.json_data.get('enr_avg_per_element')
+            uniq_element_vals = list(uniq_element.values())
+            enr_avg_per_element = {uniq_element_vals[i]: enr_avg_per_element_ls[i] for i in range(len(enr_avg_per_element_ls))}
+            print(enr_avg_per_element)
         return data_loader, uniq_element, enr_avg_per_element
 
     def configure_logger_head(self):

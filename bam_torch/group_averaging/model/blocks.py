@@ -52,7 +52,7 @@ class EmbeddingBlock(nn.Module):
             self.group_embedding = Embedding(
                 self.phys_emb.group_size, pg_hidden_channels
             )
-
+            
         # Tag embedding
         if tag_hidden_channels:
             self.tag_embedding = Embedding(3, tag_hidden_channels)

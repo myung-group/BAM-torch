@@ -18,7 +18,6 @@ from .radial import (
 )
 from bam_torch.model.wrapper_ops import (
     CuEquivarianceConfig,
-    OEQConfig,
     FullyConnectedTensorProduct,
     Linear,
     SymmetricContractionWrapper,
@@ -137,8 +136,6 @@ class InteractionBlock(torch.nn.Module):
         avg_num_neighbors: float,
         radial_MLP: Optional[List[int]] = None,
         cueq_config: Optional[CuEquivarianceConfig] = None,
-        oeq_config: Optional[OEQConfig] = None,
-        l_separated_layer_norm: bool = False
     ) -> None:
         """ Examples)
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
@@ -161,39 +158,13 @@ class InteractionBlock(torch.nn.Module):
             radial_MLP = [64, 64, 64]
         self.radial_MLP = radial_MLP
         self.cueq_config = cueq_config
-        self.oeq_config = oeq_config
-        self.l_separated_layer_norm = l_separated_layer_norm
-
-        # Precomputed norm information of node_feats_irreps
-        if self.l_separated_layer_norm:
-            scalar_ranges: List[Tuple[int, int]] = []
-            ns_start: Optional[int] = None
-            ns_end = 0
-            ns_count = 0
-            pos = 0
-            for mul, ir in self.node_feats_irreps:
-                size = mul * ir.dim
-                if ir.is_scalar():
-                    scalar_ranges.append((pos, pos + size))
-                else:
-                    if ns_start is None:
-                        ns_start = pos
-                    ns_end = pos + size
-                    ns_count += size
-                pos += size
-            self._node_feats_norm_info = {
-                'scalar_ranges': scalar_ranges,
-                'nonscalar_range': (ns_start, ns_end) if ns_start is not None else None,
-                'ns_count': ns_count,
-            }
 
         self._setup()
 
     @abstractmethod
     def _setup(self) -> None:
         raise NotImplementedError
-
-
+    
     @abstractmethod
     def forward(
         self,
@@ -204,48 +175,6 @@ class InteractionBlock(torch.nn.Module):
         edge_index: torch.Tensor,
     ) -> torch.Tensor:
         raise NotImplementedError
-
-
-    @torch.jit.ignore
-    def separated_layer_norm(
-        self,
-        node_feats: torch.Tensor,
-        eps: float = 1.e-6,
-    ) -> torch.Tensor:
-        """Layer-norm that handles scalars and non-scalars separately.
-
-        Scalars (0e): mean-centred + RMS normalisation.
-        Non-scalars: shared RMS normalisation (no mean centring — not invariant).
-
-        Args:
-            features:  (N, irreps.dim)
-            norm_info: Precomputed layout from :func:`build_norm_info`.
-
-        Returns:
-            (N, irreps.dim) normalised features.
-        """
-        out = node_feats.clone()
-        ns_range = self._node_feats_norm_info['nonscalar_range']
-        ns_count = self._node_feats_norm_info['ns_count']
-
-        # Non-scalar: shared RMS normalisation
-        if ns_range is not None and ns_count > 0:
-            ns_start, ns_end = ns_range
-            ns_part = node_feats[:, ns_start:ns_end]
-            ns_rms_inv = torch.rsqrt(
-                (ns_part ** 2).sum(dim=-1, keepdim=True) / ns_count + eps
-            )
-            out[:, ns_start:ns_end] = ns_part * ns_rms_inv
-
-        # Scalar groups: independent mean-centring + RMS
-        for start, end in self._node_feats_norm_info['scalar_ranges']:
-            chunk = node_feats[:, start:end]
-            mean = chunk.mean(dim=-1, keepdim=True)
-            centered = chunk - mean
-            rms_inv = torch.rsqrt((centered ** 2).mean(dim=-1, keepdim=True) + eps)
-            out[:, start:end] = centered * rms_inv
-
-        return out
 
 nonlinearities = {1: torch.nn.functional.silu, -1: torch.tanh}
 
@@ -258,8 +187,6 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):
             self.cueq_config = None
-        if not hasattr(self, "oeq_config"):
-            self.oeq_config = None
         # First linear
         self.linear_up = Linear(
             self.node_feats_irreps,
@@ -280,7 +207,6 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
             shared_weights=False,
             internal_weights=False,
             cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
         )
         # Convolution weights
         input_dim = self.edge_feats_irreps.num_irreps
@@ -315,7 +241,7 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         sender = edge_index[0]
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
@@ -330,21 +256,19 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
         )  # [n_nodes, irreps]
         message = self.linear(message) / self.avg_num_neighbors
         message = message + sc
-
+        
         return self.reshape(message), None  # [n_nodes, irreps]
 
 
-
 @compile_mode("script")
-class ConcatenateRaceInteractionBlock(InteractionBlock):
+class ConcatenateRaceInteractionBlock(InteractionBlock): 
     """
-    RACE's default (slow) interaction block
+    RACE's default interaction block
+    # TODO: 1) CuEquiv. ver. update 
     """
     def _setup(self) -> None:
         if not hasattr(self, "cueq_config"):
             self.cueq_config = None
-        if not hasattr(self, "oeq_config"):
-            self.oeq_config = None
         # For skip connection
         self.skip_tp_node = FullyConnectedTensorProduct(
             self.node_feats_irreps,
@@ -374,7 +298,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
             self.edge_attrs_irreps,
             self.irreps_mid
         )
-        self.irreps_out = (self.irreps_mid
+        self.irreps_out = (self.irreps_mid 
                            + self.target_irreps).sort().irreps.simplify()
         # Convolution weights
         input_dim = self.edge_feats_irreps.num_irreps
@@ -397,7 +321,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         )
         concatenated_irreps = self.concatenate_irreps_tensor.get_concatenated_irreps()
         self.tensor_regroup_by_irreps = TensorRegroupByIrreps(concatenated_irreps)
-
+        
     def forward(
         self,
         node_attrs: torch.Tensor,
@@ -409,7 +333,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         """
         node_attrs: to_one_hot(species)
         node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors)
+        edge_attrs: spherical harmonics(vectors) 
                     == spherical harmonics(Rab)
         edge_feats: radial_embedding(lengths)
         edge_index: torch.Tensor([senders, receivers])
@@ -420,8 +344,6 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
 
         skip = self.skip_tp_node(node_feats, node_attrs)
-        if not torch.jit.is_scripting() and self.l_separated_layer_norm:
-            node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
         mix = self.conv_tp_weights(edge_feats)  # tp_weights
         mji = self.conv_tp(
@@ -436,121 +358,6 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, irreps]
-        message = message / torch.sqrt(avg_num_neighbors)
-        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
-
-        return (
-            message,
-            skip
-        )  # [n_nodes, channels, (lmax + 1)**2]
-
-
-
-@compile_mode("script")
-class RaceInteractionBlock(InteractionBlock):
-    """
-    RACE's improved interaction block
-    """
-    def _setup(self) -> None:
-        if not hasattr(self, "cueq_config"):
-            self.cueq_config = None
-        if not hasattr(self, "oeq_config"):
-            self.oeq_config = None
-        # For skip connection
-        self.skip_tp_node = FullyConnectedTensorProduct(
-            self.node_feats_irreps,
-            self.node_attrs_irreps,
-            self.hidden_irreps,
-            cueq_config=self.cueq_config,
-        )
-        # First linear
-        self.linear_up = Linear(
-            self.node_feats_irreps,
-            self.target_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        # Channel-wise TensorProduct: messages x sh, weighted by radial MLP
-        irreps_mid, instructions = tp_out_irreps_with_instructions(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            self.hidden_irreps,
-        )
-        self.conv_tp = TensorProduct(
-            self.target_irreps,
-            self.edge_attrs_irreps,
-            irreps_mid,
-            instructions=instructions,
-            shared_weights=False,
-            internal_weights=False,
-            cueq_config=self.cueq_config,
-            oeq_config=self.oeq_config,
-        )
-        # Radial weight MLP feeding the channel-wise TP
-        input_dim = self.edge_feats_irreps.num_irreps
-        self.conv_tp_weights = nn.FullyConnectedNet(
-            [input_dim] + self.radial_MLP + [self.conv_tp.weight_numel],
-            torch.nn.functional.silu,
-        )
-        # Last linear
-        self.irreps_out = irreps_mid.simplify()
-        self.linear_down = Linear(
-            self.irreps_out,
-            self.hidden_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=self.cueq_config,
-        )
-        self._use_oeq_conv_fusion = (
-            self.oeq_config is not None
-            and self.oeq_config.enabled
-            and (self.oeq_config.optimize_all or self.oeq_config.optimize_channelwise)
-            and self.oeq_config.conv_fusion == "atomic"
-        )
-
-
-    def forward(
-        self,
-        node_attrs: torch.Tensor,
-        node_feats: torch.Tensor,
-        edge_attrs: torch.Tensor,
-        edge_feats: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        node_attrs: to_one_hot(species)
-        node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors)
-                    == spherical harmonics(Rab)
-        edge_feats: radial_embedding(lengths)
-        edge_index: torch.Tensor([senders, receivers])
-        """
-        sender = edge_index[0]
-        receiver = edge_index[1]
-        num_nodes = node_feats.shape[0]
-        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
-
-        skip = self.skip_tp_node(node_feats, node_attrs)
-        if not torch.jit.is_scripting() and self.l_separated_layer_norm:
-            node_feats = self.separated_layer_norm(node_feats)
-        node_feats = self.linear_up(node_feats)
-        radial_wgt = self.conv_tp_weights(edge_feats)
-        if not torch.jit.is_scripting() and self._use_oeq_conv_fusion:
-            message = self.conv_tp(
-                node_feats,
-                edge_attrs,
-                radial_wgt,
-                receiver,  # rows
-                sender,    # cols
-            )
-        else:
-            messages = node_feats[sender]
-            mji = self.conv_tp(messages, edge_attrs, radial_wgt)
-            message = scatter_sum(
-                src=mji, index=receiver, dim=0, dim_size=num_nodes
-            )  # [n_nodes, irreps]
-
         message = message / torch.sqrt(avg_num_neighbors)
         message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
 
@@ -598,7 +405,7 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         sc: Optional[torch.Tensor],
         node_attrs: torch.Tensor,
     ) -> torch.Tensor:
-
+        
         node_feats = self.symmetric_contractions(node_feats, node_attrs)
         if self.use_sc and sc is not None:
             return self.linear(node_feats) + sc
@@ -633,19 +440,19 @@ class RaceEquivariantBlock(torch.nn.Module):
             shared_weights=True,
             cueq_config=cueq_config,
         )
-
+        
     def forward(
         self,
         x_node_feats: torch.Tensor,
         node_feats: torch.Tensor,
         sc: Optional[torch.Tensor],
     ) -> torch.Tensor:
-
+        
         node_feats = self.conv_tp(x_node_feats, node_feats, None)
         if self.use_sc and sc is not None:
             node_feats = self.linear(node_feats) + sc
             return node_feats
-
+        
         node_feats = self.linear(node_feats)
         return node_feats
 
@@ -694,8 +501,6 @@ class LinearForceDecoderBlock(torch.nn.Module):
 @simplify_if_compile
 @compile_mode("script")
 class NonLinearReadoutBlock(torch.nn.Module):
-    bias: Optional[torch.Tensor]
-
     def __init__(
         self,
         irreps_in: o3.Irreps,
@@ -704,7 +509,6 @@ class NonLinearReadoutBlock(torch.nn.Module):
         irrep_out: o3.Irreps = o3.Irreps("0e"),
         num_heads: int = 1,
         cueq_config: Optional = None,
-        biases: bool = False,
     ):
         super().__init__()
         self.hidden_irreps = MLP_irreps
@@ -715,10 +519,12 @@ class NonLinearReadoutBlock(torch.nn.Module):
             irreps_out=self.hidden_irreps,
             cueq_config=cueq_config
         )
+        if type(gate) != list:
+            gate = [gate]
 
         self.non_linearity = nn.Activation(
             irreps_in=self.hidden_irreps,
-            acts=[gate]
+            acts=gate
         )
 
         self.linear_2 = Linear(
@@ -727,27 +533,100 @@ class NonLinearReadoutBlock(torch.nn.Module):
             cueq_config=cueq_config
         )
 
-        if biases:
-            n_scalars = sum(mi.mul for mi in o3.Irreps(irrep_out) if mi.ir.is_scalar())
-            if n_scalars > 0:
-                self.bias = torch.nn.Parameter(torch.zeros(n_scalars))
-            else:
-                self.register_parameter("bias", None)
-        else:
-            self.register_parameter("bias", None)
-
     def forward(self, x: torch.Tensor, heads: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.non_linearity(self.linear_1(x))
         if self.num_heads > 1 and heads is not None:
             x = mask_head(x, heads, self.num_heads)
-        out = self.linear_2(x)
-        bias = self.bias
-        if bias is not None:
-            n_scalars = bias.shape[0]
-            out = out.clone()
-            out[:, :n_scalars] = out[:, :n_scalars] + bias
-        return out
+        return self.linear_2(x)
 
+@simplify_if_compile
+@compile_mode("script")
+class NonLinearXReadoutBlock(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        MLP_irreps: o3.Irreps,
+        gate: Optional[Callable],
+        irrep_out: o3.Irreps = o3.Irreps("0e"),
+        num_heads: int = 1,
+        cueq_config: Optional = None,
+    ):
+        super().__init__()
+        self.hidden_irreps = MLP_irreps
+        self.num_heads = num_heads
+
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config
+        )
+        self.linear_x = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config
+        )
+        if type(gate) != list:
+            gate = [gate]
+
+        self.non_linearity = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=gate
+        )
+
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=irrep_out,
+            cueq_config=cueq_config
+        )
+
+    def forward(self, x: torch.Tensor, heads: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = self.non_linearity(self.linear_x(self.linear_1(x)))
+        if self.num_heads > 1 and heads is not None:
+            x = mask_head(x, heads, self.num_heads)
+        return self.linear_2(x)
+
+class NonLinearXForceReadoutBlock(torch.nn.Module):
+    def __init__(
+        self,
+        irreps_in: o3.Irreps,
+        MLP_irreps: o3.Irreps,
+        gate: Optional[Callable],
+        irrep_out: o3.Irreps = o3.Irreps("0e"),
+        num_heads: int = 1,
+        cueq_config: Optional = None,
+    ):
+        super().__init__()
+        self.hidden_irreps = MLP_irreps
+        self.num_heads = num_heads
+
+        self.linear_1 = Linear(
+            irreps_in=irreps_in,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config
+        )
+        self.linear_x = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=self.hidden_irreps,
+            cueq_config=cueq_config
+        )
+        if type(gate) != list:
+            gate = [gate]
+
+        self.non_linearity = nn.Activation(
+            irreps_in=self.hidden_irreps,
+            acts=gate
+        )
+
+        self.linear_2 = Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=irrep_out,
+            cueq_config=cueq_config
+        )
+    def forward(self, x: torch.Tensor, heads: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = self.non_linearity(self.linear_1(x))
+        if self.num_heads > 1 and heads is not None:
+            x = mask_head(x, heads, self.num_heads)
+        return self.linear_2(x)
 
 class NonLinearForceReadoutBlock(torch.nn.Module):
     def __init__(

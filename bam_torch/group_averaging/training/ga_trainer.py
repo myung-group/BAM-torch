@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from e3nn import o3
 from time import time
+import ast
 
 from .transforms import FrameAveraging
 from .ga_forward import model_forward, pa_model_forward
@@ -58,7 +59,8 @@ class GATrainer(BaseTrainer):
         entropy_loss_list = []
         for i, data in enumerate(data_loader):
             data = self.move_to_device(data, self.device)
-            data.positions.requires_grad_(True)
+            #data.positions.requires_grad_(True)
+            #data.cell.requires_grad_(True)
             batch, entropy_loss = self.transform(
                 data=data, 
                 equiv_model=self.equiv_model, # for the probabilistic symmetrization
@@ -216,7 +218,7 @@ class GATrainer(BaseTrainer):
             nlayers = model_config.get('nlayers', 4)
             # if tag_hidden_channels > 0 : for is2rs or s2ef
             tag_hidden_channels = model_config.get('tag_hidden_channels', 0)
-            force_decoder_type = model_config.get('force_decoder_type', 'mlp')
+            force_decoder_type = model_config.get('force_decoder_type', 'mlp') # simple
             force_decoder_model_config = {
                 "simple":{
                     "hidden_channels": 128,
@@ -261,6 +263,213 @@ class GATrainer(BaseTrainer):
                 activation=active_fn,
                 regress_forces=regress_forces,
                 num_species=num_species,
+            )
+        elif model_name in ["equiformer", "equiformer_ga"]:
+            cutoff = model_config.get('cutoff', 6.0)
+            num_species = model_config.get('num_species', 4)
+            avg_num_neighbors = model_config.get('avg_num_neighbors', 30)
+            max_neigh = model_config.get('max_neigh', 30)
+            # default of hidden_channels = 128 and must be larger than 64 (not >=)
+            hidden_channels = model_config.get('hidden_channels', 128)
+            features_dim = model_config.get('features_dim', 128)
+            num_radial_basis = model_config.get('num_radial_basis', 500)
+            nlayers = model_config.get('nlayers', 12)
+            model = model_cls(
+                use_pbc=True,
+                regress_forces=regress_forces,
+                otf_graph=True,
+                max_neighbors=max_neigh,
+                max_radius=cutoff,
+                max_num_elements=num_species,
+                num_layers=nlayers,
+                sphere_channels=128,
+                attn_hidden_channels=hidden_channels,
+                num_heads=8,
+                attn_alpha_channels=32,
+                attn_value_channels=16,
+                ffn_hidden_channels=hidden_channels*4,
+                norm_type='rms_norm_sh',
+                lmax_list=[6],
+                mmax_list=[2],
+                grid_resolution=None, 
+                num_sphere_samples=128,
+                edge_channels=features_dim,
+                use_atom_edge_embedding=True, 
+                share_atom_edge_embedding=False,
+                use_m_share_rad=False,
+                distance_function="gaussian",
+                num_distance_basis=num_radial_basis, 
+                attn_activation='scaled_silu',
+                use_s2_act_attn=False, 
+                use_attn_renorm=True,
+                ffn_activation='scaled_silu',
+                use_gate_act=False,
+                use_grid_mlp=False, 
+                use_sep_s2_act=True,
+                alpha_drop=0.1,
+                drop_path_rate=0.05, 
+                proj_drop=0.0, 
+                weight_init='normal'
+            )
+        elif model_name in ["race", "race_ga", "race_ga_b", "race_ga_r", "race_ga_g", "race_ga_r_df", "race_ga_g_b"]:
+            cutoff = model_config.get('cutoff', 6.0)
+            num_species = model_config.get('num_species', 4)
+            avg_num_neighbors = model_config.get('avg_num_neighbors', 30)
+
+            hidden_irreps = o3.Irreps(
+                model_config.get('hidden_channels', "64x0e+64x1o+64x2e")
+            )
+            features_dim = model_config.get('features_dim', 64)
+            num_basis_func = model_config.get('num_radial_basis', 8)
+            nlayers = model_config.get('nlayers', 3)
+            max_ell = model_config.get('max_ell', 3)
+            
+            output_irreps = model_config.get('output_channels', "1x0e")
+            active_fn = model_config.get('active_fn', "identity")
+            regress_forces = model_config.get('regress_forces', "auto")
+            if regress_forces == True:
+                regress_forces = "autograd"
+            elif regress_forces == False:
+                regress_forces = "false"
+            
+            cueq_config = model_config.get('cueq_config', False)  # true or false
+            if cueq_config == None or cueq_config:
+                try:
+                    import cuequivariance as cue
+                    import cuequivariance_torch as cuet
+                    CUET_AVAILABLE = True
+                except ImportError:
+                    CUET_AVAILABLE = False
+                if CUET_AVAILABLE:
+                    cueq_config = CuEquivarianceConfig(
+                        enabled=True,
+                        layout="ir_mul",
+                        group="O3_e3nn",
+                        optimize_all=True,
+                    )
+                    self.msg += f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m\n'
+            else:
+                cueq_config = None
+                self.msg += f'\nequiv. lib.:\n\033[33m -- e3nn\033[0m\n'
+            
+            model_name = model_config["model"].lower()
+            model_cls = MODEL_REGISTRY.get(model_name)
+            if model_cls is None:
+                raise ValueError(f"Unknown model type: {cfg['model']}")
+
+            model = model_cls(
+                cutoff=cutoff,
+                avg_num_neighbors=avg_num_neighbors,
+                num_species=num_species,
+                max_ell=max_ell,
+                num_basis_func=num_basis_func,
+                hidden_irreps=hidden_irreps,
+                nlayers=nlayers,
+                features_dim=features_dim,
+                output_irreps=output_irreps,
+                active_fn=active_fn,
+                regress_forces=regress_forces,
+                cueq_config=cueq_config
+            )
+        elif model_name in ["schnet"]:
+            cutoff = model_config.get('cutoff', 6.0)
+            num_species = model_config.get('num_species', 4)
+            avg_num_neighbors = model_config.get('avg_num_neighbors', 30)
+            max_neigh = model_config.get('max_neigh', 30)
+            # default of hidden_channels = 128 and must be larger than 64 (not >=)
+            hidden_channels = model_config.get('hidden_channels', 128)
+            features_dim = model_config.get('features_dim', 128)
+            num_radial_basis = model_config.get('num_radial_basis', 100)
+            nlayers = model_config.get('nlayers', 4)
+            # if tag_hidden_channels > 0 : for is2rs or s2ef
+
+            model = model_cls(
+                hidden_channels=hidden_channels, 
+                num_filters=features_dim, 
+                num_interactions=nlayers, 
+                num_gaussians=num_radial_basis, 
+                cutoff=cutoff, 
+                max_num_neighbors=max_neigh
+            )
+        elif model_name in ["dplr"]:
+            cutoff = model_config.get('cutoff', 6.0)
+            num_species = model_config.get('num_species', 4)
+            max_neigh = model_config.get('max_neigh', 40)
+            embedding_dim = model_config.get('embedding_dim', 32)
+            descriptor_hidden = model_config.get('descriptor_hidden', [25, 50, 100])
+            descriptor_axis_neurons = model_config.get('descriptor_axis_neurons', 16)
+            fitting_hidden = model_config.get('fitting_hidden', [240, 240, 240])
+            use_long_range = model_config.get('use_long_range', True)
+            ewald_accuracy = model_config.get('ewald_accuracy', 1e-6)
+            charge_fitting_hidden = model_config.get('charge_fitting_hidden', [240, 240, 240])
+            max_sel = model_config.get('max_sel', 60)
+            force_decoder_hidden = model_config.get('force_decoder_hidden', 128)
+            use_type_embedding = model_config.get('use_type_embedding', True)
+            preprocess = model_config.get('preprocess', 'pbc_preprocess')
+
+            model = model_cls(
+                cutoff=cutoff,
+                num_species=num_species,
+                embedding_dim=embedding_dim,
+                descriptor_hidden_channels=descriptor_hidden,
+                descriptor_axis_neurons=descriptor_axis_neurons,
+                fitting_hidden_channels=fitting_hidden,
+                regress_forces=regress_forces,
+                use_long_range=use_long_range,
+                ewald_accuracy=ewald_accuracy,
+                charge_fitting_hidden=charge_fitting_hidden,
+                max_num_neighbors=max_neigh,
+                max_sel=max_sel,
+                preprocess=preprocess,
+                force_decoder_hidden=force_decoder_hidden,
+                use_type_embedding=use_type_embedding,
+            )
+        elif model_name in ["bpnn", "v_bpnn"]:
+            cutoff = model_config.get('cutoff', 6.0)
+            num_species = model_config.get('num_species', 4)
+            avg_num_neighbors = model_config.get('avg_num_neighbors', 30)
+            max_neigh = model_config.get('max_neigh', 30)
+            # default of hidden_channels = 128 and must be larger than 64 (not >=)
+            hidden_channels = model_config.get('hidden_channels', 64)
+            features_dim = model_config.get('features_dim', 128)
+            num_radial_basis = model_config.get('num_radial_basis', 100)
+            nlayers = model_config.get('nlayers', 4)
+            # if tag_hidden_channels > 0 : for is2rs or s2ef
+
+            def make_default_sf_from_uniq(uniq_element):
+                from bam_torch.group_averaging.model.symmetryfunctions import (
+                    G1, G2, G4
+                )
+                """
+                uniq_element : dict[atomic_number -> element_index]
+                return       : sf_config[ei][ej] -> list of SFs
+                """
+                sf_config = {}
+
+                for Zi, ei in uniq_element.items():
+                    sf_config[ei] = {}
+                    for Zj, ej in uniq_element.items():
+                        sf_config[ei][ej] = [
+                            G1(),
+                            G2(2.0, 1.0),
+                            G2(4.0, 1.0),
+                            G4(1.0, 1.0, -1.0),
+                            G4(2.0, 2.0, 1.0),
+                        ]
+
+                return sf_config
+
+            with open(self.json_data['enr_avg_per_element'], 'r', encoding='utf-8') as file:
+                content = file.read()
+            _, uniq_element = ast.literal_eval(content)
+            
+            sf_config = make_default_sf_from_uniq(uniq_element)
+
+            model = model_cls(
+                sf_config=sf_config, 
+                uniq_element=uniq_element, 
+                r_cutoff=cutoff,
+                hidden=hidden_channels
             )
         else:
             raise ValueError(f"Unknown model type: {cfg['model']}")

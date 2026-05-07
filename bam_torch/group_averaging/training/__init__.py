@@ -3,6 +3,7 @@ from .ga_forward import model_forward, pa_model_forward, base_foward
 
 FORWARD_REGISTRY = {
     "prob": pa_model_forward,
+    "prob_rot": pa_model_forward,
     "probabilistic": pa_model_forward,
     "stochastic": model_forward,
     "det": model_forward,

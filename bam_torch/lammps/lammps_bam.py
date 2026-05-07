@@ -118,10 +118,12 @@ class LAMMPS_BAM(torch.nn.Module):
             )
             if forces is not None:
                 forces = -1 * forces
+                # print(f"forces:{forces[:5]}")
             else:
                 forces = torch.zeros_like(positions)
             if virials is not None:
                 virials = -1 * virials
+                # print(f"virials:{virials}")
             else:
                 virials = torch.zeros_like(displacement)
         else:
