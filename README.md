@@ -111,7 +111,7 @@ MEAN_LOSS(F): ...
 MAE(E):       ...
 MAE(F):       ...
 MAE(S):       ...
-[3] Catalyst carbon social cost: 460 candidates | 23 metals | active26 26
+Catalyst carbon social cost: 460 candidates | 23 metals | active26 26
     central $141/tCO2: lowest Mn $0.02094/kg | highest Rh $1218/kg
     Pt/C 5wt benchmark: $88.12/kg
 [ECONOMICS] Combined BAM + catalyst report -> outputs/bam_catalyst_economics_report.json
@@ -127,8 +127,8 @@ python3 -m pytest tests/test_catalyst_economics.py -q
 Standalone CLI smoke test:
 
 ```text
-[1] SCC draws loaded: 20,000
-[2] Catalyst carbon social cost: 460 candidates | 23 metals | active26 26
+SCC draws loaded: 20,000
+Catalyst carbon social cost: 460 candidates | 23 metals | active26 26
     central $141/tCO2: lowest Mn $0.02094/kg | highest Rh $1218/kg
     Pt/C 5wt benchmark: $88.12/kg
 ```
