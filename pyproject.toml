@@ -43,6 +43,7 @@ cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12
 oeq = ["openequivariance"]
 laplace = ["laplace-torch", "torchmetrics", "curvlinops-for-pytorch==2.0.1"]
 group_averaging = ["mendeleev", "pandas", "torch_scatter", "torch_cluster"]
+economics = ["pandas", "scikit-learn", "openpyxl"]
 
 [project.urls]
 Homepage = "https://github.com/myung-group/BAM-torch"
