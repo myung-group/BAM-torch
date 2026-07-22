@@ -117,7 +117,6 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
 
         if regress_forces or regress_forces == 'direct':
             frc = atoms.get_forces()
-            volume = atoms.get_volume()
             stress = np.zeros(6)
         else:
             frc = np.zeros((len(atoms), 3))
@@ -127,8 +126,11 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             cell = np.diag([30., 30., 30.])
             atoms.set_cell(cell)
         
-        if 'stress' in atoms._calc.results.keys():
+        calculator = atoms.calc
+        has_stress = calculator is not None and 'stress' in calculator.results
+        if has_stress:
             stress = atoms.get_stress()
+            volume = atoms.get_volume()
         else:
             stress = np.zeros(6)
             volume = np.zeros(1)
@@ -166,6 +168,7 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
             edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),  # senders, recerivers
             stress=torch.tensor(stress, dtype=torch.float32),
+            stress_valid=torch.tensor([has_stress], dtype=torch.bool),
             volume=torch.tensor([volume] if np.isscalar(volume) else volume, dtype=torch.float32)
         )                          
         graph_list.append(graph)
