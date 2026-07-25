@@ -9,9 +9,9 @@ description = "uncertainty-aware atomistic simulations at scale"
 authors = [
     {name = "Myung Group", email = "myung.group@gmail.com"}
 ]
-license = {text = "LGPL-3.0"}
+license = {text = "MIT"}
 classifiers = [
-    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
