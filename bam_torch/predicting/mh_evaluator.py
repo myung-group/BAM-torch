@@ -115,14 +115,24 @@ class MultiheadEvaluator(Evaluator):
             cueq_config=None,
         )
         
-        # Load weights
+        # Load weights: raw `params` provide buffers + structure; the EMA weights
+        # (deployment weights) are applied on top when present. EMA may be stored
+        # either as a ready `ema_params` state_dict or as torch_ema `ema_state`.
+        model.load_state_dict(ckpt['params'], strict=False)
+        ema_state = ckpt.get('ema_state')
         if 'ema_params' in ckpt:
-            state_dict = ckpt['ema_params']
+            model.load_state_dict(ckpt['ema_params'], strict=False)
             print("  - Using EMA parameters for evaluation (recommended for inference)")
+        elif ema_state is not None and ema_state.get('shadow_params'):
+            from torch_ema import ExponentialMovingAverage
+            ema = ExponentialMovingAverage(
+                model.parameters(), decay=ema_state.get('decay', 0.999)
+            )
+            ema.load_state_dict(ema_state)
+            ema.copy_to(model.parameters())
+            print("  - Using EMA parameters (from ema_state) for evaluation")
         else:
-            state_dict = ckpt['params']
             print("  - Using regular parameters (EMA not available in checkpoint)")
-        model.load_state_dict(state_dict, strict=False)
         model = model.to(self.device)
         model.eval()
         
