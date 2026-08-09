@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "BAM (Bayesian Atoms Modeling)"
+abstract: "Bayesian E(3) equivariant machine learning interatomic potentials with iterative restratification of many-body message passing (RACE), enabling uncertainty-aware atomistic simulations at scale."
+type: software
+license: MIT
+repository-code: "https://github.com/myung-group/BAM-torch"
+url: "https://github.com/myung-group/BAM-torch"
+keywords:
+  - machine learning potential
+  - Bayesian deep learning
+  - uncertainty quantification
+  - equivariant neural network
+  - atomistic simulation
+authors:
+  - family-names: Willow
+    given-names: Soohaeng Yoo
+  - family-names: Park
+    given-names: Tae Hyeon
+  - family-names: Sim
+    given-names: Gi Beom
+  - family-names: Moon
+    given-names: Sung Wook
+  - family-names: Min
+    given-names: Seung Kyu
+  - family-names: Seo
+    given-names: Sangjae
+  - family-names: Kim
+    given-names: Jaewook
+  - family-names: Yang
+    given-names: D. ChangMo
+  - family-names: Kim
+    given-names: Hyun Woo
+  - family-names: Lee
+    given-names: Juho
+  - family-names: Myung
+    given-names: Chang Woo
+preferred-citation:
+  type: article
+  title: "Bayesian equivariant interatomic potential with iterative restratification of many-body message passing"
+  authors:
+    - family-names: Willow
+      given-names: Soohaeng Yoo
+    - family-names: Park
+      given-names: Tae Hyeon
+    - family-names: Sim
+      given-names: Gi Beom
+    - family-names: Moon
+      given-names: Sung Wook
+    - family-names: Min
+      given-names: Seung Kyu
+    - family-names: Seo
+      given-names: Sangjae
+    - family-names: Kim
+      given-names: Jaewook
+    - family-names: Yang
+      given-names: D. ChangMo
+    - family-names: Kim
+      given-names: Hyun Woo
+    - family-names: Lee
+      given-names: Juho
+    - family-names: Myung
+      given-names: Chang Woo
+  journal: "npj Computational Materials"
+  year: 2026
+  doi: "10.1038/s41524-026-02258-9"
+  url: "https://doi.org/10.1038/s41524-026-02258-9"
