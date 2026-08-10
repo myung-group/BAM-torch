@@ -173,6 +173,13 @@ Build (in addition to the flags above):
 The KOKKOS coupling is required for multi-layer models (ghost feature
 exchange) and needs `cupy` in the python env.
 
+**LAMMPS version requirement**: multi-rank (MPI) runs need LAMMPS
+**stable 22 Jul 2025 or newer** - the ghost feature exchange API
+(`forward_exchange` in the KOKKOS ML-IAP coupling) does not exist in
+older releases (e.g. 29 Aug 2024), which work correctly on a single
+rank only. On clusters where GPU-aware MPI is unstable, add
+`-pk kokkos gpu/aware off`.
+
 Export:
 ```
 python -m bam_torch.lammps.create_lammps_mliap --pkl model.pkl --backend oeq \
