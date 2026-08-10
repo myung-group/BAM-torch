@@ -155,3 +155,43 @@ After that, you can run LAMMPS with the RACE-MLP.
 ```
 $ lmp -in race.in
 ```
+
+## ML-IAP (python) route — kernel-accelerated LAMMPS (OEQ/cueq capable)
+
+`pair_style bam` loads a TorchScript file, which cannot contain JIT kernel
+libraries (OpenEquivariance etc.). The ML-IAP unified route embeds python in
+LAMMPS and runs the eager model instead, so those accelerations work in MD
+(measured ~9x over `pair_style bam` e3nn on an A100, identical energies and
+forces; see `lammps_mliap_bam.py` docstring for conventions).
+
+Build (in addition to the flags above):
+```
+-D PKG_ML-IAP=ON -D PKG_PYTHON=ON -D MLIAP_ENABLE_PYTHON=ON     # needs cython
+-D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_<GPU>=ON
+-D Python_EXECUTABLE=<env>/bin/python
+```
+The KOKKOS coupling is required for multi-layer models (ghost feature
+exchange) and needs `cupy` in the python env.
+
+Export:
+```
+python -m bam_torch.lammps.create_lammps_mliap --pkl model.pkl --backend oeq \
+    [--zbased | --elements Li P S Cl] --output bam_mliap_oeq.pt
+```
+
+Run:
+```
+export PYTHONPATH=<lammps>/python:<BAM-torch>:$PYTHONPATH
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1        # torch>=2.6
+lmp -k on g 1 -sf kk -in in.run
+# pair_style mliap unified /path/bam_mliap_oeq.pt 0
+# pair_coeff * * H C O
+```
+Multi-GPU: standard MPI domain decomposition (`mpirun -np N`, one GPU per
+rank); the adapter exchanges ghost features between message-passing layers
+through the KOKKOS coupling.
+
+Notes: torch<2.6 with OEQ needs a no-op shim for
+`torch.library.register_autocast` (e.g. in sitecustomize.py); checkpoints
+trained on 0-based z-table species (omol/opoly datasets) must be exported
+with `--zbased`.

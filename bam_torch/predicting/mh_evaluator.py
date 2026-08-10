@@ -93,6 +93,9 @@ class MultiheadEvaluator(Evaluator):
         elif regress_forces == False:
             regress_forces = "false"
         
+        interaction_block = model_config.get(
+            'interaction_block', self.json_data.get('interaction_block', 'slow')
+        )
         mlp_irreps = o3.Irreps(f"{features_dim}x0e")
         
         # Create RACEUnified model
@@ -113,6 +116,7 @@ class MultiheadEvaluator(Evaluator):
             compute_stress=True,
             heads=heads,
             cueq_config=None,
+            interaction_block=interaction_block,
         )
         
         # Load weights: raw `params` provide buffers + structure; the EMA weights
