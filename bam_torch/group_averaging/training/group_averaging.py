@@ -1,0 +1,453 @@
+import random
+from copy import deepcopy
+from itertools import product
+from bam_torch.group_averaging.utils.ga_utils import RandomRotate
+
+import torch
+import numpy as np
+
+
+def compute_frames(
+    eigenvec, pos, cell, fa_method="stochastic", pos_3D=None, det_index=0
+):
+    """Compute all `frames` for a given graph, i.e. all possible
+    canonical representations of the 3D graph (of all euclidean transformations).
+
+    Args:
+        eigenvec (tensor): eigenvectors matrix # (3, 3)
+        pos (tensor): centered position vector
+        cell (tensor): cell direction (dxd)
+        fa_method (str): the Frame Averaging (FA) inspired technique
+            chosen to select frames: stochastic-FA (stochastic), deterministic-FA (det),
+            Full-FA (all) or SE(3)-FA (se3).
+        pos_3D: for 2D FA, pass atoms' 3rd position coordinate.
+
+    Returns:
+        (list): 3D position tensors of projected representation
+    """
+    # pos.shape == nbatch*num_nodes, 3
+    # eigenvec.shape == 3, 3
+    dim = pos.shape[1]  # to differentiate between 2D or 3D case
+    plus_minus_list = list(product([1, -1], repeat=dim))
+    plus_minus_list = [torch.tensor(x) for x in plus_minus_list]
+    if fa_method == "prob":
+        plus_minus_list = plus_minus_list[0]
+    all_fa_pos = []
+    all_cell = []
+    all_rots = []
+    assert fa_method in {
+        "all",
+        "stochastic",
+        "det",
+        "se3-all",
+        "se3-stochastic",
+        "se3-det",
+        "prob"  ### 
+    }
+    se3 = fa_method in {
+        "se3-all",
+        "se3-stochastic",
+        "se3-det",
+    }
+    #fa_cell = deepcopy(cell)
+    fa_cell = cell
+
+    if fa_method == "det" or fa_method == "se3-det":
+        sum_eigenvec = torch.sum(eigenvec, axis=0)
+        plus_minus_list = [torch.where(sum_eigenvec >= 0, 1.0, -1.0)]
+
+    for pm in plus_minus_list:
+        # Append new graph positions to list
+        pm = pm.to(eigenvec.device)
+        new_eigenvec = pm * eigenvec
+        # Consider frame if it passes above check
+        fa_pos = pos @ new_eigenvec
+
+        if pos_3D is not None:
+            full_eigenvec = torch.eye(3)
+            fa_pos = torch.cat((fa_pos, pos_3D.unsqueeze(1)), dim=1)
+            full_eigenvec[:2, :2] = new_eigenvec
+            new_eigenvec = full_eigenvec
+
+        if cell is not None:
+            fa_cell = cell @ new_eigenvec
+
+        # Check if determinant is 1 for SE(3) case
+        if se3 and not torch.allclose(
+            torch.linalg.det(new_eigenvec), torch.tensor(1.0), atol=1e-03
+        ):
+            continue
+
+        all_fa_pos.append(fa_pos)
+        all_cell.append(fa_cell)
+        all_rots.append(new_eigenvec.unsqueeze(0))
+
+    # Handle rare case where no R is positive orthogonal
+    if all_fa_pos == []:
+        all_fa_pos.append(fa_pos)
+        all_cell.append(fa_cell)
+        all_rots.append(new_eigenvec.unsqueeze(0))
+
+    # Return frame(s) depending on method fa_method
+    if fa_method == "all" or fa_method == "se3-all":
+        return all_fa_pos, all_cell, all_rots
+
+    elif fa_method == "det" or fa_method == "se3-det":
+        return [all_fa_pos[det_index]], [all_cell[det_index]], [all_rots[det_index]]
+
+    index = random.randint(0, len(all_fa_pos) - 1)
+    return [all_fa_pos[index]], [all_cell[index]], [all_rots[index]]
+
+
+def check_constraints(eigenval, eigenvec, dim=3):
+    """Check that the requirements for frame averaging are satisfied
+
+    Args:
+        eigenval (tensor): eigenvalues
+        eigenvec (tensor): eigenvectors
+        dim (int): 2D or 3D frame averaging
+    """
+    # Check eigenvalues are different
+    if dim == 3:
+        if (eigenval[1] / eigenval[0] > 0.90) or (eigenval[2] / eigenval[1] > 0.90):
+            print("Eigenvalues are quite similar")
+    else:
+        if eigenval[1] / eigenval[0] > 0.90:
+            print("Eigenvalues are quite similar")
+
+    # Check eigenvectors are orthonormal
+    if not torch.allclose(eigenvec @ eigenvec.T, torch.eye(dim), atol=1e-03):
+        print("Matrix not orthogonal")
+
+    # Check determinant of eigenvectors is 1
+    if not torch.allclose(torch.linalg.det(eigenvec), torch.tensor(1.0), atol=1e-03):
+        print("Determinant is not 1")
+
+
+def frame_averaging_3D(pos, cell=None, fa_method="stochastic", check=False):
+    """Computes new positions for the graph atoms using
+    frame averaging, which itself builds on the PCA of atom positions.
+    Base case for 3D inputs.
+
+    Args:
+        pos (tensor): positions of atoms in the graph
+        cell (tensor): unit cell of the graph. None if no pbc.
+        fa_method (str): FA method used
+            (stochastic, det, all, se3-all, se3-det, se3-stochastic)
+        check (bool): check if constraints are satisfied. Default: False.
+
+    Returns:
+        (tensor): updated atom positions
+        (tensor): updated unit cell
+        (tensor): the rotation matrix used (PCA)
+    """
+
+    # Compute centroid and covariance
+    pos = pos - pos.mean(dim=0, keepdim=True)
+    C = torch.matmul(pos.t(), pos)
+
+    # Eigendecomposition
+    eigenval, eigenvec = torch.linalg.eigh(C)
+
+    # Sort, if necessary
+    idx = eigenval.argsort(descending=True)
+    eigenvec = eigenvec[:, idx]
+    eigenval = eigenval[idx]
+
+    # Check if constraints are satisfied
+    if check:
+        check_constraints(eigenval, eigenvec, 3)
+
+    # Compute fa_pos
+    fa_pos, fa_cell, fa_rot = compute_frames(eigenvec, pos, cell, fa_method)
+    # No need to update distances, they are preserved.
+
+    return fa_pos, fa_cell, fa_rot
+
+
+def frame_averaging_2D(pos, cell=None, fa_method="stochastic", check=False):
+    """Computes new positions for the graph atoms using
+    frame averaging, which itself builds on the PCA of atom positions.
+    2D case: we project the atoms on the plane orthogonal to the z-axis.
+    Motivation: sometimes, the z-axis is not the most relevant one (e.g. fixed).
+
+    Args:
+        pos (tensor): positions of atoms in the graph
+        cell (tensor): unit cell of the graph. None if no pbc.
+        fa_method (str): FA method used (stochastic, det, all, se3)
+        check (bool): check if constraints are satisfied. Default: False.
+
+    Returns:
+        (tensor): updated atom positions
+        (tensor): updated unit cell
+        (tensor): the rotation matrix used (PCA)
+    """
+
+    # Compute centroid and covariance
+    pos_2D = pos[:, :2] - pos[:, :2].mean(dim=0, keepdim=True)
+    C = torch.matmul(pos_2D.t(), pos_2D)
+
+    # Eigendecomposition
+    eigenval, eigenvec = torch.linalg.eigh(C)
+    # Sort eigenvalues
+    idx = eigenval.argsort(descending=True)
+    eigenval = eigenval[idx]
+    eigenvec = eigenvec[:, idx]
+
+    # Check if constraints are satisfied
+    if check:
+        check_constraints(eigenval, eigenvec, 3)
+
+    # Compute all frames
+    fa_pos, fa_cell, fa_rot = compute_frames(
+        eigenvec, pos_2D, cell, fa_method, pos[:, 2]
+    )
+    # No need to update distances, they are preserved.
+
+    return fa_pos, fa_cell, fa_rot
+
+
+def data_augmentation(g, d=3, *args):
+    """Data augmentation: randomly rotated graphs are added
+    in the dataloader transform.
+
+    Args:
+        g (data.Data): single graph
+        d (int): dimension of the DA rotation (2D around z-axis or 3D)
+        rotation (str, optional): around which axis do we rotate it.
+            Defaults to 'z'.
+
+    Returns:
+        (data.Data): rotated graph
+    """
+
+    # Sampling a random rotation within [-180, 180] for all axes.
+    if d == 3:
+        transform = RandomRotate([-180, 180], [0, 1, 2])  # 3D
+    else:
+        transform = RandomRotate([-180, 180], [2])  # 2D around z-axis
+
+    # Rotate graph
+    graph_rotated, _, _ = transform(g)
+
+    return graph_rotated
+
+def probablistic_averaging_3D(data, equiv_model, n_samples, fa_method="prob", permute=True):
+    ## Handle residual component: Translational transform
+    #loc_input, loc_center, node_features = parse_translation(node_features)
+    pos = data.positions
+    K = n_samples
+
+    ## 2) Sample from p(g|x)
+    #(hs, gs_list), entropy_loss = equiv_model(node_features, edge_features, idx, n_samples) # (hs, ks)
+    pos = pos - pos.mean(dim=0, keepdim=True)
+    data.positions = pos
+    (hs, gs_list), entropy_loss = equiv_model(data, n_samples)
+
+    cell = data.cell
+    fa_cell = data.cell
+    nbatch, _, _ = cell.shape
+    b_n, _ = pos.shape
+    pos_3D = None    
+    n = int(b_n/nbatch)
+    B = nbatch
+    b = nbatch
+
+    fa_pos = pos.view(nbatch, n, 3)
+    fa_pos_exp = fa_pos[:, None, :, :]  
+    fa_cell_exp = fa_cell[:, None, :, :]
+    fa_pos_exp = torch.matmul(fa_pos_exp, gs_list.transpose(-1, -2))
+    fa_cell_exp = torch.matmul(fa_cell_exp, gs_list.transpose(-1, -2))
+    hs_inv = hs.transpose(2, 3)
+    perm_index = hs_inv.argmax(dim=-1)
+    if permute:
+        fa_pos_exp = torch.einsum('bkij,bkjn->bkin', hs_inv, fa_pos_exp) # permute
+        species_perm = data.species[perm_index] 
+        all_species = species_perm.permute(1, 0, 2).contiguous().view(n_samples, -1)
+    else:
+        species = data.species.view(B, n)   # (B, N)
+        all_species = (
+            species
+            .unsqueeze(1)                              # (B, 1, N)
+            .expand(-1, n_samples, -1)                 # (B, K, N)
+            .permute(1, 0, 2)                          # (K, B, N)
+            .contiguous()
+            .view(n_samples, -1)                       # (K, B*N)
+        )
+    #species = torch.tensor(data.species)
+    all_fa_pos = fa_pos_exp.permute(1, 0, 2, 3).contiguous().view(n_samples, b_n, 3)
+    all_cell = fa_cell_exp.permute(1, 0, 2, 3).contiguous()
+    all_rots = [hs.permute(1, 0, 2, 3), gs_list.permute(1, 0, 2, 3)]#.contiguous().view(n_samples, 3, 3)
+    # No need to update distances, they are preserved.
+    #all_fa_pos.requires_grad_(True)
+
+    edge_index = data.edge_index
+    edge_index = edge_index.view(2, B, -1).permute(1, 0, 2).contiguous()
+    _, _, E = edge_index.shape # B, 2, E  / 2: (iatoms, jatoms)
+    device = edge_index.device
+
+    perm = hs_inv.argmax(dim=-1)       # (B, K, n) 
+    invperm = perm.argsort(dim=-1)     # (B, K, n) 
+
+    batch_offsets = (torch.arange(B, device=device).view(B, 1) * n)  # (B,1)
+    i_old = edge_index[:, 0, :] - batch_offsets        # (B, E)
+    j_old = edge_index[:, 1, :] - batch_offsets        # (B, E)
+
+    i_new = torch.gather(invperm, 2, i_old.unsqueeze(1).expand(B, K, E))  # (B, K, E)
+    j_new = torch.gather(invperm, 2, j_old.unsqueeze(1).expand(B, K, E))  # (B, K, E)
+
+    i_new_off = i_new + batch_offsets.unsqueeze(1)     # (B, K, E)
+    j_new_off = j_new + batch_offsets.unsqueeze(1)     # (B, K, E)
+
+    edge_index_new = torch.stack([i_new_off, j_new_off], dim=2)  # (B, K, 2, E)
+
+    D = fa_pos_exp.size(-1)
+
+    pos_i = fa_pos_exp.gather(2, i_new.unsqueeze(-1).expand(B, K, E, D))  # (B,K,E,D)
+    pos_j = fa_pos_exp.gather(2, j_new.unsqueeze(-1).expand(B, K, E, D))  # (B,K,E,D)
+
+
+    cell_offsets = data["edges"].view(b, -1, 3) # (B, E, 3)
+    b, e_size, _ = cell_offsets.shape
+    expanded_cell = torch.repeat_interleave(cell, repeats=e_size, dim=0)
+    expanded_cell = expanded_cell.reshape(b, e_size, 3, 3)
+    offsets = torch.einsum('bei,beij->bej', cell_offsets, expanded_cell)
+    offsets_exp = offsets[:, None, :, :].expand(B, K, E, 3)
+    offsets_exp_rot = torch.matmul(offsets_exp, gs_list.transpose(-1, -2))
+    offsets_exp_per = offsets_exp_rot.gather(2, perm.unsqueeze(-1).expand(-1, -1, -1, 3).long())
+
+    offsets_cart = torch.einsum('beq,bkqr->bekr', cell_offsets, fa_cell_exp)  # (B,K,E,3)
+    rel_pos = pos_j - pos_i #+ offsets_exp_per # (B, K, E, D)
+    rel_pos = rel_pos.permute(1, 0, 2, 3).contiguous()  # (K, B, E, D)
+    dist = torch.linalg.vector_norm(rel_pos, dim=-1) # (K, B, E)
+
+    i_new_off = i_new + batch_offsets.unsqueeze(1)               # (B,K,E)
+    j_new_off = j_new + batch_offsets.unsqueeze(1)               # (B,K,E)
+    edge_index_new = torch.stack([i_new_off, j_new_off], dim=2).permute(1, 0, 3, 2).contiguous()  # (K,B,E,2)
+    edge_index_new = edge_index_new.view(K,B*E,2)
+    edge_index_new = edge_index_new.permute(0, 2, 1)
+
+    if not permute:
+        entropy_loss = 0.0
+        edge_index = data.edge_index
+        edge_index_new = (
+            edge_index
+            .unsqueeze(0)                     # (1, 2, B*E)
+            .expand(K, -1, -1)                # (K, 2, B*E)
+            .contiguous()
+        )
+
+    return all_fa_pos, all_cell, all_rots, all_species, edge_index_new, entropy_loss
+
+def probablistic_averaging_3D_(data, equiv_model, n_samples, fa_method="prob", check=False):
+    ## Handle residual component: Translational transform
+    #loc_input, loc_center, node_features = parse_translation(node_features)
+    positions = data.positions
+    K = n_samples
+    cell = data.cell
+    fa_cell = data.cell
+    nbatch, _, _ = cell.shape
+    b_n, _ = positions.shape
+    pos_3D = None    
+    n = int(b_n/nbatch)
+
+    # Sample from p(g|x)
+    positions = positions - positions.mean(dim=0, keepdim=True)
+    data.positions = positions
+    (hs, gs_list), entropy_loss = equiv_model(data, n_samples)
+    hs_inv = hs.transpose(2, 3)
+
+    #split info
+    num_atoms = torch.bincount(data['batch']).tolist()
+    num_edges = data.num_edges.tolist()
+
+    pos_split = torch.split(positions, num_atoms, dim=0)
+    species_split = torch.split(data.species, num_atoms, dim=0)
+
+    edge_frac_split = torch.split(data.edges, num_edges, dim=0)
+    i_split = torch.split(data.edge_index[0], num_edges)
+    j_split = torch.split(data.edge_index[1], num_edges)
+
+    cell_split = data.cell  # (B, 3, 3)
+
+    #outputs
+    all_pos = []
+    all_species = []
+    all_cell = []
+    all_rel_pos = []
+    all_dist = []
+    all_edge_index = []
+    all_rots = [hs.permute(1, 0, 2, 3), gs_list.permute(1, 0, 2, 3)]
+
+    atom_offset = 0
+
+    for b, (pos, species, cell, edge_frac, i_old, j_old) in enumerate(
+        zip(pos_split, species_split, cell_split,
+            edge_frac_split, i_split, j_split)
+    ):
+        n = pos.size(0)
+        E = edge_frac.size(0)
+
+        # ---- rotations ----
+        pos_rot = torch.matmul(
+            pos[None, :, :], gs_list[b].transpose(-1, -2)
+        )                               # (K, n, 3)
+
+        cell_rot = torch.matmul(
+            cell[None, :, :], gs_list[b].transpose(-1, -2)
+        )                               # (K, 3, 3)
+
+        # ---- permutation ----
+        perm = hs_inv[b].argmax(dim=-1)   # (K, n)
+        invperm = perm.argsort(dim=-1)    # (K, n)
+        index = invperm.unsqueeze(-1).expand(-1, -1, 3)  # (K, n, 3)
+        pos_perm = torch.gather(pos_rot, dim=1, index=index)
+        species_perm = species[invperm]  # (K, n)
+
+        # ---- local edge indices ----
+        i_loc = i_old - atom_offset
+        j_loc = j_old - atom_offset
+
+        i_new = invperm.gather(
+            1, i_loc[None, :].expand(K, E)
+        )                                 # (K, E)
+
+        j_new = invperm.gather(
+            1, j_loc[None, :].expand(K, E)
+        )                                 # (K, E)
+
+        # ---- PBC offsets ----
+        offsets = torch.einsum(
+            "ei,kij->kej", edge_frac, cell_rot
+        )                                 # (K, E, 3)
+
+        # ---- relative vectors ----
+        rel = pos_perm[:, j_new] - pos_perm[:, i_new] + offsets
+        dist = torch.linalg.norm(rel, dim=-1)   # (K, E)
+
+        # ---- global edge index ----
+        i_glob = i_new + atom_offset
+        j_glob = j_new + atom_offset
+
+        edge_index = torch.stack(
+            [i_glob, j_glob], dim=1
+        )                                 # (K, 2, E)
+
+        # ---- collect ----
+        all_pos.append(pos_perm)
+        all_species.append(species_perm)
+        all_cell.append(cell_rot)
+        all_rel_pos.append(rel)
+        #all_dist.append(dist)
+        all_edge_index.append(edge_index)
+
+        atom_offset += n
+
+    all_fa_pos = torch.cat(all_pos, dim=1)              # (K, N_atoms, 3)
+    all_species = torch.cat(all_species, dim=1)      # (K, N_atoms)
+    all_cell = torch.cat(all_cell, dim=1)             # (K, B*3, 3)
+    all_rel_pos = torch.cat(all_rel_pos, dim=2)      # (K, N_edges, 3)
+    #all_dist = torch.cat(all_dist, dim=1)            # (K, N_edges)
+    all_edge_index = torch.cat(all_edge_index, dim=2)# (K, 2, N_edges)
+
+    return all_fa_pos, all_cell, all_rots, all_species, all_edge_index, entropy_loss

@@ -5,7 +5,7 @@
     "cueq_config" : false,
     "regress_forces" : true,
     "trainer" : "base",
-    "fname_traj" : "train_300K.xyz",
+    "fname_traj" : "../dataset/train_300K.xyz",
     "ntrain" : 200,
     "ntest" : 100,
     "element" : "auto",
