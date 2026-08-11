@@ -1,0 +1,30 @@
+# staged NPT equilibration template (adjust temperatures/durations per system)
+units metal
+newton on
+atom_style atomic
+atom_modify map yes
+boundary p p p
+read_data system.data
+pair_style mliap unified ./bam_mliap_oeq.pt 0
+pair_coeff * * H C O
+timestep 0.001
+thermo 200
+thermo_style custom step temp pe etotal press vol density
+restart 100000 restart.equil.*
+
+minimize 1.0e-6 1.0e-8 2000 20000
+reset_timestep 0
+velocity all create 600.0 12345 dist gaussian
+fix f1 all nvt temp 600.0 600.0 0.1          # hot relaxation
+run 100000
+unfix f1
+fix f2 all npt temp 600.0 600.0 0.1 iso 1.0 1.0 1.0   # compression
+run 200000
+unfix f2
+fix f3 all npt temp 600.0 300.0 0.1 iso 1.0 1.0 1.0   # cooling
+run 200000
+unfix f3
+fix f4 all npt temp 300.0 300.0 0.1 iso 1.0 1.0 1.0   # target-T equilibration
+run 500000
+write_data equilibrated.data
+print "EQUIL_COMPLETE"

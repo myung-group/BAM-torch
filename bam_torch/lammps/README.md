@@ -177,8 +177,18 @@ exchange) and needs `cupy` in the python env.
 **stable 22 Jul 2025 or newer** - the ghost feature exchange API
 (`forward_exchange` in the KOKKOS ML-IAP coupling) does not exist in
 older releases (e.g. 29 Aug 2024), which work correctly on a single
-rank only. On clusters where GPU-aware MPI is unstable, add
-`-pk kokkos gpu/aware off`.
+rank only.
+
+**Runtime flags**: `-pk kokkos neigh half newton on` (pair mliap requires
+newton on; neigh half reconciles it with the KOKKOS check). The exchange
+buffers must stay on the GPU - do **not** use `gpu/aware off` with mliap
+(the host pack path is unimplemented). On fabrics whose UCX lacks CUDA
+support, bypass UCX with TCP instead:
+`--mca pml ob1 --mca btl self,sm,tcp --mca btl_tcp_if_include <subnet>`
+plus explicit `-x` forwarding of PYTHONPATH/PATH/TORCH_FORCE_... to remote
+ranks. Verified rank-independent (1 vs 2 ranks: energy 0.05 meV/atom,
+identical pressure, force corr 1.000000). See
+`examples/example-LAMMPS-mliap/` for complete SLURM job templates.
 
 Export:
 ```

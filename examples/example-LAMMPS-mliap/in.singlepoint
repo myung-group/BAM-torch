@@ -1,0 +1,13 @@
+# single-point energy/force check (compare against an ASE reference)
+units metal
+newton on
+atom_style atomic
+atom_modify map yes
+boundary p p p
+read_data system.data
+pair_style mliap unified ./bam_mliap_oeq.pt 0
+pair_coeff * * H C O
+thermo 1
+dump d all custom 1 forces.dump id type fx fy fz
+dump_modify d sort id format float %20.12g
+run 0
