@@ -22,8 +22,10 @@ Design (modeled on MACE's lammps_mliap_mace.py):
     (e.g. omol/opoly-style data encodes species as Z-1 while storing an
     identity table - use elements=chemical_symbols[1:num_species+1]).
 
-Export/load (the object is rebuilt from the pkl at unpickling time via
-__reduce__, so OEQ JIT modules never need to be pickled):
+Export/load: the weights are embedded in the .pt and the model is rebuilt at
+unpickling time via __reduce__, so OEQ JIT modules never need to be pickled and
+the file does not depend on model.pkl afterwards.  Older .pt files that only
+recorded the checkpoint path still load (they need model.pkl at that path):
 
     from bam_torch.lammps.lammps_mliap_bam import rebuild_bam_mliap
     import torch
@@ -142,7 +144,6 @@ class LAMMPS_MLIAP_BAM(MLIAPUnified):
         self.rcutfac = 0.5 * float(race.cutoff)     # MACE convention
         self.device = "cpu"
         self.initialized = False
-        self._factory_args = None
 
     def _initialize(self, data):
         using_kokkos = "kokkos" in data.__class__.__module__.lower()
@@ -199,10 +200,10 @@ class LAMMPS_MLIAP_BAM(MLIAPUnified):
             data.update_pair_forces(pf.cpu().numpy())
 
     def __reduce__(self):
-        args = getattr(self, "_factory_args", None)
-        if args:
-            return (rebuild_bam_mliap, tuple(args))
-        return super().__reduce__()
+        payload = getattr(self, "_state_payload", None)
+        if payload is None:
+            return super().__reduce__()
+        return (rebuild_from_state, (payload,))
 
     def compute_descriptors(self, data):
         pass
@@ -211,12 +212,36 @@ class LAMMPS_MLIAP_BAM(MLIAPUnified):
         pass
 
 
+def _build_race(cfg, backend):
+    """Instantiate RACE from a checkpoint config with the chosen TP backend."""
+    from e3nn import o3
+    from bam_torch.model.models import RACE
+    kw = {}
+    if backend == "oeq":
+        from bam_torch.model.wrapper_ops import OEQConfig, OEQ_AVAILABLE
+        if not OEQ_AVAILABLE:
+            raise RuntimeError("backend='oeq' requested but openequivariance "
+                               "is not importable")
+        kw["oeq_config"] = OEQConfig(enabled=True, optimize_all=True)
+    return RACE(cutoff=cfg["cutoff"], avg_num_neighbors=cfg["avg_num_neighbors"],
+                num_species=cfg["num_species"], max_ell=cfg["max_ell"],
+                num_basis_func=cfg["num_radial_basis"],
+                hidden_irreps=o3.Irreps(cfg["hidden_channels"]),
+                nlayers=cfg["nlayers"], features_dim=cfg["features_dim"],
+                output_irreps=o3.Irreps(cfg.get("output_channels", "1x0e")),
+                active_fn=cfg.get("active_fn", "identity"),
+                regress_forces="false",
+                interaction_block=cfg.get("interaction_block", "slow"), **kw)
+
+
 def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
                       elements: Optional[List[str]] = None):
     """Build a LAMMPS_MLIAP_BAM from a training checkpoint.
 
-    Used both for export and for unpickling (via __reduce__), so backend
-    modules that cannot be pickled (OEQ JIT) are rebuilt at load time.
+    Used for export, and for unpickling legacy path-based .pt files.  Backend
+    modules that cannot be pickled (OEQ JIT) are rebuilt at load time; the
+    returned object carries the weights so torch.save writes a self-contained
+    file (see rebuild_from_state).
 
     Args:
         pkl_path: RACE training checkpoint (model.pkl).
@@ -232,22 +257,7 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
 
     ck = torch.load(pkl_path, map_location="cpu", weights_only=False)
     cfg = ck["input.json"]
-    kw = {}
-    if backend == "oeq":
-        from bam_torch.model.wrapper_ops import OEQConfig, OEQ_AVAILABLE
-        if not OEQ_AVAILABLE:
-            raise RuntimeError("backend='oeq' requested but openequivariance "
-                               "is not importable")
-        kw["oeq_config"] = OEQConfig(enabled=True, optimize_all=True)
-    race = RACE(cutoff=cfg["cutoff"], avg_num_neighbors=cfg["avg_num_neighbors"],
-                num_species=cfg["num_species"], max_ell=cfg["max_ell"],
-                num_basis_func=cfg["num_radial_basis"],
-                hidden_irreps=o3.Irreps(cfg["hidden_channels"]),
-                nlayers=cfg["nlayers"], features_dim=cfg["features_dim"],
-                output_irreps=o3.Irreps(cfg.get("output_channels", "1x0e")),
-                active_fn=cfg.get("active_fn", "identity"),
-                regress_forces="false",
-                interaction_block=cfg.get("interaction_block", "slow"), **kw)
+    race = _build_race(cfg, backend)
     sd = {k.replace("module.", ""): v for k, v in ck["params"].items()}
     race.load_state_dict(sd, strict=False)   # e3nn-only buffers differ per backend
     ema_state = ck.get("ema_state")
@@ -295,5 +305,28 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
         elements = [e or "X" for e in elements]
 
     obj = LAMMPS_MLIAP_BAM(race, enr, elements=elements)
-    obj._factory_args = (pkl_path, backend, list(elements))
+    # Embed the (EMA-applied) weights so torch.save writes a self-contained
+    # .pt: no model.pkl and no stable path needed at load time.
+    obj._state_payload = {
+        "cfg": cfg,
+        "backend": backend,
+        "elements": list(elements),
+        "enr": dict(enr),
+        "state_dict": {k: v.cpu() for k, v in race.state_dict().items()},
+    }
+    return obj
+
+
+def rebuild_from_state(payload):
+    """Rebuild from weights embedded in the .pt (no checkpoint file needed).
+
+    Kernel modules (OEQ JIT) still cannot be pickled and are reconstructed
+    here; only the weights travel inside the file.
+    """
+    race = _build_race(payload["cfg"], payload["backend"])
+    race.load_state_dict(payload["state_dict"], strict=False)
+    race.criterion = None
+    race.eval()
+    obj = LAMMPS_MLIAP_BAM(race, payload["enr"], elements=payload["elements"])
+    obj._state_payload = payload
     return obj
