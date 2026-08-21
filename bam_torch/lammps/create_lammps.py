@@ -88,6 +88,27 @@ def create_lammps_model(pkl_path='model.pkl', pt_path='model.pt', output_path=No
     if hasattr(model, 'module'):
         model = model.module
 
+    # Training validates the EMA weights, so the EMA state is what the
+    # reported model accuracy refers to.  If pt_path holds a checkpoint
+    # where EMA was never applied, a silently different model gets
+    # deployed.  copy_to() is idempotent, so re-applying it to an
+    # already-EMA pt is a no-op.
+    _ema = pckl.get('ema_state')
+    if _ema and _ema.get('shadow_params'):
+        try:
+            from torch_ema import ExponentialMovingAverage
+            _e = ExponentialMovingAverage(model.parameters(),
+                                          decay=_ema.get('decay', 0.999))
+            _e.load_state_dict(_ema)
+            _e.copy_to(model.parameters())
+            print('  - EMA weights applied (decay=%s, num_updates=%s).'
+                  % (_ema.get('decay'), _ema.get('num_updates')))
+        except Exception as _err:
+            raise RuntimeError(
+                'ema_state is present but could not be applied: %s' % _err)
+    else:
+        print('  - WARNING: no ema_state in checkpoint -> RAW weights exported.')
+
     model.eval()
     species = torch.tensor(list(uniq_element.keys()))
     model.atomic_numbers = species.clone().detach()

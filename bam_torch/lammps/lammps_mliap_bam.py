@@ -257,6 +257,21 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
                                        decay=ema_state.get("decay", 0.999))
         ema.load_state_dict(ema_state)
         ema.copy_to(race.parameters())
+
+    # This adapter does not implement the e_corr (scale_shift) energy
+    # correction that pair_bam applies in lammps_bam.py.  A checkpoint
+    # trained with use_scale_shift=True would silently lose a constant
+    # per-atom energy offset here, so fail loudly instead.
+    _vss = ck.get("valid_scale_shift")
+    if _vss:
+        _vals = list(_vss.values()) if isinstance(_vss, dict) else list(_vss)
+        _ec = float(torch.tensor([float(v) for v in _vals]).flatten().mean())
+        if abs(_ec) > 1e-12:
+            raise RuntimeError(
+                "checkpoint has e_corr=%.6g but this ML-IAP adapter ignores "
+                "it; implement e_corr (see bam_torch/lammps/lammps_bam.py) "
+                "before using this checkpoint." % _ec)
+
     race.criterion = None
     race.eval()
 
