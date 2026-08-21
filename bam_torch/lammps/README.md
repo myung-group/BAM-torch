@@ -164,14 +164,72 @@ LAMMPS and runs the eager model instead, so those accelerations work in MD
 (measured ~9x over `pair_style bam` e3nn on an A100, identical energies and
 forces; see `lammps_mliap_bam.py` docstring for conventions).
 
-Build (in addition to the flags above):
+### Build
+
+Use **upstream** LAMMPS here, not the `myung-group/lammps` fork used above -
+the fork is pinned to 29 Aug 2024 and predates `forward_exchange`.
+
 ```
--D PKG_ML-IAP=ON -D PKG_PYTHON=ON -D MLIAP_ENABLE_PYTHON=ON     # needs cython
--D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_<GPU>=ON
--D Python_EXECUTABLE=<env>/bin/python
+$ git clone --branch stable https://github.com/lammps/lammps.git lammps-mliap
+$ cd lammps-mliap
+$ grep '#define LAMMPS_VERSION' src/version.h                                 # >= 22 Jul 2025
+$ grep -c forward_exchange src/KOKKOS/mliap_unified_couple_kokkos.pyx         # must be > 0
+$ mkdir build && cd build
 ```
+
+Python env: `torch`, `e3nn`, `torch_ema`, `ase`, `cython`, `cupy`
+(+ `openequivariance` for the OEQ backend).
+
+The two configurations below have both been built and run.
+
+|                  | aarch64 / GH200            | x86_64 / A100                       |
+|------------------|----------------------------|-------------------------------------|
+| host gcc         | 11.5 (system)              | system 8.5 too old -> `gcc-toolset-12` |
+| CUDA             | 12.8                       | 12.6                                |
+| MPI              | OpenMPI 5.0.6              | none installed -> `BUILD_MPI=OFF`   |
+| `Kokkos_ARCH_*`  | `HOPPER90`                 | `AMPERE80`                          |
+
+aarch64 / GH200:
+```
+$ export PATH=/usr/local/cuda-12.8/bin:/path/to/openmpi/bin:$PATH
+$ cmake \
+      -D CMAKE_BUILD_TYPE=Release \
+      -D CMAKE_CXX_STANDARD=17 \
+      -D CMAKE_CXX_COMPILER=$(pwd)/../lib/kokkos/bin/nvcc_wrapper \
+      -D BUILD_MPI=ON -D BUILD_OMP=ON \
+      -D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_HOPPER90=ON \
+      -D PKG_ML-IAP=ON -D PKG_ML-SNAP=ON -D MLIAP_ENABLE_PYTHON=ON \
+      -D PKG_PYTHON=ON -D Python_EXECUTABLE=$(which python) \
+      ../cmake
+$ make -j 16
+```
+
+x86_64 / A100 (RHEL/Rocky 8 - the system compiler is too old for CUDA 12 + C++17):
+```
+$ source /opt/rh/gcc-toolset-12/enable        # or gcc-toolset-13
+$ export PATH=/usr/local/cuda-12.6/bin:$PATH
+$ export CUDA_HOME=/usr/local/cuda-12.6
+$ cmake \
+      ... same as above, except ...
+      -D BUILD_MPI=OFF \
+      -D Kokkos_ARCH_AMPERE80=ON \
+      ../cmake
+$ make -j 24
+```
+
+`PKG_ML-SNAP` is mandatory - ML-IAP does not configure without it.
 The KOKKOS coupling is required for multi-layer models (ghost feature
 exchange) and needs `cupy` in the python env.
+
+Pick `Kokkos_ARCH_*` from the GPU compute capability: 7.0 `VOLTA70`,
+8.0 `AMPERE80`, 8.6 `AMPERE86`, 8.9 `ADA89`, 9.0 `HOPPER90`. There is no
+`AMPERE100`; CMake silently ignores an unknown `Kokkos_ARCH_*`, so a typo
+builds for the wrong GPU with no error.
+
+Verify:
+```
+$ ./lmp -h | grep mliap        # expect: mliap  mliap/kk
+```
 
 **LAMMPS version requirement**: multi-rank (MPI) runs need LAMMPS
 **stable 22 Jul 2025 or newer** - the ghost feature exchange API
@@ -207,6 +265,17 @@ lmp -k on g 1 -sf kk -in in.run
 Multi-GPU: standard MPI domain decomposition (`mpirun -np N`, one GPU per
 rank); the adapter exchanges ghost features between message-passing layers
 through the KOKKOS coupling.
+
+### Troubleshooting
+
+| symptom | cause |
+|---|---|
+| `No module named 'lammps'` | `PYTHONPATH` missing `<lammps>/python` |
+| `... no forward_exchange()` | LAMMPS < 22 Jul 2025, or not launched with `-k on ... -sf kk` |
+| `Cannot use -kokkos on without KOKKOS installed` | binary built without `PKG_KOKKOS` |
+| `Loading mliappy unified module failure` | `MLIAP_ENABLE_PYTHON=OFF`, or the adapter is not importable |
+| CMake cannot find MPI | no MPI on the host - use `BUILD_MPI=OFF` |
+| nvcc rejects C++17 / Kokkos | host gcc too old - enable `gcc-toolset-12` |
 
 Notes: torch<2.6 with OEQ needs a no-op shim for
 `torch.library.register_autocast` (e.g. in sitecustomize.py); checkpoints
