@@ -28,7 +28,7 @@ $ cmake \
     -D Kokkos_ENABLE_CUDA=ON \
     -D CMAKE_CXX_COMPILER=$(pwd)/../lib/kokkos/bin/nvcc_wrapper \
     -D Kokkos_ARCH_AMDAVX=ON \
-    -D Kokkos_ARCH_AMPERE100=ON \
+    -D Kokkos_ARCH_AMPERE80=ON \      # match your GPU; there is no AMPERE100
     -D CMAKE_PREFIX_PATH=$(pwd)/../../libtorch \
     -D PKG_ML-BAM=ON \
     ../cmake
@@ -166,6 +166,20 @@ forces; see `lammps_mliap_bam.py` docstring for conventions).
 
 ### Build
 
+One build serves all three run layouts on a given machine. Only `BUILD_MPI`
+and the MPI it links against change:
+
+| | single GPU | multi GPU (one node) | multi node |
+|---|---|---|---|
+| MPI needed | no | yes, **CUDA-aware** | yes, **CUDA-aware** |
+| cmake | `BUILD_MPI=OFF` | `BUILD_MPI=ON` | `BUILD_MPI=ON` |
+| build differs? | — | identical to multi node | identical to multi GPU |
+| launch | `lmp -k on g 1 ...` | `mpirun -np N ./gpu_bind.sh lmp ...` | `mpirun -np N <MCA> ./gpu_bind.sh lmp ...` |
+
+So there are really two builds per architecture: an MPI-less one, and one
+that covers both multi-GPU and multi-node. If in doubt, build the MPI one -
+it still runs single-rank.
+
 Use **upstream** LAMMPS here, not the `myung-group/lammps` fork used above -
 the fork is pinned to 29 Aug 2024 and predates `forward_exchange`.
 
@@ -174,29 +188,92 @@ $ git clone --branch stable https://github.com/lammps/lammps.git lammps-mliap
 $ cd lammps-mliap
 $ grep '#define LAMMPS_VERSION' src/version.h                                 # >= 22 Jul 2025
 $ grep -c forward_exchange src/KOKKOS/mliap_unified_couple_kokkos.pyx         # must be > 0
+```
+
+#### Toolchain and python environment
+
+Both configurations below have been built and run, including multi-rank GPU
+MD. Package versions are the ones actually used, not lower bounds.
+
+|                  | aarch64 / GH200                | x86_64 / A100                          |
+|------------------|--------------------------------|----------------------------------------|
+| host gcc         | 11.5 (system)                  | system 8.5 too old -> `gcc-toolset-12` (12.2.1) |
+| CUDA             | 12.8                           | 12.6                                   |
+| cmake            | 3.26.5                         | 3.26.5                                 |
+| MPI              | OpenMPI 5.0.6 (system)         | OpenMPI 5.0.6, **self-built with `--with-cuda`** |
+| `Kokkos_ARCH_*`  | `HOPPER90`                     | `AMPERE80`                             |
+| python           | 3.11.15                        | 3.11.12                                |
+| torch            | 2.12.1+cu126                   | 2.5.1+cu121                            |
+| e3nn             | 0.6.0                          | 0.4.4                                  |
+| ase              | 3.29.0                         | 3.25.0                                 |
+| numpy            | 1.26.4                         | 1.26.4                                 |
+| cupy             | 13.6.0                         | 13.6.0                                 |
+| openequivariance | 0.6.8                          | 0.6.8                                  |
+| torch-ema        | 0.3                            | 0.3                                    |
+| cython           | 3.2.9                          | 3.2.9                                  |
+| ninja            | required (see below)           | required (see below)                   |
+
+```
+$ conda create -n bam-mlmd python=3.11 && conda activate bam-mlmd
+$ pip install torch --index-url https://download.pytorch.org/whl/cu126
+$ pip install e3nn ase numpy torch_ema cython cupy-cuda12x ninja
+$ pip install openequivariance          # OEQ backend
+```
+
+`cupy` is not optional: the KOKKOS coupling that multi-layer models need for
+ghost feature exchange goes through it.
+
+**ninja.** OpenEquivariance ships a precompiled extension only for
+torch >= 2.10. On older torch it JIT-compiles at first use and needs the
+`ninja` executable on `PATH` (`pip install ninja` puts it in the env's `bin`).
+Without it every rank dies with `Could not import DeviceProp: Ninja is
+required to load C++ extensions`, surfacing as
+`ERROR: Running mliappy unified module failure`. Warm the cache with a
+single-rank run before launching multi-rank, so ranks do not compile
+concurrently into the same directory.
+
+#### MPI - only for multi GPU and multi node
+
+Any run with more than one rank needs a **CUDA-aware** MPI: the ghost feature
+exchange hands device pointers straight to MPI and has no host-staging path.
+
+```
+$ ompi_info --parsable --all | grep mpi_built_with_cuda_support:value
+```
+
+`:true` -> use it. `:false` -> multi-rank segfaults inside the exchange
+(`invalid permissions for mapped object`), and `-pk kokkos ... gpu/aware off`
+does **not** work around it. A stock distribution OpenMPI is usually not
+CUDA-aware; RHEL/Rocky 8 ships 4.1.1 without it. Build one:
+
+```
+$ wget https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-5.0.6.tar.bz2
+$ tar xf openmpi-5.0.6.tar.bz2 && cd openmpi-5.0.6
+$ ./configure --prefix=$HOME/prog/openmpi-cuda \
+      --with-cuda=/usr/local/cuda-12.6 \
+      --with-cuda-libdir=/usr/local/cuda-12.6/lib64/stubs
+$ make -j 24 && make install
+$ export PATH=$HOME/prog/openmpi-cuda/bin:$PATH
+$ export LD_LIBRARY_PATH=$HOME/prog/openmpi-cuda/lib:$LD_LIBRARY_PATH
+```
+
+Put its `bin` first on `PATH` **before** configuring LAMMPS, so cmake picks it
+up rather than the system one.
+
+#### cmake + make: aarch64 / GH200
+
+```
+$ export PATH=/usr/local/cuda-12.8/bin:/path/to/openmpi/bin:$PATH
 $ mkdir build && cd build
 ```
 
-Python env: `torch`, `e3nn`, `torch_ema`, `ase`, `cython`, `cupy`
-(+ `openequivariance` for the OEQ backend).
-
-The two configurations below have both been built and run.
-
-|                  | aarch64 / GH200            | x86_64 / A100                       |
-|------------------|----------------------------|-------------------------------------|
-| host gcc         | 11.5 (system)              | system 8.5 too old -> `gcc-toolset-12` |
-| CUDA             | 12.8                       | 12.6                                |
-| MPI              | OpenMPI 5.0.6              | none installed -> `BUILD_MPI=OFF`   |
-| `Kokkos_ARCH_*`  | `HOPPER90`                 | `AMPERE80`                          |
-
-aarch64 / GH200:
+single GPU:
 ```
-$ export PATH=/usr/local/cuda-12.8/bin:/path/to/openmpi/bin:$PATH
 $ cmake \
       -D CMAKE_BUILD_TYPE=Release \
       -D CMAKE_CXX_STANDARD=17 \
       -D CMAKE_CXX_COMPILER=$(pwd)/../lib/kokkos/bin/nvcc_wrapper \
-      -D BUILD_MPI=ON -D BUILD_OMP=ON \
+      -D BUILD_MPI=OFF -D BUILD_OMP=ON \
       -D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_HOPPER90=ON \
       -D PKG_ML-IAP=ON -D PKG_ML-SNAP=ON -D MLIAP_ENABLE_PYTHON=ON \
       -D PKG_PYTHON=ON -D Python_EXECUTABLE=$(which python) \
@@ -204,18 +281,58 @@ $ cmake \
 $ make -j 16
 ```
 
-x86_64 / A100 (RHEL/Rocky 8 - the system compiler is too old for CUDA 12 + C++17):
+multi GPU / multi node (one build, covers both):
 ```
-$ source /opt/rh/gcc-toolset-12/enable        # or gcc-toolset-13
-$ export PATH=/usr/local/cuda-12.6/bin:$PATH
-$ export CUDA_HOME=/usr/local/cuda-12.6
 $ cmake \
       ... same as above, except ...
-      -D BUILD_MPI=OFF \
-      -D Kokkos_ARCH_AMPERE80=ON \
+      -D BUILD_MPI=ON \
+      -D MPI_CXX_COMPILER=$(which mpicxx) \
+      ../cmake
+$ make -j 16
+```
+
+#### cmake + make: x86_64 / A100
+
+RHEL/Rocky 8 - the system compiler is too old for CUDA 12 + C++17:
+
+```
+$ source /opt/rh/gcc-toolset-12/enable        # or gcc-toolset-13
+$ export PATH=$HOME/prog/openmpi-cuda/bin:/usr/local/cuda-12.6/bin:$PATH
+$ export LD_LIBRARY_PATH=$HOME/prog/openmpi-cuda/lib:$LD_LIBRARY_PATH
+$ export CUDA_HOME=/usr/local/cuda-12.6
+$ mkdir build && cd build
+```
+
+single GPU:
+```
+$ cmake \
+      -D CMAKE_BUILD_TYPE=Release \
+      -D CMAKE_CXX_STANDARD=17 \
+      -D CMAKE_CXX_COMPILER=$(pwd)/../lib/kokkos/bin/nvcc_wrapper \
+      -D BUILD_MPI=OFF -D BUILD_OMP=ON \
+      -D PKG_KOKKOS=ON -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_AMPERE80=ON \
+      -D PKG_ML-IAP=ON -D PKG_ML-SNAP=ON -D MLIAP_ENABLE_PYTHON=ON \
+      -D PKG_PYTHON=ON -D Python_EXECUTABLE=$(which python) \
       ../cmake
 $ make -j 24
 ```
+
+multi GPU / multi node (one build, covers both):
+```
+$ cmake \
+      ... same as above, except ...
+      -D BUILD_MPI=ON \
+      -D MPI_CXX_COMPILER=$(which mpicxx) \
+      ../cmake
+$ make -j 24
+```
+
+Confirm it linked against the CUDA-aware MPI, not the system one:
+```
+$ ldd lmp | grep libmpi        # must point into $HOME/prog/openmpi-cuda/lib
+```
+
+#### Notes on the flags
 
 `PKG_ML-SNAP` is mandatory - ML-IAP does not configure without it.
 The KOKKOS coupling is required for multi-layer models (ghost feature
@@ -237,34 +354,74 @@ $ ./lmp -h | grep mliap        # expect: mliap  mliap/kk
 older releases (e.g. 29 Aug 2024), which work correctly on a single
 rank only.
 
-**Runtime flags**: `-pk kokkos neigh half newton on` (pair mliap requires
-newton on; neigh half reconciles it with the KOKKOS check). The exchange
-buffers must stay on the GPU - do **not** use `gpu/aware off` with mliap
-(the host pack path is unimplemented). On fabrics whose UCX lacks CUDA
-support, bypass UCX with TCP instead:
-`--mca pml ob1 --mca btl self,sm,tcp --mca btl_tcp_if_include <subnet>`
-plus explicit `-x` forwarding of PYTHONPATH/PATH/TORCH_FORCE_... to remote
-ranks. Verified rank-independent (1 vs 2 ranks: energy 0.05 meV/atom,
-identical pressure, force corr 1.000000). See
-`examples/example-LAMMPS-mliap/` for complete SLURM job templates.
+### Export
 
-Export:
 ```
 python -m bam_torch.lammps.create_lammps_mliap --pkl model.pkl --backend oeq \
     [--zbased | --elements Li P S Cl] --output bam_mliap_oeq.pt
 ```
 
-Run:
+### Run
+
 ```
 export PYTHONPATH=<lammps>/python:<BAM-torch>:$PYTHONPATH
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1        # torch>=2.6
-lmp -k on g 1 -sf kk -in in.run
-# pair_style mliap unified /path/bam_mliap_oeq.pt 0
-# pair_coeff * * H C O
 ```
-Multi-GPU: standard MPI domain decomposition (`mpirun -np N`, one GPU per
-rank); the adapter exchanges ghost features between message-passing layers
-through the KOKKOS coupling.
+
+```
+# in.run
+pair_style mliap unified /path/bam_mliap_oeq.pt 0
+pair_coeff * * H C O
+```
+
+`-pk kokkos neigh half newton on` is required: pair mliap needs `newton on`,
+and `neigh half` reconciles it with the KOKKOS check. `-k on g 1` means one
+GPU **per rank** - do not raise it to the node's GPU count.
+
+single GPU:
+```
+lmp -k on g 1 -sf kk -pk kokkos neigh half newton on -in in.run
+```
+
+multi GPU, one node (`gpu_bind.sh` gives each rank its own device;
+`GPUS=<list>` skips devices other users occupy):
+```
+GPUS=0,1 mpirun -np 2 ./gpu_bind.sh \
+    lmp -k on g 1 -sf kk -pk kokkos neigh half newton on -in in.run
+```
+
+multi node:
+```
+mpirun -np <N> $MCA ./gpu_bind.sh \
+    lmp -k on g 1 -sf kk -pk kokkos neigh half newton on -in in.run
+```
+
+`$MCA` is empty on a fabric with working GPUDirect. Where UCX lacks CUDA
+support, bypass it with TCP and forward the environment to remote ranks,
+which start without a login shell:
+
+```
+MCA="--mca pml ob1 --mca btl self,sm,tcp --mca btl_tcp_if_include <subnet> \
+     -x PYTHONPATH -x PATH -x LD_LIBRARY_PATH -x TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"
+```
+
+Do **not** use `gpu/aware off` with mliap - the host pack path is
+unimplemented.
+
+Results are rank-count and architecture independent. On a 5,232-atom
+amorphous H/C/O cell, single-point forces (|F| RMS 1.39 eV/A) agreed to a
+relative RMSE of 3.0e-07 between 1 and 2 ranks, and 2.8e-07 between
+aarch64/GH200 and x86_64/A100 (regression slope 1.0000000054), with total
+energy identical to every printed digit.
+
+Extra ranks halve GPU memory per rank but do not speed MD up: the per-layer
+ghost exchange scales with ghost count, which barely falls when the cell is
+split. Measured 1.05x on two GPUs in one node, and 0.10x across two nodes on
+a TCP fabric. Use extra GPUs to fit a system that does not fit on one, and
+run independent jobs at one GPU each for throughput.
+
+Complete SLURM and PBS job templates for all three layouts:
+`examples/example-LAMMPS-mliap/`.
 
 ### Troubleshooting
 
@@ -274,10 +431,12 @@ through the KOKKOS coupling.
 | `... no forward_exchange()` | LAMMPS < 22 Jul 2025, or not launched with `-k on ... -sf kk` |
 | `Cannot use -kokkos on without KOKKOS installed` | binary built without `PKG_KOKKOS` |
 | `Loading mliappy unified module failure` | `MLIAP_ENABLE_PYTHON=OFF`, or the adapter is not importable |
-| CMake cannot find MPI | no MPI on the host - use `BUILD_MPI=OFF` |
+| CMake cannot find MPI | point `-D MPI_CXX_COMPILER=$(which mpicxx)` at your MPI, or use `BUILD_MPI=OFF` for single-rank builds |
+| Segfault in the ghost exchange, `invalid permissions for mapped object` | MPI is not CUDA-aware - rebuild it with `--with-cuda` |
+| `Could not import DeviceProp: Ninja is required` | `ninja` not on `PATH`; OEQ JIT-compiles on torch < 2.10 |
 | nvcc rejects C++17 / Kokkos | host gcc too old - enable `gcc-toolset-12` |
 
 Notes: torch<2.6 with OEQ needs a no-op shim for
 `torch.library.register_autocast` (e.g. in sitecustomize.py); checkpoints
-trained on 0-based z-table species (omol/opoly datasets) must be exported
+trained on 0-based z-table species (i.e. species = Z-1) must be exported
 with `--zbased`.
