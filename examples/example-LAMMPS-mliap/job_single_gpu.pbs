@@ -1,0 +1,18 @@
+#!/bin/bash
+# One GPU (PBS Pro / OpenPBS).
+#PBS -N mliap_md
+#PBS -q <queue>
+#PBS -l select=1:ncpus=8:ngpus=1:mem=200gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+cd ${PBS_O_WORKDIR}
+
+# --- adjust to your installation ---
+LMP=$HOME/prog/lammps/build/lmp                    # LAMMPS >= 22 Jul 2025
+export PATH=/usr/local/cuda/bin:<mpi>/bin:<env>/bin:$PATH
+export PYTHONPATH=<lammps>/python:<BAM-torch>:$PYTHONPATH
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1          # torch >= 2.6
+
+# On nodes where GPUs are shared between users, pick a free one explicitly:
+#   export CUDA_VISIBLE_DEVICES=1
+$LMP -k on g 1 -sf kk -pk kokkos neigh half newton on -in in.equil -log log.equil

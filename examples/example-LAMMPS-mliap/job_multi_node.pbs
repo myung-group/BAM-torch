@@ -1,13 +1,16 @@
 #!/bin/bash
-# Several nodes (SLURM). One rank per GPU.
-#SBATCH -J mliap_md_mpi
-#SBATCH -p <partition>
-#SBATCH --nodes=2 --ntasks=2 --ntasks-per-node=1 --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=200G
-#SBATCH --time=2-00:00:00
-#SBATCH -o %x.o%j -e %x.e%j
-cd ${SLURM_SUBMIT_DIR}
+# Several nodes (PBS Pro / OpenPBS). One rank per GPU.
+#
+# NOT VALIDATED: no multi-node PBS cluster was available to run this.
+# The MPI and KOKKOS settings are the ones validated on SLURM multi-node;
+# the resource request and $PBS_NODEFILE handling follow the standard
+# idiom. Check the rank-to-GPU mapping before trusting a production run.
+#PBS -N mliap_md_mpi
+#PBS -q <queue>
+#PBS -l select=2:ncpus=8:ngpus=1:mpiprocs=1:mem=200gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+cd ${PBS_O_WORKDIR}
 
 # --- adjust to your installation ---
 LMP=$HOME/prog/lammps/build/lmp                    # LAMMPS >= 22 Jul 2025
@@ -15,15 +18,14 @@ export PATH=/usr/local/cuda/bin:<mpi>/bin:<env>/bin:$PATH
 export PYTHONPATH=<lammps>/python:<BAM-torch>:$PYTHONPATH
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1          # torch >= 2.6
 
+NP=$(wc -l < ${PBS_NODEFILE})
+
 # Drop the MCA block on a CUDA-aware fabric with working GPUDirect. Keep it
-# where UCX has no CUDA support: bypass UCX with plain TCP and pin the
-# internode subnet, otherwise container/virtual interfaces break peer matching.
-# Remote ranks get no login shell, so forward the environment explicitly.
+# where UCX has no CUDA support - see README "MPI requirements".
 MCA="--mca pml ob1 --mca btl self,sm,tcp \
      --mca btl_tcp_if_include <node-subnet e.g. 10.0.0.0/24> \
      -x TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD -x PYTHONPATH -x PATH -x LD_LIBRARY_PATH"
 
-# gpu_bind.sh matters once a node holds more than one rank; harmless otherwise.
-mpirun -np ${SLURM_NTASKS} $MCA \
+mpirun -np ${NP} -hostfile ${PBS_NODEFILE} $MCA \
   ./gpu_bind.sh \
   $LMP -k on g 1 -sf kk -pk kokkos neigh half newton on -in in.equil -log log.equil

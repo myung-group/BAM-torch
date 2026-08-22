@@ -1,0 +1,23 @@
+#!/bin/bash
+# Several GPUs inside ONE node (PBS Pro / OpenPBS). One rank per GPU.
+#PBS -N mliap_mgpu
+#PBS -q <queue>
+#PBS -l select=1:ncpus=16:ngpus=2:mpiprocs=2:mem=400gb
+#PBS -l walltime=48:00:00
+#PBS -j oe
+cd ${PBS_O_WORKDIR}
+
+# --- adjust to your installation ---
+LMP=$HOME/prog/lammps/build/lmp                    # LAMMPS >= 22 Jul 2025
+export PATH=/usr/local/cuda/bin:<mpi>/bin:<env>/bin:$PATH
+export PYTHONPATH=<lammps>/python:<BAM-torch>:$PYTHONPATH
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1          # torch >= 2.6
+
+# The MPI must be CUDA-aware (see README "MPI requirements"). A stock distro
+# OpenMPI usually is not, and mliap then segfaults inside the ghost exchange.
+
+# GPUS picks the devices, in rank order - leave busy GPUs to their owners.
+export GPUS=0,1
+mpirun -np 2 \
+  ./gpu_bind.sh \
+  $LMP -k on g 1 -sf kk -pk kokkos neigh half newton on -in in.equil -log log.equil
