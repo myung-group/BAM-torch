@@ -22,6 +22,15 @@ Design (modeled on MACE's lammps_mliap_mace.py):
     (e.g. omol/opoly-style data encodes species as Z-1 while storing an
     identity table - use elements=chemical_symbols[1:num_species+1]).
 
+Multi-head checkpoints: models fine-tuned with a target + replay head share one
+backbone and branch only at the readouts.  LAMMPS runs one system with one head,
+so the head is fixed at export time (``--head``) and the readout output is
+sliced at that index; per-head E0s and scale_shift are used when present.
+
+Energy offset: the checkpoint's ``valid_scale_shift`` (e_corr) is applied the
+same way pair_bam does - a constant spread over the system.  It shifts only the
+reported total energy; forces and the virial are untouched.
+
 Export/load: the weights are embedded in the .pt and the model is rebuilt at
 unpickling time via __reduce__, so OEQ JIT modules never need to be pickled and
 the file does not depend on model.pkl afterwards.  Older .pt files that only
@@ -84,11 +93,16 @@ class BAMEdgeModel(torch.nn.Module):
     differentiable input and refreshes ghost features between layers.
     """
 
-    def __init__(self, race, enr_avg_species):
+    def __init__(self, race, enr_avg_species, head_idx: int = 0):
         super().__init__()
         self.race = race
         for p in self.race.parameters():
             p.requires_grad = False
+        # Multi-head checkpoints share one backbone and branch only at the
+        # readouts.  LAMMPS runs one system with one head, so the per-atom head
+        # index is a constant and the readout output is sliced at head_idx.
+        self.is_multihead = bool(getattr(race, "is_multihead", False))
+        self.head_idx = int(head_idx)
         n = race.num_species
         enr = torch.zeros(n, dtype=torch.float32)
         for s, v in (enr_avg_species or {}).items():
@@ -120,7 +134,12 @@ class BAMEdgeModel(torch.nn.Module):
                 edge_index=edge_index)
             node_feats = race.products[k](
                 x_node_feats=x_node_feats, node_feats=node_feats, sc=sc)
-            outputs.append(race.readouts[k](node_feats)[:, 0])
+            if self.is_multihead:
+                node_heads = torch.full((node_feats.shape[0],), self.head_idx,
+                                        dtype=torch.long, device=node_feats.device)
+                outputs.append(race.readouts[k](node_feats, node_heads)[:, self.head_idx])
+            else:
+                outputs.append(race.readouts[k](node_feats)[:, 0])
             if k < n_l - 1 and lammps_data is not None:
                 node_feats = LAMMPS_MP.apply(node_feats.contiguous(),
                                              lammps_data)
@@ -132,9 +151,10 @@ class BAMEdgeModel(torch.nn.Module):
 class LAMMPS_MLIAP_BAM(MLIAPUnified):
     """BAM-RACE integration for LAMMPS via the ML-IAP unified interface."""
 
-    def __init__(self, race, enr_avg_species, elements: Optional[List[str]] = None):
+    def __init__(self, race, enr_avg_species, elements: Optional[List[str]] = None,
+                 e_corr: float = 0.0, head_idx: int = 0):
         super().__init__()
-        self.model = BAMEdgeModel(race, enr_avg_species)
+        self.model = BAMEdgeModel(race, enr_avg_species, head_idx=head_idx)
         if elements is None:
             elements = [chemical_symbols[z]
                         for z in range(1, race.num_species + 1)]
@@ -142,6 +162,11 @@ class LAMMPS_MLIAP_BAM(MLIAPUnified):
         self.ndescriptors = 1
         self.nparams = 1
         self.rcutfac = 0.5 * float(race.cutoff)     # MACE convention
+        # Constant energy offset from the checkpoint's scale_shift, matching
+        # pair_bam (see lammps_bam.py): e_corr / natoms is added to every local
+        # atom, so the total energy shifts by e_corr.  It is position
+        # independent, so forces and the virial are unaffected.
+        self.e_corr = float(e_corr)
         self.device = "cpu"
         self.initialized = False
 
@@ -182,6 +207,11 @@ class LAMMPS_MLIAP_BAM(MLIAPUnified):
         node_energy_local = self.model(
             vectors, species, edge_index, natoms,
             data if self.has_exchange else None)
+        if self.e_corr:
+            # natoms is this rank's local count; exact on a single rank.  With
+            # R ranks the total offset becomes R * e_corr - still a constant
+            # with no effect on forces, virial or dynamics.
+            node_energy_local = node_energy_local + self.e_corr / natoms
         total_e = node_energy_local.sum()
         (grad,) = torch.autograd.grad([total_e], [vectors])
         if self.device.type != "cpu":
@@ -212,10 +242,20 @@ class LAMMPS_MLIAP_BAM(MLIAPUnified):
         pass
 
 
-def _build_race(cfg, backend):
-    """Instantiate RACE from a checkpoint config with the chosen TP backend."""
+def _head_names(cfg):
+    """Head names from a multi-head checkpoint config, or [] if single-head."""
+    ds = (cfg.get("multihead") or {}).get("datasets") or []
+    return [d.get("name", "head_%d" % i) for i, d in enumerate(ds)]
+
+
+def _build_race(cfg, backend, heads=None):
+    """Instantiate the model from a checkpoint config with the chosen TP backend.
+
+    ``heads`` non-empty selects RACEUnified (multi-head readouts); otherwise the
+    single-head RACE is built.
+    """
     from e3nn import o3
-    from bam_torch.model.models import RACE
+    from bam_torch.model.models import RACE, RACEUnified
     kw = {}
     if backend == "oeq":
         from bam_torch.model.wrapper_ops import OEQConfig, OEQ_AVAILABLE
@@ -223,7 +263,11 @@ def _build_race(cfg, backend):
             raise RuntimeError("backend='oeq' requested but openequivariance "
                                "is not importable")
         kw["oeq_config"] = OEQConfig(enabled=True, optimize_all=True)
-    return RACE(cutoff=cfg["cutoff"], avg_num_neighbors=cfg["avg_num_neighbors"],
+    cls = RACE
+    if heads:
+        cls = RACEUnified
+        kw["heads"] = list(heads)
+    return cls(cutoff=cfg["cutoff"], avg_num_neighbors=cfg["avg_num_neighbors"],
                 num_species=cfg["num_species"], max_ell=cfg["max_ell"],
                 num_basis_func=cfg["num_radial_basis"],
                 hidden_irreps=o3.Irreps(cfg["hidden_channels"]),
@@ -235,7 +279,7 @@ def _build_race(cfg, backend):
 
 
 def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
-                      elements: Optional[List[str]] = None):
+                      elements: Optional[List[str]] = None, head=None):
     """Build a LAMMPS_MLIAP_BAM from a training checkpoint.
 
     Used for export, and for unpickling legacy path-based .pt files.  Backend
@@ -246,6 +290,8 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
     Args:
         pkl_path: RACE training checkpoint (model.pkl).
         backend:  'e3nn' (default) or 'oeq' (requires openequivariance).
+        head:     for multi-head checkpoints, the head name or index to deploy
+            (default: the first head).  Ignored for single-head checkpoints.
         elements: chemical symbols in *species order*, overriding the mapping
             derived from the checkpoint's uniq_element.  Required for
             checkpoints whose stored table does not match the trained
@@ -257,7 +303,23 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
 
     ck = torch.load(pkl_path, map_location="cpu", weights_only=False)
     cfg = ck["input.json"]
-    race = _build_race(cfg, backend)
+
+    # Multi-head checkpoints branch at the readouts; pick the head to deploy.
+    heads = _head_names(cfg)
+    head_idx = 0
+    if heads:
+        if head is None:
+            head_idx = 0
+        elif isinstance(head, int):
+            head_idx = head
+        elif head in heads:
+            head_idx = heads.index(head)
+        else:
+            raise ValueError("unknown head %r; available: %s" % (head, heads))
+        print("  - multi-head checkpoint: %s -> using %r (index %d)"
+              % (heads, heads[head_idx], head_idx))
+
+    race = _build_race(cfg, backend, heads=heads)
     sd = {k.replace("module.", ""): v for k, v in ck["params"].items()}
     race.load_state_dict(sd, strict=False)   # e3nn-only buffers differ per backend
     ema_state = ck.get("ema_state")
@@ -268,19 +330,20 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
         ema.load_state_dict(ema_state)
         ema.copy_to(race.parameters())
 
-    # This adapter does not implement the e_corr (scale_shift) energy
-    # correction that pair_bam applies in lammps_bam.py.  A checkpoint
-    # trained with use_scale_shift=True would silently lose a constant
-    # per-atom energy offset here, so fail loudly instead.
-    _vss = ck.get("valid_scale_shift")
-    if _vss:
-        _vals = list(_vss.values()) if isinstance(_vss, dict) else list(_vss)
-        _ec = float(torch.tensor([float(v) for v in _vals]).flatten().mean())
-        if abs(_ec) > 1e-12:
-            raise RuntimeError(
-                "checkpoint has e_corr=%.6g but this ML-IAP adapter ignores "
-                "it; implement e_corr (see bam_torch/lammps/lammps_bam.py) "
-                "before using this checkpoint." % _ec)
+    # e_corr (scale_shift) energy correction, same convention as pair_bam:
+    # the mean of valid_scale_shift, spread over the system as a constant.
+    e_corr = 0.0
+    _phss = (ck.get("per_head_scale_shift") or {}).get(head_idx) if heads else None
+    if _phss:
+        _vals = list(_phss.values()) if isinstance(_phss, dict) else list(_phss)
+        e_corr = float(torch.tensor([float(v) for v in _vals]).flatten().mean())
+    else:
+        _vss = ck.get("valid_scale_shift")
+        if _vss:
+            _vals = list(_vss.values()) if isinstance(_vss, dict) else list(_vss)
+            e_corr = float(torch.tensor([float(v) for v in _vals]).flatten().mean())
+    if e_corr:
+        print("  - e_corr = %.6g eV applied as a constant offset." % e_corr)
 
     race.criterion = None
     race.eval()
@@ -288,6 +351,11 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
     # species-indexed reference energies + element list from the checkpoint
     uniq = ck.get("uniq_element") or {}
     enr_raw = ck.get("enr_avg_per_element") or {}
+    if heads:
+        _phe = (ck.get("per_head_enr_avg") or {}).get(head_idx)
+        if _phe:
+            enr_raw = _phe.get("enr_avg_per_element", enr_raw)
+            print("  - using per-head E0s for head %d" % head_idx)
     if elements is not None:
         # explicit override: species s <-> elements[s]; reference energies are
         # remapped assuming enr_raw is keyed by atomic number
@@ -304,7 +372,8 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
                 enr[s] = float(enr_raw.get(z, 0.0))
         elements = [e or "X" for e in elements]
 
-    obj = LAMMPS_MLIAP_BAM(race, enr, elements=elements)
+    obj = LAMMPS_MLIAP_BAM(race, enr, elements=elements, e_corr=e_corr,
+                           head_idx=head_idx)
     # Embed the (EMA-applied) weights so torch.save writes a self-contained
     # .pt: no model.pkl and no stable path needed at load time.
     obj._state_payload = {
@@ -312,6 +381,9 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
         "backend": backend,
         "elements": list(elements),
         "enr": dict(enr),
+        "e_corr": e_corr,
+        "heads": list(heads),
+        "head_idx": head_idx,
         "state_dict": {k: v.cpu() for k, v in race.state_dict().items()},
     }
     return obj
@@ -323,10 +395,13 @@ def rebuild_from_state(payload):
     Kernel modules (OEQ JIT) still cannot be pickled and are reconstructed
     here; only the weights travel inside the file.
     """
-    race = _build_race(payload["cfg"], payload["backend"])
+    race = _build_race(payload["cfg"], payload["backend"],
+                       heads=payload.get("heads") or None)
     race.load_state_dict(payload["state_dict"], strict=False)
     race.criterion = None
     race.eval()
-    obj = LAMMPS_MLIAP_BAM(race, payload["enr"], elements=payload["elements"])
+    obj = LAMMPS_MLIAP_BAM(race, payload["enr"], elements=payload["elements"],
+                           e_corr=payload.get("e_corr", 0.0),
+                           head_idx=payload.get("head_idx", 0))
     obj._state_payload = payload
     return obj

@@ -11,6 +11,9 @@ Usage:
     # or an explicit species-ordered element list:
     ... --elements Li P S Cl
 
+    # multi-head checkpoint: pick which head to deploy
+    ... --head target
+
 The saved .pt stores a rebuild callable (not the module weights), so loading
 requires this package on PYTHONPATH and, on torch>=2.6,
 TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 in the LAMMPS environment.
@@ -31,6 +34,9 @@ def main():
     p.add_argument('--elements', nargs='+', default=None,
                    help='chemical symbols in species order '
                         '(overrides checkpoint uniq_element)')
+    p.add_argument('--head', default=None,
+                   help='head name or index for multi-head checkpoints '
+                        '(default: first head)')
     p.add_argument('--zbased', action='store_true',
                    help='species are 0-based z-table indices (H=0, He=1, ...) '
                         'as in omol/opoly-style datasets')
@@ -42,7 +48,11 @@ def main():
         n = ck['input.json']['num_species']
         elements = chemical_symbols[1:n + 1]
 
-    obj = rebuild_bam_mliap(args.pkl, backend=args.backend, elements=elements)
+    head = args.head
+    if head is not None and head.lstrip('-').isdigit():
+        head = int(head)
+    obj = rebuild_bam_mliap(args.pkl, backend=args.backend, elements=elements,
+                            head=head)
     out = args.output or ('bam_mliap_%s.pt' % args.backend)
     torch.save(obj, out)
     print('saved:', out)
