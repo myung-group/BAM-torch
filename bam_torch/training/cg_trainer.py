@@ -576,6 +576,7 @@ class CGTrainer(BaseTrainer):
             hidden_irreps=hidden_irreps,
             nlayers=nlayers,
             features_dim=features_dim,
+            x_features_dim=model_config.get('x_features_dim'),
             output_irreps=output_irreps,
             active_fn=active_fn,
             regress_forces=regress_forces,

@@ -74,6 +74,7 @@ class RACE(torch.nn.Module):
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
         use_bond_flag: bool = False,
+        x_features_dim: Optional[int] = None,
         radial_polynomial_p: int = 2,
     ):
         super().__init__()
@@ -100,10 +101,13 @@ class RACE(torch.nn.Module):
         # Node embedding
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
         node_feats_irreps = o3.Irreps([(features_dim, (0, 1))])
-        if interaction_block in ["slow"]:
+        if x_features_dim is not None:
+            # explicit override (e.g. CG: keep slow-equivalent capacity for fast)
+            x_node_feats_irreps = o3.Irreps([(int(x_features_dim), (0, 1))])
+        elif interaction_block in ["slow"]:
             x_node_feats_irreps = node_feats_irreps
         else:
-            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])
+            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])  # upstream default for fast
 
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
@@ -468,6 +472,7 @@ class RACEUnified(torch.nn.Module):
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
         use_bond_flag: bool = False,
+        x_features_dim: Optional[int] = None,
         radial_polynomial_p: int = 2,
     ):
         super().__init__()
@@ -505,10 +510,13 @@ class RACEUnified(torch.nn.Module):
         ## 1) Embedding
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
         node_feats_irreps = o3.Irreps([(features_dim, (0, 1))])
-        if interaction_block in ["slow"]:
+        if x_features_dim is not None:
+            # explicit override (e.g. CG: keep slow-equivalent capacity for fast)
+            x_node_feats_irreps = o3.Irreps([(int(x_features_dim), (0, 1))])
+        elif interaction_block in ["slow"]:
             x_node_feats_irreps = node_feats_irreps
         else:
-            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])
+            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])  # upstream default for fast
         
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,

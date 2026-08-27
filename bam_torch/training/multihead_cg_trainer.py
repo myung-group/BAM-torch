@@ -70,6 +70,7 @@ class MultiheadCGTrainer(CGTrainer):
             interaction_block=cfg.get("interaction_block") or "slow",
             compute_stress=cfg.get("compute_stress", True),
             heads=self.heads,
+            x_features_dim=cfg.get("x_features_dim"),
         )
         if self.rank == 0:
             print(f"\nMultihead-CG Model: race_unified | heads {self.heads} | "
