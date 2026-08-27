@@ -253,10 +253,11 @@ class RACE(torch.nn.Module):
                                            species)
 
         # CG: append bond flag to edge features (AA data has no edge_bond)
-        _edge_bond = None
+        _edge_bond: Optional[torch.Tensor] = None
         if self.use_bond_flag and "edge_bond" in data:
-            _edge_bond = data["edge_bond"][nonzero_idx]
-            edge_feats = torch.cat([edge_feats, _edge_bond.unsqueeze(-1).float()], dim=-1)
+            eb = data["edge_bond"][nonzero_idx]
+            edge_feats = torch.cat([edge_feats, eb.unsqueeze(-1).to(edge_feats.dtype)], dim=-1)
+            _edge_bond = eb
 
         x_node_feats = self.linear_x(node_feats)
 
@@ -688,10 +689,11 @@ class RACEUnified(torch.nn.Module):
         )
 
         # CG: append bond flag to edge features (AA data has no edge_bond)
-        _edge_bond = None
+        _edge_bond: Optional[torch.Tensor] = None
         if self.use_bond_flag and "edge_bond" in data:
-            _edge_bond = data["edge_bond"][nonzero_idx]
-            edge_feats = torch.cat([edge_feats, _edge_bond.unsqueeze(-1).float()], dim=-1)
+            eb = data["edge_bond"][nonzero_idx]
+            edge_feats = torch.cat([edge_feats, eb.unsqueeze(-1).to(edge_feats.dtype)], dim=-1)
+            _edge_bond = eb
 
         x_node_feats = self.linear_x(node_feats)
         num_atoms_arange = torch.arange(node_attrs.shape[0], device=node_attrs.device)
