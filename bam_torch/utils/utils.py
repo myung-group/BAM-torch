@@ -722,3 +722,516 @@ def calculate_time_difference(date1, date2):
     return day, days, hours, minutes, seconds
 
 
+# =============================================================================
+# Coarse-Grained (CG) Data Loading Functions
+# =============================================================================
+
+def get_cg_enr_avg_per_type(cg_traj, num_cg_types):
+    """
+    Calculate average energy per CG bead type.
+
+    Args:
+        cg_traj: List of CG data dictionaries with 'energy' and 'types'
+        num_cg_types: Number of unique CG bead types
+
+    Returns:
+        enr_avg_per_type: Dictionary mapping type_id to average energy
+        uniq_type: Dictionary mapping type_id to index
+        enr_var: Variance of energies
+    """
+    from scipy.optimize import minimize
+
+    tgt_enr = np.array([frame['energy'] for frame in cg_traj])
+
+    # Create unique type mapping
+    uniq_type = {i: i for i in range(num_cg_types)}
+
+    # Count occurrences of each type per frame
+    type_counts = {}
+    for type_id in range(num_cg_types):
+        type_counts[type_id] = np.array([
+            np.sum(frame['types'] == type_id) for frame in cg_traj
+        ])
+
+    c0 = np.array([type_counts[i] for i in range(num_cg_types)])
+
+    # Handle case where some types have zero counts
+    valid_mask = c0.sum(axis=1) > 0
+    if not valid_mask.all():
+        print(f"Warning: Some CG types have zero counts, using subset")
+        c0_valid = c0[valid_mask]
+    else:
+        c0_valid = c0
+
+    m0 = tgt_enr.sum() / c0_valid.sum() if c0_valid.sum() > 0 else 0.0
+    w0 = np.array([m0 for _ in range(num_cg_types)], dtype=np.float64)
+
+    def loss_fn(weight, count):
+        prd_enr = np.einsum('i,ij->j', weight, count)
+        diff = tgt_enr - prd_enr
+        return (diff * diff).mean()
+
+    results = minimize(loss_fn, x0=w0, args=(c0,), method='BFGS')
+    w0 = results.x
+
+    enr_avg_per_type = {i: w0[i] for i in range(num_cg_types)}
+
+    return enr_avg_per_type, uniq_type, np.var(tgt_enr)
+
+
+def get_graphset_cg(cg_traj, cutoff, uniq_type, enr_avg_per_type,
+                            enr_var, regress_forces=True, max_neigh=None,
+                            show_progress=False, desc="Converting CG",
+                            bond_topology=None):
+    from ase import Atoms
+
+    graph_list = []
+    iterator = tqdm(cg_traj, desc=desc, leave=False) if show_progress else cg_traj
+
+    for cg_data in iterator:
+        positions = cg_data['positions']
+        types = cg_data['types']
+        cell = cg_data['cell']
+        energy = cg_data['energy']
+        forces = cg_data.get('forces', np.zeros_like(positions))
+        stress_arr = cg_data.get('stress', None)  # Optional, (3,3) eV/A^3 or (6,) Voigt
+
+        # Calculate energy offset
+        node_enr_avg = np.array([enr_avg_per_type[uniq_type[t]] for t in types])
+        enr = energy - node_enr_avg.sum()
+
+        # Create dummy ASE Atoms for neighbor list calculation
+        # Use 'X' as placeholder element for CG beads
+        n_sites = len(positions)
+
+        # Detect non-periodic systems (zero cell matrix)
+        use_pbc = cell is not None and np.abs(cell).sum() > 1e-6
+        original_cell = cell.copy() if cell is not None else np.zeros((3, 3))
+        if not use_pbc:
+            # Create a large box enclosing all positions with buffer
+            pos_min = positions.min(axis=0)
+            pos_max = positions.max(axis=0)
+            box_size = pos_max - pos_min + 2 * cutoff + 10.0
+            nlist_cell = np.diag(box_size)
+            # Center positions in box
+            positions_shifted = positions - pos_min + cutoff + 5.0
+        else:
+            nlist_cell = cell
+            positions_shifted = positions
+
+        cg_atoms = Atoms(
+            symbols=['X'] * n_sites,
+            positions=positions_shifted,
+            cell=nlist_cell,
+            pbc=use_pbc
+        )
+
+        # Calculate neighbor list
+        iatoms, jatoms, Sij = neighbour_list(
+            quantities='ijS',
+            atoms=cg_atoms,
+            cutoff=cutoff
+        )
+
+        num_nodes = n_sites
+        num_edges = len(iatoms)
+
+        # Sort neighbors by distance, limit to max_neigh
+        if max_neigh is not None and num_edges > 0:
+            Rij_vec = positions[jatoms] - positions[iatoms]
+            # Apply PBC shift
+            shift_v = np.einsum('ij,jk->ik', Sij, cell)
+            Rij_vec = Rij_vec + shift_v
+            dist = np.linalg.norm(Rij_vec, axis=1)
+
+            nonmax_idx = []
+            for i in range(n_sites):
+                idx_i = np.where(iatoms == i)[0]
+                if len(idx_i) > max_neigh:
+                    idx_sorted = idx_i[np.argsort(dist[idx_i])[:max_neigh]]
+                else:
+                    idx_sorted = idx_i
+                nonmax_idx.append(idx_sorted)
+            nonmax_idx = np.concatenate(nonmax_idx) if nonmax_idx else np.array([], dtype=int)
+
+            iatoms = iatoms[nonmax_idx]
+            jatoms = jatoms[nonmax_idx]
+            Sij = Sij[nonmax_idx]
+            num_edges = len(iatoms)
+
+        # Build stress tensor for Data object.
+        # Model outputs Voigt 6-component: (σ_xx, σ_yy, σ_zz, σ_yz, σ_xz, σ_xy).
+        # If given (3, 3) full tensor, convert to Voigt 6-vector here.
+        if stress_arr is not None:
+            stress_np = np.asarray(stress_arr, dtype=np.float32)
+            if stress_np.shape == (3, 3):
+                voigt = np.array([
+                    stress_np[0, 0],  # xx
+                    stress_np[1, 1],  # yy
+                    stress_np[2, 2],  # zz
+                    stress_np[1, 2],  # yz
+                    stress_np[0, 2],  # xz
+                    stress_np[0, 1],  # xy
+                ], dtype=np.float32)
+                stress_tensor = torch.tensor(voigt, dtype=torch.float32)
+            elif stress_np.shape == (6,):
+                stress_tensor = torch.tensor(stress_np, dtype=torch.float32)
+            else:
+                stress_tensor = torch.tensor(np.zeros(6), dtype=torch.float32)
+        else:
+            stress_tensor = torch.tensor(np.zeros(6), dtype=torch.float32)
+
+        # Create graph
+        graph = Data(
+            positions=torch.tensor(positions, dtype=torch.float32),
+            species=torch.tensor(types, dtype=torch.long),
+            forces=torch.tensor(forces, dtype=torch.float32),
+            edges=torch.tensor(Sij, dtype=torch.float32),
+            num_nodes=num_nodes,
+            num_edges=num_edges,
+            energy=torch.tensor(enr, dtype=torch.float32),
+            cell=torch.tensor(original_cell, dtype=torch.float32).view(1, 3, 3),
+            edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),
+            stress=stress_tensor,
+            volume=torch.tensor(np.prod(np.diag(original_cell)) if original_cell is not None else 0.0)
+        )
+
+        # Bond flag for CG systems (0=non-bonded, 1=bonded), whole-system positional index
+        if bond_topology is not None:
+            n_beads_per_mol = bond_topology['n_beads_per_mol']
+            bonds_local = bond_topology['bonds']
+            edge_bond = np.zeros(num_edges, dtype=np.float32)
+            n_mol = n_sites // n_beads_per_mol
+            bonded_set = set()
+            for m in range(n_mol):
+                offset = m * n_beads_per_mol
+                for bi, bj in bonds_local:
+                    bonded_set.add((offset + bi, offset + bj))
+                    bonded_set.add((offset + bj, offset + bi))
+            for e in range(num_edges):
+                if (int(iatoms[e]), int(jatoms[e])) in bonded_set:
+                    edge_bond[e] = 1.0
+            graph.edge_bond = torch.tensor(edge_bond, dtype=torch.float32)
+
+        graph_list.append(graph)
+
+    return graph_list
+
+
+def get_graphset_cg_to_predict(cg_traj, cutoff, uniq_type,
+                                regress_forces=True, max_neigh=None):
+    """
+    Convert CG trajectory data to PyTorch Geometric graph dataset for PREDICTION.
+
+    Unlike get_graphset_cg (for training), this function does NOT subtract energy offset.
+    This matches the behavior of get_graphset_to_predict for all-atom models.
+    """
+    from ase import Atoms
+
+    graph_list = []
+    for cg_data in cg_traj:
+        positions = cg_data['positions']
+        types = cg_data['types']
+        cell = cg_data['cell']
+        energy = cg_data['energy']
+        forces = cg_data.get('forces', np.zeros_like(positions))
+
+        # NOTE: Unlike get_graphset_cg, we do NOT subtract energy offset here.
+        enr = energy
+
+        # Create dummy ASE Atoms for neighbor list calculation
+        n_sites = len(positions)
+
+        # Detect non-periodic systems (zero cell matrix)
+        use_pbc = cell is not None and np.abs(cell).sum() > 1e-6
+        original_cell = cell.copy() if cell is not None else np.zeros((3, 3))
+        if not use_pbc:
+            pos_min = positions.min(axis=0)
+            pos_max = positions.max(axis=0)
+            box_size = pos_max - pos_min + 2 * cutoff + 10.0
+            nlist_cell = np.diag(box_size)
+            positions_shifted = positions - pos_min + cutoff + 5.0
+        else:
+            nlist_cell = cell
+            positions_shifted = positions
+
+        cg_atoms = Atoms(
+            symbols=['X'] * n_sites,
+            positions=positions_shifted,
+            cell=nlist_cell,
+            pbc=use_pbc
+        )
+
+        # Calculate neighbor list
+        iatoms, jatoms, Sij = neighbour_list(
+            quantities='ijS',
+            atoms=cg_atoms,
+            cutoff=cutoff
+        )
+
+        num_nodes = n_sites
+        num_edges = len(iatoms)
+
+        # Sort neighbors by distance, limit to max_neigh
+        if max_neigh is not None and num_edges > 0:
+            Rij_vec = positions[jatoms] - positions[iatoms]
+            shift_v = np.einsum('ij,jk->ik', Sij, cell)
+            Rij_vec = Rij_vec + shift_v
+            dist = np.linalg.norm(Rij_vec, axis=1)
+
+            nonmax_idx = []
+            for i in range(n_sites):
+                idx_i = np.where(iatoms == i)[0]
+                if len(idx_i) > max_neigh:
+                    idx_sorted = idx_i[np.argsort(dist[idx_i])[:max_neigh]]
+                else:
+                    idx_sorted = idx_i
+                nonmax_idx.append(idx_sorted)
+            nonmax_idx = np.concatenate(nonmax_idx) if nonmax_idx else np.array([], dtype=int)
+
+            iatoms = iatoms[nonmax_idx]
+            jatoms = jatoms[nonmax_idx]
+            Sij = Sij[nonmax_idx]
+            num_edges = len(iatoms)
+
+        # Map types to species indices
+        species = np.array([uniq_type[t] for t in types])
+
+        # Create graph
+        graph = Data(
+            positions=torch.tensor(positions, dtype=torch.float32),
+            species=torch.tensor(species, dtype=torch.long),
+            forces=torch.tensor(forces, dtype=torch.float32),
+            edges=torch.tensor(Sij, dtype=torch.float32),
+            num_nodes=num_nodes,
+            num_edges=num_edges,
+            energy=torch.tensor(enr, dtype=torch.float32),
+            cell=torch.tensor(original_cell, dtype=torch.float32).view(1, 3, 3),
+            edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),
+            stress=torch.tensor(np.zeros(6), dtype=torch.float32),
+            volume=torch.tensor(np.prod(np.diag(original_cell)) if original_cell is not None else 0.0)
+        )
+        # NOTE: requires_grad_ is set inside model.forward (positions always,
+        # cell conditional on compute_stress). Setting it at the graph level
+        # breaks PyG collate (torch.cat with out= rejects grad tensors).
+        graph_list.append(graph)
+
+    return graph_list
+
+
+def get_dataloader_cg(fname, cg_mapping_config, ntrain, nvalid,
+                      nbatch, cutoff, random_seed,
+                      num_cg_types=1, regress_forces=True,
+                      max_neigh=None, rank=0, world_size=1,
+                      num_workers=4):
+    """
+    Create DataLoaders for CG training from atomistic trajectory.
+
+    This function:
+    1. Loads atomistic trajectory
+    2. Converts to CG representation using the mapping
+    3. Creates train/valid dataloaders
+
+    Args:
+        fname: Path to atomistic trajectory file
+        cg_mapping_config: CG mapping configuration dictionary
+        ntrain: Number of training samples (or path to train file)
+        nvalid: Number of validation samples (or path to valid file)
+        nbatch: Batch size
+        cutoff: Cutoff distance for CG neighbor list
+        random_seed: Random seed for data splitting
+        num_cg_types: Number of unique CG bead types
+        regress_forces: Whether to train on forces
+        max_neigh: Maximum number of neighbors
+        rank: Process rank for distributed training
+        world_size: Number of processes
+
+    Returns:
+        train_loader, valid_loader, uniq_type, enr_avg_per_type
+    """
+    from .cg_mapping import CGMapping
+
+    msg = ''
+
+    # Load atomistic trajectory
+    if isinstance(ntrain, str):
+        # Separate train/valid files
+        train_data = read(ntrain, index=slice(None))
+        valid_data = read(nvalid, index=slice(None))
+        msg += 'Number of atomistic frames:\n'
+        msg += f'\033[33m -- training      {len(train_data)}\n'
+        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+        traj = train_data + valid_data
+    else:
+        # Single file with ntrain/nvalid split
+        nsamp = ntrain + nvalid
+        traj = read(fname, index=slice(None))[-nsamp:]
+        torch.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)
+        idx = torch.arange(nsamp)
+        idx = idx[torch.randperm(nsamp)]
+        idx_train = idx[:ntrain]
+        idx_valid = idx[ntrain:]
+        train_data = [traj[i] for i in idx_train]
+        valid_data = [traj[i] for i in idx_valid]
+        msg += 'Number of atomistic frames:\n'
+        msg += f'\033[33m -- training      {len(train_data)}\n'
+        msg += f' -- validation    {len(valid_data)}\033[0m\n\n'
+
+    # Create CG mapping
+    # Handle auto-detection case
+    if isinstance(cg_mapping_config, dict) and cg_mapping_config.get('auto', False):
+        from .cg_mapping import auto_detect_cg_mapping
+        if rank == 0:
+            print("Auto-detecting CG mapping from trajectory...")
+        cg_mapping_config = auto_detect_cg_mapping(train_data)
+
+    mapping = CGMapping(cg_mapping_config)
+
+    # Convert to CG
+    if rank == 0:
+        print(msg)
+        print(f"Converting atomistic data to CG representation...")
+        print(f"  - Mapping method: {mapping.method}")
+        print(f"  - Atoms per molecule: {mapping.atoms_per_molecule}")
+        print(f"  - CG beads per molecule: {mapping.num_cg_sites}")
+
+    from .cg_mapping import convert_trajectory_to_cg
+    cg_train = convert_trajectory_to_cg(train_data, mapping, show_progress=(rank == 0))
+    cg_valid = convert_trajectory_to_cg(valid_data, mapping, show_progress=(rank == 0))
+    cg_traj = cg_train + cg_valid
+
+    if rank == 0:
+        n_cg_sites = len(cg_train[0]['positions'])
+        print(f"  - CG sites per frame: {n_cg_sites}")
+
+    # Calculate energy averages per CG type
+    enr_avg_per_type, uniq_type, enr_var = get_cg_enr_avg_per_type(cg_traj, num_cg_types)
+
+    if rank == 0:
+        print(f"\nMean energy per CG type:")
+        for t, e in enr_avg_per_type.items():
+            print(f"  Type {t}: {e:.4f}")
+
+    # Create graph datasets
+    loaders = []
+    for dataset, name in [(cg_train, 'train'), (cg_valid, 'valid')]:
+        graphset = get_graphset_cg(
+            dataset, cutoff, uniq_type, enr_avg_per_type, enr_var,
+            regress_forces, max_neigh,
+            show_progress=(rank == 0), desc=f"Building {name} graphs"
+        )
+
+        # Padding
+        pad_nodes_to = max(g.num_nodes for g in graphset)
+        pad_edges_to = max(g.num_edges for g in graphset)
+        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
+
+        # Sampler for distributed training
+        data_sampler = None
+        if world_size > 1:
+            data_sampler = DistributedSampler(
+                graphset, num_replicas=world_size, rank=rank
+            )
+
+        _nw = max(num_workers, 0)
+        loader = DataLoader(
+            graphset,
+            nbatch,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=True,
+            num_workers=_nw,
+            persistent_workers=(_nw > 0),
+            prefetch_factor=(2 if _nw > 0 else None),
+            collate_fn=None,
+            sampler=data_sampler
+        )
+        loaders.append(loader)
+
+    if rank == 0:
+        print(f"\nCG DataLoaders created successfully!")
+        print(f"  - Train batches: {len(loaders[0])}")
+        print(f"  - Valid batches: {len(loaders[1])}")
+
+    return loaders[0], loaders[1], uniq_type, enr_avg_per_type
+
+
+def get_dataloader_to_predict_cg(fname, ndata, nbatch, cutoff, model_ckpt,
+                                  regress_forces=True, max_neigh=None,
+                                  num_workers=4):
+    """
+    Create DataLoader for CG model prediction from NPZ file.
+
+    This function loads a CG NPZ file (with positions, forces, energies, types, cells)
+    and creates a DataLoader suitable for CG model evaluation.
+
+    Args:
+        fname: Path to CG NPZ file
+        ndata: Number of data samples to use (or 'all' for all samples)
+        nbatch: Batch size
+        cutoff: Cutoff distance for neighbor list
+        model_ckpt: Model checkpoint containing uniq_element and enr_avg_per_element
+        regress_forces: Whether to include forces in the data
+        max_neigh: Maximum number of neighbors per site
+
+    Returns:
+        data_loader, uniq_element, enr_avg_per_element
+    """
+    # Load NPZ file
+    data = np.load(fname, allow_pickle=True)
+
+    positions = data['positions']
+    forces = data['forces']
+    energies = data['energies']
+    cells = data['cells']
+    types = data['types']
+
+    n_frames = positions.shape[0]
+
+    # Determine number of samples to use
+    if isinstance(ndata, str) or ndata is None or ndata == 'all':
+        n_samples = n_frames
+    else:
+        n_samples = min(ndata, n_frames)
+
+    print('number of data:')
+    print(f'\033[33m -- test          {n_samples}\033[0m\n')
+
+    # Get uniq_element and enr_avg_per_element from model checkpoint
+    uniq_element = model_ckpt['uniq_element']
+    enr_avg_per_element = model_ckpt['enr_avg_per_element']
+
+    # Convert NPZ data to cg_traj format
+    cg_traj = []
+    for i in range(n_samples):
+        cg_data = {
+            'positions': positions[i],
+            'types': types,
+            'forces': forces[i] if regress_forces else np.zeros_like(positions[i]),
+            'energy': energies[i],
+            'cell': cells[i]
+        }
+        cg_traj.append(cg_data)
+
+    # Create graphset using prediction-specific function (no offset subtraction)
+    graphset = get_graphset_cg_to_predict(
+        cg_traj, cutoff, uniq_element, regress_forces, max_neigh
+    )
+
+    # Create DataLoader
+    _nw = max(num_workers, 0)
+    loader = DataLoader(
+        graphset,
+        nbatch,
+        shuffle=False,
+        drop_last=True,
+        pin_memory=True,
+        num_workers=_nw,
+        persistent_workers=(_nw > 0),
+        prefetch_factor=(2 if _nw > 0 else None),
+        collate_fn=None
+    )
+
+    return loader, uniq_element, enr_avg_per_element
+

@@ -405,6 +405,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_bond: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         node_attrs: to_one_hot(species)
@@ -433,10 +434,24 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         )
         mji = self.tensor_regroup_by_irreps(mji)
         mji = self.tensor_irreps_array_product(mix, mji) # mix * messages
-        message = scatter_sum(
-            src=mji, index=receiver, dim=0, dim_size=num_nodes
-        )  # [n_nodes, irreps]
-        message = message / torch.sqrt(avg_num_neighbors)
+        if edge_bond is not None:
+            # CG: separate aggregation — bonded messages not diluted by sqrt(avg_num_neighbors)
+            bond_mask = edge_bond.to(torch.bool).unsqueeze(-1)  # (n_edges, 1)
+            mji_bonded = mji * bond_mask.to(torch.float32)
+            mji_nonbonded = mji * (~bond_mask).to(torch.float32)
+            msg_bonded = scatter_sum(
+                src=mji_bonded, index=receiver, dim=0, dim_size=num_nodes
+            )  # typically 1 bonded neighbor -> not diluted
+            msg_nonbonded = scatter_sum(
+                src=mji_nonbonded, index=receiver, dim=0, dim_size=num_nodes
+            )
+            msg_nonbonded = msg_nonbonded / torch.sqrt(avg_num_neighbors)
+            message = msg_bonded + msg_nonbonded
+        else:
+            message = scatter_sum(
+                src=mji, index=receiver, dim=0, dim_size=num_nodes
+            )  # [n_nodes, irreps]
+            message = message / torch.sqrt(avg_num_neighbors)
         message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
 
         return (
@@ -517,6 +532,7 @@ class RaceInteractionBlock(InteractionBlock):
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_bond: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         node_attrs: to_one_hot(species)
@@ -536,7 +552,7 @@ class RaceInteractionBlock(InteractionBlock):
             node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
         radial_wgt = self.conv_tp_weights(edge_feats)
-        if not torch.jit.is_scripting() and self._use_oeq_conv_fusion:
+        if not torch.jit.is_scripting() and self._use_oeq_conv_fusion and edge_bond is None:
             message = self.conv_tp(
                 node_feats,
                 edge_attrs,
@@ -544,14 +560,29 @@ class RaceInteractionBlock(InteractionBlock):
                 receiver,  # rows
                 sender,    # cols
             )
+            message = message / torch.sqrt(avg_num_neighbors)
         else:
             messages = node_feats[sender]
             mji = self.conv_tp(messages, edge_attrs, radial_wgt)
-            message = scatter_sum(
-                src=mji, index=receiver, dim=0, dim_size=num_nodes
-            )  # [n_nodes, irreps]
+            if edge_bond is not None:
+                # CG: separate aggregation — bonded messages not diluted by sqrt(avg_num_neighbors)
+                bond_mask = edge_bond.to(torch.bool).unsqueeze(-1)  # (n_edges, 1)
+                mji_bonded = mji * bond_mask.to(torch.float32)
+                mji_nonbonded = mji * (~bond_mask).to(torch.float32)
+                msg_bonded = scatter_sum(
+                    src=mji_bonded, index=receiver, dim=0, dim_size=num_nodes
+                )  # typically 1 bonded neighbor -> not diluted
+                msg_nonbonded = scatter_sum(
+                    src=mji_nonbonded, index=receiver, dim=0, dim_size=num_nodes
+                )
+                msg_nonbonded = msg_nonbonded / torch.sqrt(avg_num_neighbors)
+                message = msg_bonded + msg_nonbonded
+            else:
+                message = scatter_sum(
+                    src=mji, index=receiver, dim=0, dim_size=num_nodes
+                )  # [n_nodes, irreps]
+                message = message / torch.sqrt(avg_num_neighbors)
 
-        message = message / torch.sqrt(avg_num_neighbors)
         message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
 
         return (

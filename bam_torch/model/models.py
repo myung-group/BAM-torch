@@ -73,6 +73,7 @@ class RACE(torch.nn.Module):
         compute_stress: bool = True,
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
+        use_bond_flag: bool = False,
         radial_polynomial_p: int = 2,
     ):
         super().__init__()
@@ -87,6 +88,7 @@ class RACE(torch.nn.Module):
         self.cutoff = cutoff
         self.regress_forces = regress_forces
         self.compute_stress = compute_stress
+        self.use_bond_flag = use_bond_flag
         self.num_species = num_species
         self.output_irreps = o3.Irreps(output_irreps)
         hidden_irreps = hidden_irreps.sort().irreps
@@ -118,7 +120,10 @@ class RACE(torch.nn.Module):
             distance_transform=None,
         )
         # Edge embedding
-        edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
+        edge_feats_dim = self.radial_embedding.out_dim
+        if use_bond_flag:
+            edge_feats_dim += 1  # +1 for bond/non-bonded flag (CG)
+        edge_feats_irreps = o3.Irreps(f"{edge_feats_dim}x0e")
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell) # interaction_irreps in JAX
         #num_features = hidden_irreps.count(o3.Irrep(0, 1))
         #interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
@@ -246,11 +251,12 @@ class RACE(torch.nn.Module):
                                            node_attrs,
                                            data["edge_index"],
                                            species)
-#        ###
-#        i_sp = species[data["edge_index"][0]]
-#        j_sp = species[data["edge_index"][1]]
-#        sp = (i_sp + j_sp) / 2
-#        edge_feats = edge_feats * sp[:, None]
+
+        # CG: append bond flag to edge features (AA data has no edge_bond)
+        _edge_bond = None
+        if self.use_bond_flag and "edge_bond" in data:
+            _edge_bond = data["edge_bond"][nonzero_idx]
+            edge_feats = torch.cat([edge_feats, _edge_bond.unsqueeze(-1).float()], dim=-1)
 
         x_node_feats = self.linear_x(node_feats)
 
@@ -269,6 +275,7 @@ class RACE(torch.nn.Module):
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
                 edge_index=edge_index,
+                edge_bond=_edge_bond,
             )
             node_feats = product(
                 x_node_feats=x_node_feats,
@@ -459,6 +466,7 @@ class RACEUnified(torch.nn.Module):
         heads: Optional[List[str]] = None,  # ⭐ Multihead support
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
+        use_bond_flag: bool = False,
         radial_polynomial_p: int = 2,
     ):
         super().__init__()
@@ -480,6 +488,7 @@ class RACEUnified(torch.nn.Module):
         self.cutoff = cutoff
         self.regress_forces = regress_forces
         self.compute_stress = compute_stress
+        self.use_bond_flag = use_bond_flag
         self.num_species = num_species
         self.output_irreps = o3.Irreps(output_irreps)
         hidden_irreps = hidden_irreps.sort().irreps
@@ -514,7 +523,10 @@ class RACEUnified(torch.nn.Module):
             distance_transform=None,
         )
 
-        edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
+        edge_feats_dim = self.radial_embedding.out_dim
+        if use_bond_flag:
+            edge_feats_dim += 1  # +1 for bond/non-bonded flag (CG)
+        edge_feats_irreps = o3.Irreps(f"{edge_feats_dim}x0e")
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
         #num_features = hidden_irreps.count(o3.Irrep(0, 1))
         #interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
@@ -675,6 +687,12 @@ class RACEUnified(torch.nn.Module):
             species
         )
 
+        # CG: append bond flag to edge features (AA data has no edge_bond)
+        _edge_bond = None
+        if self.use_bond_flag and "edge_bond" in data:
+            _edge_bond = data["edge_bond"][nonzero_idx]
+            edge_feats = torch.cat([edge_feats, _edge_bond.unsqueeze(-1).float()], dim=-1)
+
         x_node_feats = self.linear_x(node_feats)
         num_atoms_arange = torch.arange(node_attrs.shape[0], device=node_attrs.device)
 
@@ -693,6 +711,7 @@ class RACEUnified(torch.nn.Module):
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
                 edge_index=edge_index,
+                edge_bond=_edge_bond,
             )
             node_feats = product(
                 x_node_feats=x_node_feats,

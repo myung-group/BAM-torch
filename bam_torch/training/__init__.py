@@ -2,6 +2,8 @@ from .base_trainer import BaseTrainer
 from .mp_trainer import MPTrainer, MPTrainer_V2
 from .mve_trainer import MVETrainer
 from .multihead_trainer import MultiheadTrainer
+from .cg_trainer import CGTrainer
+from .multihead_cg_trainer import MultiheadCGTrainer
 
 try:
     from bam_torch.group_averaging.training.ga_trainer import GATrainer
@@ -23,6 +25,11 @@ TRAINER_REGISTRY = {
     "materials_project": MPTrainer_V2,
     "mp_v1": MPTrainer,
     "mp_v2": MPTrainer_V2,
+    "cg": CGTrainer,
+    "coarse_grained": CGTrainer,
+    "coarse-grained": CGTrainer,
+    "cg_multihead": MultiheadCGTrainer,
+    "cg_mh": MultiheadCGTrainer,
 }
 if GATrainer is not None:
     TRAINER_REGISTRY.update({
