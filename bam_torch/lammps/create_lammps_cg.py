@@ -30,8 +30,11 @@ from bam_torch.lammps.lammps_bam import LAMMPS_BAM
 
 # Mapping CG bead types to dummy atomic numbers
 # Dynamically generated: CG type i -> element i+1 (H=1, He=2, Li=3, ...)
-# Supports up to 100 CG types
-CG_TYPE_TO_ELEMENT = {i: (chemical_symbols[i + 1], i + 1) for i in range(100)}
+# Supports up to 1000 CG types
+# CG types beyond the periodic table (uMLP vocab >= 118) get a synthetic label X<n>;
+# pair_bam only compares the integer Z, so any unique integer works.
+CG_TYPE_TO_ELEMENT = {i: ((chemical_symbols[i + 1] if i + 1 < len(chemical_symbols) else f"X{i + 1}"), i + 1)
+                      for i in range(1000)}
 
 
 def create_lammps_cg_model(pkl_path, pt_path, output_path=None, type_mapping=None):
