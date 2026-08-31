@@ -1,0 +1,69 @@
+{
+    "device" : "gpu",
+    "gpu-parallel" : false,
+    "model" : "race",
+    "cueq_config" : false,
+    "regress_forces" : true,
+    "trainer" : "base",
+    "fname_traj" : "../dataset/train_300K.xyz",
+    "ntrain" : 450,
+    "nvalid" : 50,
+    "element" : "auto",
+    "cutoff" : 6.0,
+    "avg_num_neighbors": 26,
+    "num_species" : 4,
+    "max_ell" : 2,
+    "num_radial_basis" : 8,
+    "hidden_channels" : "32x0e+16x1o+8x2e",
+    "output_channels" : "1x0e",
+    "nbatch" : 2,
+    "nlayers" : 3,
+    "features_dim" : 64,
+    "active_fn": "identity",
+    "pbc" : true,
+    "NN" : {
+            "data_seed" :  10,
+	    "init_seed" :  11,
+            "learning_rate" : 0.01,
+	    "weight_decay" : 0,
+            "nepoch" : 100,
+            "nsave": 5,
+            "restart" : false,
+            "fname_pkl" : "model.pkl",
+	    "loss_config" : {"energy_loss": "mse", "force_loss": "mse"},
+            "frc_lambda" : 100,
+            "enr_lambda" : 1,
+            "l2_lambda" : 0.0
+    },
+    "scheduler": {
+            "scheduler" : "ReduceLROnPlateau",
+	    "lr_gamma" : 0.1,
+	    "decay_factor" : 0.9,
+            "max_steps" : 30,
+	    "warmup_steps" : 10,
+	    "warmup_factor" : 0.2,
+	    "patience" : 50,
+	    "threshold" : 0.0001
+    },
+    "log_length": "simple",
+    "log_interval": 2,
+    "log_config": {
+            "step":["date", "epoch"],
+            "train": ["loss", "loss_e", "loss_f"],
+            "valid": ["loss", "loss_e", "loss_f"],
+            "lr": ["lr"]
+    },
+    "train" : {
+            "fname_log" : "loss_train.out"
+    },
+    "predict" : {
+            "evaluate_tag" : false,
+	    "loss_config" : {"energy_loss": "rmse", "force_loss": "rmse"},
+            "fname_traj" : "../dataset/test_300K.xyz",
+            "ndata" : "../dataset/test_300K.xyz",
+            "model" : "model.pkl",
+            "fname_plog" : "predict.out"
+    }
+}
+
+
