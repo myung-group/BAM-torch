@@ -29,7 +29,7 @@
             {
                 "name": "replay",
                 "head_idx": 1,
-                "fname_traj": "Data_sampling/replay/dataset/train_data/train_random_1000.traj",
+                "fname_traj": "Data_sampling/replay/train_data/train_random_1000.traj",
                 "ntrain": "Data_sampling/replay/train_data/train_random_1000.traj",
                 "nvalid": "Data_sampling/replay/valid_data/valid_random_10per.traj",
                 "use_foundation_e0s": true,
@@ -71,7 +71,7 @@
         "init_seed": 1301,
         "learning_rate": 0.0001,
         "weight_decay": 0,
-        "nepoch": 20,
+        "nepoch": 2,
         "nsave": 2,
         "restart": false,
         "fname_pkl": "model_large_multihead.pkl",

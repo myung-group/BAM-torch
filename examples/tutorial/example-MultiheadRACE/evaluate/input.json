@@ -1,43 +1,44 @@
 {
     "device": "gpu",
-    "model": "../pkl/model_large_multihead_epoch_18.pkl",
-    "gpu-parallel": true,
-    "trainer": "base",
+    "model": "race",
+    "gpu-parallel": false,
+    "trainer": "mh",
     "smoke_test": {
         "enabled": false,
         "max_files": 1,
         "max_batches": 5,
         "max_samples": 10
     },
-    "_comment_multihead": "========== MULTIHEAD REPLAY FINETUNING (Supports N heads) ==========",
+    "_comment_multihead": "========== MULTIHEAD REPLAY FINETUNING (N-head support) ==========",
+    "_comment_eval_datasets": "The evaluator rebuilds the heads from the input.json stored inside the checkpoint, so this block is kept identical to ../input.json for reference only.",
     "multihead": {
         "enabled": true,
         "ema": true,
         "ema_decay": 0.99999,
-        "_comment_datasets": "N-head is automatically determined by the number of datasets",
+        "_comment_datasets": "Automatically decided the N-head according to the number of datasets",
         "datasets": [
             {
                 "name": "target",
                 "head_idx": 0,
-                "fname_traj": "/home/hgpark/main_git_251204/catalyst/data/combined_data_train.traj",
-                "ntrain": "/home/hgpark/main_git_251204/catalyst/data/combined_data_train.traj",
-                "nvalid": "/home/hgpark/main_git_251204/catalyst/data/combined_data_valid.traj",
+                "fname_traj": "../Data_sampling/target/train_data/train_random_1000.traj",
+                "ntrain": "../Data_sampling/target/train_data/train_random_1000.traj",
+                "nvalid": "../Data_sampling/target/valid_data/valid_10per.traj",
                 "use_foundation_e0s": false,
-                "loss_weight": 100.0,
+                "loss_weight": 10.0,
                 "comment": "Main finetuning dataset - uses foundation E0s"
             },
             {
                 "name": "replay",
                 "head_idx": 1,
-                "fname_traj": "/home/hgpark/main_git_251204/MACE_V3_251208_RACEUnified/Data_sampling/replay/dataset/merged.traj",
-                "ntrain": "/home/hgpark/main_git_251204/MACE_V3_251208_RACEUnified/Data_sampling/replay/train_data/train.traj",
-                "nvalid": "/home/hgpark/main_git_251204/MACE_V3_251208_RACEUnified/Data_sampling/replay/valid_data/valid.traj",
+                "fname_traj": "../Data_sampling/replay/train_data/train_random_1000.traj",
+                "ntrain": "../Data_sampling/replay/train_data/train_random_1000.traj",
+                "nvalid": "../Data_sampling/replay/valid_data/valid_random_10per.traj",
                 "use_foundation_e0s": true,
                 "loss_weight": 1.0,
                 "comment": "Replay dataset - uses foundation model's enr_avg_per_element"
             }
         ],
-        "_comment_example_3heads": "Example: To use 3 heads, add 3 datasets",
+        "_comment_example_3heads": "Example: Add 3 datasets to use 3-head",
         "_example_third_dataset": {
             "name": "auxiliary",
             "head_idx": 2,
@@ -50,7 +51,7 @@
     "cutoff": 6.0,
     "avg_num_neighbors": 60,
     "num_species": 89,
-    "hidden_channels": "128x0e + 128x1o + 128x2e",
+    "hidden_channels": "128x0e",
     "features_dim": 64,
     "num_radial_basis": 8,
     "nlayers": 3,
@@ -58,37 +59,34 @@
     "output_channels": "1x0e",
     "active_fn": "identity",
     "regress_forces": true,
+    "interaction_block": "fast",
     "cueq_config": false,
-    "nbatch": 36,
+    "oeq_config": true,
+    "nbatch": 4,
     "pbc": true,
     "_comment_lammps": "========== LAMMPS MODEL SETTINGS ==========",
     "lammps_head": "target",
-    "_comment_lammps_head": "Select which head to use when generating pt file for LAMMPS from multihead model. 'target' or 'replay'",
+    "_comment_lammps_head": "Select the head in the Multihead model which will use when generate .pt file for the lammps. 'target' or 'replay'",
     "NN": {
         "data_seed": 1300,
         "init_seed": 1301,
         "learning_rate": 0.0001,
         "weight_decay": 0,
-        "nepoch": 100,
+        "nepoch": 2,
         "nsave": 2,
-        "_comment_pkl_save_interval": "Save separate pkl file every N epochs (e.g., 5 -> epoch_5.pkl, epoch_10.pkl, ...)",
-        "pkl_save_interval": 2,
-        "restart": true,
+        "restart": false,
         "fname_pkl": "model_large_multihead.pkl",
-        "foundation_model": "model_large.pkl",
+        "foundation_model": "../model-1_rev.pkl",
         "loss_config": {
             "energy_loss": "huber",
             "force_loss": "huber",
             "stress_loss": "huber",
             "huber_delta": 0.1
         },
-        "enr_lambda": 100.0,
+        "enr_lambda": 10.0,
         "frc_lambda": 1.0,
         "str_lambda": 10.0,
-        "energy_grad_loss": false,
-        "energy_grad_mult": 10,
-        "l2_lambda": 0.0,
-        "cosine_sim": false
+        "l2_lambda": 0.0
     },
     "scheduler": {
         "scheduler": "ReduceLROnPlateau",
@@ -129,20 +127,22 @@
             "lr"
         ]
     },
-    "_comment_log_config": "For N heads, head_0_*, head_1_*, ..., head_N-1_* are auto-generated. Separate logging for target and replay heads",
+    "_comment_log_config": "If N-head, auto-generated head_0_*, head_1_*, ..., head_N-1_*. Separate logging for target and replay heads",
     "train": {
         "fname_log": "loss_train.out"
     },
     "predict": {
         "evaluate_tag": true,
-        "fname_traj": "/home/hgpark/main_git_251204/catalyst/data/combined_data_test.traj",
-        "ndata": 100,
-        "model": "../pkl/model_large_multihead_epoch_18.pkl",
-        "fname_plog": "predict_epoch_18.out",
-        "eval_head": 0,
         "loss_config": {
             "energy_loss": "rmse",
             "force_loss": "rmse"
-        }
+        },
+        "fname_traj": "../Data_sampling/target/test_data/test_20.traj",
+        "ndata": "../Data_sampling/target/test_data/test_20.traj",
+        "_comment_model": "Fine-tuned multihead checkpoint written by ../main.py. With NN.nepoch=2 and log_interval=2 the trainer saves checkpoints/ckpt_latest_epoch_02.pkl (and ckpt_best_epoch_02.pkl when validation improves).",
+        "model": "../checkpoints/ckpt_latest_epoch_02.pkl",
+        "fname_plog": "predict_mh.out",
+        "eval_head": 0,
+        "_comment_eval_head": "Head index (or name) to evaluate: 0 = 'target', 1 = 'replay'"
     }
 }
