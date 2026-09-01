@@ -94,9 +94,18 @@ class MultiheadEvaluator(Evaluator):
             regress_forces = "false"
         
         mlp_irreps = o3.Irreps(f"{features_dim}x0e")
-        
+
+        # The checkpoint's interaction block must be reproduced here: "slow" and
+        # "fast" build different tensor-product paths, so rebuilding a "fast"
+        # checkpoint with the default "slow" leaves most weights unloaded (and
+        # trips a shape mismatch when EMA weights are applied).
+        interaction_block = model_config.get(
+            'interaction_block', self.json_data.get('interaction_block', 'slow')
+        )
+
         # Create RACEUnified model
         model = RACEUnified(
+            interaction_block=interaction_block,
             cutoff=cutoff,
             avg_num_neighbors=avg_num_neighbors,
             num_species=num_species,
