@@ -17,10 +17,15 @@ def setup(rank, world_size):
 
 def run(rank, world_size, json_data):
     setup(rank, world_size)
-    trainer_name = json_data.get("trainer", "base")
-    trainer_cls = TRAINER_REGISTRY.get(trainer_name)
-    trainer = trainer_cls(json_data, rank, world_size)
-    trainer.train()
+    try:
+        trainer_name = json_data.get("trainer", "base")
+        trainer_cls = TRAINER_REGISTRY.get(trainer_name)
+        trainer = trainer_cls(json_data, rank, world_size)
+        trainer.train()
+    finally:
+        # Tear the group down inside the worker that created it; the parent
+        # process never calls init_process_group().
+        dist.destroy_process_group()
     
     
 if __name__ == '__main__':
@@ -38,6 +43,5 @@ if __name__ == '__main__':
     else:
         world_size = torch.cuda.device_count()
         mp.spawn(run, args=(world_size, json_data), nprocs=world_size, join=True)
-        dist.destroy_process_group()
     
     print(date())
