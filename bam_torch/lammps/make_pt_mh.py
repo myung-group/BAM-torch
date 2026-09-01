@@ -57,6 +57,9 @@ def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
         output_irreps=o3.Irreps(cfg.get('output_channels', '1x0e')),
         active_fn=cfg.get('active_fn', 'identity'),
         regress_forces=regress_forces,
+        # "slow" and "fast" build different tensor-product paths, so the
+        # block the checkpoint was trained with has to be reproduced here.
+        interaction_block=cfg.get('interaction_block', 'slow'),
         heads=heads,
     )
 
