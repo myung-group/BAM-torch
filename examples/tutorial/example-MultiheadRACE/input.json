@@ -58,7 +58,9 @@
     "output_channels": "1x0e",
     "active_fn": "identity",
     "regress_forces": true,
+    "interaction_block": "fast",
     "cueq_config": false,
+    "oeq_config": true,
     "nbatch": 4,
     "pbc": true,
     "_comment_lammps": "========== LAMMPS MODEL SETTINGS ==========",
@@ -133,7 +135,7 @@
 	"loss_config" : {"energy_loss": "rmse", "force_loss": "rmse", "stress_loss": "rmse"},
         "fname_traj": "Data_sampling/target/test_data/test_20.traj",
         "ndata": "Data_sampling/target/test_data/test_20.traj",
-        "model": "model_small_multihead_50epch.pkl",
+        "model": "/content/BAM-torch/examples/tutorial/example-MultiheadRACE/model-1_rev.pkl",
         "fname_plog": "predict.out"
     }
 }
