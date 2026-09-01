@@ -103,6 +103,45 @@ class MultiheadEvaluator(Evaluator):
             'interaction_block', self.json_data.get('interaction_block', 'slow')
         )
 
+        # Mirror the trainer's backend selection (cueq -> oeq -> e3nn) so
+        # inference can use the same accelerated kernels training used. Only
+        # the "fast" block has the weighted tensor-product paths these
+        # backends need; "slow" always runs on e3nn.
+        from bam_torch.model.wrapper_ops import (
+            CuEquivarianceConfig,
+            OEQConfig,
+            CUET_AVAILABLE,
+            OEQ_AVAILABLE,
+        )
+
+        # The caller's config wins when it names a backend, so a run can turn
+        # acceleration off (or on) without rewriting the checkpoint; otherwise
+        # fall back to what the checkpoint recorded at training time.
+        if 'cueq_config' in self.json_data:
+            cueq_request = self.json_data.get('cueq_config')
+        else:
+            cueq_request = model_config.get('cueq_config')
+        if 'oeq_config' in self.json_data:
+            oeq_request = self.json_data.get('oeq_config')
+        else:
+            oeq_request = model_config.get('oeq_config')
+        cueq_config = None
+        oeq_config = None
+        if interaction_block == 'fast':
+            if cueq_request and CUET_AVAILABLE:
+                cueq_config = CuEquivarianceConfig(
+                    enabled=True,
+                    layout="ir_mul",
+                    group="O3_e3nn",
+                    optimize_all=True,
+                )
+                print("  - Equivariant backend: CuEquivariance")
+            elif oeq_request and OEQ_AVAILABLE:
+                oeq_config = OEQConfig(enabled=True, optimize_all=True)
+                if model_config.get('oeq_conv_fusion', False):
+                    oeq_config.conv_fusion = "atomic"
+                print("  - Equivariant backend: OpenEquivariance")
+
         # Create RACEUnified model
         model = RACEUnified(
             interaction_block=interaction_block,
@@ -121,7 +160,8 @@ class MultiheadEvaluator(Evaluator):
             regress_forces=regress_forces,
             compute_stress=True,
             heads=heads,
-            cueq_config=None,
+            cueq_config=cueq_config,
+            oeq_config=oeq_config,
         )
         
         # Load weights: raw `params` provide buffers + structure; the EMA weights
