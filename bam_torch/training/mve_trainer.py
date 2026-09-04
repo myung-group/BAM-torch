@@ -77,7 +77,7 @@ class MVETrainer(BaseTrainer):
                 params = self.model.parameters()
                 loss["loss_l2"] = l2_regularization(params)
                 loss["loss"].append(lambd * loss["loss_l2"])
-                loss["loss"] = sum(loss["loss"])
+            loss["loss"] = sum(loss["loss"])
 
         else:
             loss = self._compute_loss(preds, data)
