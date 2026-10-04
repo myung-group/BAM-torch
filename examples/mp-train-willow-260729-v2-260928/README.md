@@ -38,7 +38,7 @@ cd BAM-torch
 uv venv --python 3.13
 source .venv/bin/activate
 uv pip install -e '.[oeq]'
-cd examples/past/mp-train-willow-260729-v2-260928
+cd examples/mp-train-willow-260729-v2-260928
 ```
 
 Create `train_data/` and `valid_data/` and provide extxyz shards containing
