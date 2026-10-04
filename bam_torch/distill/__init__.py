@@ -5,7 +5,6 @@ hybrid energy/force loss:
 
     L = lambda_dft * L_DFT + (1 - lambda_dft) * L_teacher
 
-See ``examples/example-distillation/`` for a complete pipeline.
 """
 from .trainer import DistillTrainer
 from .dataset import (

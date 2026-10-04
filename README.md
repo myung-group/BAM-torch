@@ -129,32 +129,11 @@ if __name__ == '__main__':
 
 ## Running Examples
 
-There are examples in `examples/example-*/`
-
-### Single-GPU Training
-Run on a single node without using a job scheduler, by setting the environment variable:
-```bash
-$ CUDA_VISIBLE_DEVICES=0 python main.py
-```
-
-Alternatively, set `"gpu-parallel": false` in `input.json`:
-```bash
-$ python main.py
-```
-
-### Multi-GPU Training (DistributedDataParallel)
-Run on a single node with multiple GPUs by setting the environment variables:
-```bash
-$ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py
-```
-
-Alternatively, set `"gpu-parallel": true` in `input.json`:
-```bash
-$ python main.py
-```
-This automatically detects all available GPUs and utilizes them for distributed computation.
-
-For an example of using multiple nodes and multiple GPUs with the SLURM scheduler, please refer to `examples/example-3BPA_300K-multiGPU/`
+This branch provides the RACE+DeNS experiment in
+[`examples/mp-train-willow-260729-v2-260928/`](examples/mp-train-willow-260729-v2-260928/README.md).
+Its README covers dataset preparation, fresh single-GPU and distributed
+training, and checkpoint resume. The legacy `example-*` folders are not
+included in this branch.
 
 ### Evaluation
 ```python
@@ -187,7 +166,8 @@ bam-torch/
 │   ├── training/        # Training loop, loss computation, and optimization routines
 │   └── utils/           # Common utility functions and helper tools
 ├── examples/
-│   ├── example-3BPA_300K/    # QM9 benchmark example
+│   ├── dataset/            # Shared example datasets
+│   └── mp-train-willow-260729-v2-260928/ # RACE+DeNS experiment
 ├── README.md            # Project documentation
 ├── install_deps.py      # Dependency installation script
 ├── pyproject.toml       # Build configuration
