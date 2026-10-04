@@ -3,6 +3,7 @@ import torch.nn.init as init
 
 import e3nn
 from e3nn import o3, nn
+from e3nn.io import CartesianTensor
 
 from typing import Any, Callable, Dict, List, Optional, Type, Union, Tuple
 from e3nn.util.jit import compile_mode
@@ -40,6 +41,7 @@ def _resolve_race_interaction_block(name: str):
             f"Unknown interaction_block {name!r}. Valid options: {valid}"
         )
 from .wrapper_ops import Linear
+from .radial import BesselBasis
 from bam_torch.utils.scatter import scatter_sum, scatter_mean
 from bam_torch.utils.output_utils import (
     get_outputs, 
@@ -48,8 +50,210 @@ from bam_torch.utils.output_utils import (
 )
 
 
+class ForceEncodingBlock(torch.nn.Module):
+    """Equivariantly embed per-atom force vectors (DeNS conditioning).
+
+    Spherical harmonics of the force direction, each l-channel gated by an
+    MLP of the force magnitude, mapped into hidden_irreps. Used by the DeNS
+    auxiliary task (Liao et al., arXiv:2403.09549): for denoising samples
+    the model is conditioned on the original frame's DFT forces, which makes
+    "predict the displacement back" well-posed for non-equilibrium frames.
+
+    Output is exactly zero for zero-force nodes, so feeding zeros (or not
+    calling the block at all) is a strict no-op on the rest of the model.
+    """
+
+    def __init__(
+        self,
+        hidden_irreps: o3.Irreps,
+        max_ell: int = 3,
+        num_basis: int = 8,
+        f_max: float = 20.0,   # eV/A scale of the magnitude embedding
+        cueq_config: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__()
+        self.sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
+        self.sh = o3.SphericalHarmonics(
+            self.sh_irreps, normalize=True, normalization="component"
+        )
+        self.mag_basis = BesselBasis(r_max=f_max, num_basis=num_basis)
+        self.mag_mlp = torch.nn.Sequential(
+            torch.nn.Linear(num_basis, 64),
+            torch.nn.SiLU(),
+            torch.nn.Linear(64, self.sh_irreps.num_irreps),
+        )
+        self.linear = Linear(
+            irreps_in=self.sh_irreps,
+            irreps_out=hidden_irreps,
+            cueq_config=cueq_config,
+        )
+        # per-irrep gate -> per-component broadcast (dims 1,3,5,... per l)
+        gate_index = torch.cat([
+            torch.full((ir.dim,), i, dtype=torch.long)
+            for i, (_, ir) in enumerate(self.sh_irreps)
+        ])
+        self.register_buffer("gate_index", gate_index)
+
+    def forward(self, forces: torch.Tensor) -> torch.Tensor:  # [n_nodes, 3]
+        mag = forces.norm(dim=-1, keepdim=True)                  # [n, 1]
+        # Both Bessel (sin(wx)/x) and normalized SH are 0/0 at zero input;
+        # substitute a dummy magnitude/direction there and kill the result
+        # through the gate instead.
+        nonzero = mag > 0
+        safe_mag = mag.clamp(min=1e-6)
+        unit_x = torch.zeros_like(forces)
+        unit_x[:, 0] = 1.0
+        safe_forces = torch.where(nonzero, forces, unit_x)
+        gate = self.mag_mlp(self.mag_basis(safe_mag)) * nonzero   # [n, n_irreps]
+        sh = self.sh(safe_forces)                                 # [n, sh_dim]
+        return self.linear(sh * gate[:, self.gate_index])
+
+
+class SkipSpeciesMixin:
+    """Low-dim species conditioning for the per-layer skip tensor product.
+
+    skip_tp_node is a FullyConnectedTensorProduct bilinear in
+    (node_feats, species vector), so its weights scale as
+    channels^2 x species-dim per l-channel per layer. Feeding the raw one-hot
+    makes species-dim = num_species: at 89 species and 128 channels that one
+    block is ~76% of the model. Projecting the one-hot to a low dimension
+    first shrinks it by num_species/skip_species_dim -- chemically similar
+    elements then share skip directions instead of each owning a private
+    channels^2 weight slice.
+
+    skip_species_dim=None keeps the full one-hot, so pre-projection
+    checkpoints load unchanged.
+    """
+
+    def _init_skip_species(
+        self,
+        skip_species_dim: Optional[int],
+        num_species: int,
+        node_attr_irreps: o3.Irreps,
+    ) -> o3.Irreps:
+        """Build the projection (if any); return the irreps to pass to the
+        interaction blocks as node_attrs_irreps.
+
+        Call at the same point in __init__ as the pre-mixin inline code, so
+        parameters() order is unchanged -- torch_ema shadow params and the
+        finetune prefix map are positional.
+        """
+        self.skip_species_dim = skip_species_dim
+        if skip_species_dim is None:
+            return node_attr_irreps
+        self.skip_species_embedding = torch.nn.Linear(
+            num_species, skip_species_dim, bias=False
+        )
+        # A one-hot input selects a single weight row, so init rows to unit
+        # per-component variance -- the assumption e3nn's tensor-product path
+        # normalization makes about its inputs. Default kaiming init would
+        # shrink rows by ~1/sqrt(num_species).
+        torch.nn.init.normal_(self.skip_species_embedding.weight, std=1.0)
+        return o3.Irreps([(skip_species_dim, (0, 1))])
+
+    def _skip_attrs(self, node_attrs: torch.Tensor) -> torch.Tensor:
+        """Species vector for the skip TP. The full one-hot still feeds the
+        node/species embeddings and the radial network."""
+        if self.skip_species_dim is None:
+            return node_attrs
+        return self.skip_species_embedding(node_attrs)
+
+
+class ProductBasisXFeatsMixin:
+    """Shared plumbing for the scalar factor RaceEquivariantBlock multiplies in.
+
+    Choice of where RACE product blocks get x_node_feats from:
+
+    Legacy (`x_feats_per_layer=False`): one projection of the species
+      embedding, computed once outside the layer loop. x is then a fixed
+      per-element vector, so FullTensorProduct(x, node_feats) collapses to
+        out_c = sum_b (sum_a W_{c,ab} x_a) f_b
+      i.e. a species-conditioned *linear* map -- the same operation
+      skip_tp_node already performs, and one that adds no body order
+      (0e (x) l -> l cannot raise correlation).
+
+    Per-layer (`x_feats_per_layer=True`): x is re-derived at every layer from
+      the features entering that layer, so the block is genuinely bilinear in
+      the atomic environment and correlation order compounds with depth.
+      Costs ~no extra parameters.
+
+    Defaults stay on the legacy path so existing checkpoints keep loading: the
+    flag renames linear_x -> linear_x.0 .. linear_x.{nlayers-1} and changes the
+    layer>0 input irreps, so the two are not state_dict-compatible. Opt in from
+    the config ("x_feats_per_layer": true).
+
+    NOTE: the per-layer path indexes a ModuleList by a loop variable, which
+    TorchScript cannot compile. None of these models are scripted today (the
+    LAMMPS exporters build them eagerly); revisit if that changes.
+    """
+
+    def _init_x_feats(
+        self,
+        x_feats_per_layer: bool,
+        x_feats_rms_norm: bool,
+        node_feats_irreps: o3.Irreps,
+        hidden_irreps: o3.Irreps,
+        x_node_feats_irreps: o3.Irreps,
+        nlayers: int,
+        cueq_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Build self.linear_x.
+
+        Call while node_feats_irreps is still bound to the *embedding* irreps
+        -- every layer loop in this file rebinds that name to hidden_irreps
+        from i > 0 onward.
+        """
+        self.x_feats_per_layer = x_feats_per_layer
+        self.x_feats_rms_norm = x_feats_rms_norm
+        if x_feats_per_layer:
+            # Layer 0 reads the embedding, later layers read hidden_irreps.
+            # Only the 0e block contributes (e3nn Linear cannot map l>0 -> 0e),
+            # so each is a cheap scalar summary of the current environment.
+            self.linear_x = torch.nn.ModuleList([
+                Linear(
+                    node_feats_irreps if i == 0 else hidden_irreps,
+                    x_node_feats_irreps,
+                    internal_weights=True,
+                    shared_weights=True,
+                    cueq_config=cueq_config,
+                )
+                for i in range(nlayers)
+            ])
+        else:
+            self.linear_x = Linear(
+                node_feats_irreps,
+                x_node_feats_irreps,
+                internal_weights=True,
+                shared_weights=True,
+                cueq_config=cueq_config,
+            )
+
+    def _shared_x_feats(
+        self, node_feats: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """Legacy factor: one species-only projection reused by every layer.
+        None on the per-layer path, which recomputes it inside the loop."""
+        if self.x_feats_per_layer:
+            return None
+        return self.linear_x(node_feats)
+
+    def _layer_x_feats(
+        self, ilayer: int, node_feats: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-layer factor, projected from the features entering `ilayer`."""
+        x = self.linear_x[ilayer](node_feats)
+        if self.x_feats_rms_norm:
+            # x is pure 0e, so an RMS over its channel axis is
+            # rotation-invariant. Rescaling to unit magnitude keeps the product
+            # block's output linear (rather than quadratic) in |node_feats|,
+            # which is what stops feature drift from compounding over layers
+            # when there is no inter-layer norm.
+            x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+        return x
+
+
 @compile_mode("script")
-class RACE(torch.nn.Module):
+class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
     """Restratification Atomic Cluster Expansion (RACE) model
     """
     def __init__(
@@ -74,6 +278,20 @@ class RACE(torch.nn.Module):
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
         radial_polynomial_p: int = 2,
+        species_embedding_dim: int = 16,
+        x_features_dim: int = 8,
+        # Project the species one-hot to this dimension before the per-layer
+        # skip tensor product (skip_tp_node); None keeps the full one-hot
+        # (legacy checkpoints load unchanged). See SkipSpeciesMixin for rationale.
+        skip_species_dim: Optional[int] = None,
+        # Source of RaceEquivariantBlock's scalar factor, and whether to
+        # RMS-normalize it. See ProductBasisXFeatsMixin for the rationale.
+        x_feats_per_layer: bool = False,
+        x_feats_rms_norm: bool = True,
+        # DeNS auxiliary task (denoising non-equilibrium structures): adds a
+        # force-conditioning encoder and a noise-prediction head. Both are
+        # dormant unless the input dict carries "dens_forces".
+        dens: bool = False,
     ):
         super().__init__()
 
@@ -94,6 +312,12 @@ class RACE(torch.nn.Module):
         self.nlayers = nlayers
         interaction_cls = _resolve_race_interaction_block(interaction_block)
 
+        # criterion drives the direct->auto force switch; forward() reads it,
+        # so it must exist even when set_criterion() is never called.
+        self.criterion = None
+        self.criterion_tag = None
+        self.criterion_value = 0
+
         ## 1) Embedding
         # Node embedding
         node_attr_irreps = o3.Irreps([(num_species, (0, 1))])
@@ -101,7 +325,12 @@ class RACE(torch.nn.Module):
         if interaction_block in ["slow"]:
             x_node_feats_irreps = node_feats_irreps
         else:
-            x_node_feats_irreps = o3.Irreps([(8, (0, 1))])
+            x_node_feats_irreps = o3.Irreps([(x_features_dim, (0, 1))])
+
+        # Skip-path species conditioning; see SkipSpeciesMixin.
+        skip_attr_irreps = self._init_skip_species(
+            skip_species_dim, num_species, node_attr_irreps
+        )
 
         self.node_embedding = LinearNodeEmbeddingBlock(
             irreps_in=node_attr_irreps,
@@ -117,8 +346,18 @@ class RACE(torch.nn.Module):
             radial_type="bessel",
             distance_transform=None,
         )
+        # Species-pair conditioning of the radial network: a learned scalar
+        # embedding of each endpoint's one-hot species is concatenated to the
+        # Bessel features, so message weights can differ per element pair
+        # instead of being purely distance-based. dim=0 disables (no-op cat).
+        self.species_embedding_dim = species_embedding_dim
+        self.species_embedding = torch.nn.Linear(
+            num_species, species_embedding_dim, bias=False
+        )
         # Edge embedding
-        edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
+        edge_feats_irreps = o3.Irreps(
+            f"{self.radial_embedding.out_dim + 2 * species_embedding_dim}x0e"
+        )
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell) # interaction_irreps in JAX
         #num_features = hidden_irreps.count(o3.Irrep(0, 1))
         #interaction_irreps = (sh_irreps * num_features).sort()[0].simplify()
@@ -127,13 +366,11 @@ class RACE(torch.nn.Module):
                                                          normalization="component")
         
         ## 2) Interaction layer  # RealAgnosticInteractionBlock
-        self.linear_x = Linear(
-            node_feats_irreps,
-            x_node_feats_irreps,
-            internal_weights=True,
-            shared_weights=True,
-            cueq_config=cueq_config,
-        ) # x_node_feats
+        self._init_x_feats(
+            x_feats_per_layer, x_feats_rms_norm,
+            node_feats_irreps, hidden_irreps, x_node_feats_irreps,
+            nlayers, cueq_config,
+        )
         if radial_MLP is None:
             radial_MLP = [64, 64]
 
@@ -150,7 +387,7 @@ class RACE(torch.nn.Module):
                 target_irreps = hidden_irreps
 
             inter = interaction_cls(
-                node_attrs_irreps=node_attr_irreps,
+                node_attrs_irreps=skip_attr_irreps,
                 node_feats_irreps=node_feats_irreps,
                 edge_attrs_irreps=sh_irreps,
                 edge_feats_irreps=edge_feats_irreps,
@@ -200,11 +437,42 @@ class RACE(torch.nn.Module):
             self.force_decoders.append(force_decoder)
             self.stress_decoders.append(stress_decoder)
 
-        #self.emb = torch.nn.Embedding(num_embeddings=num_species, embedding_dim=num_species)
-    
+        # Learnable per-layer mixing weights for the summed contributions
+        # (init to 1.0 == the previous plain sum).
+        self.layer_scales_e = torch.nn.Parameter(torch.ones(nlayers))
+        # Force/stress scales only train when the direct heads exist; frozen
+        # otherwise so DDP sees no never-used trainable params in auto mode.
+        has_direct = "direct" in regress_forces
+        self.layer_scales_f = torch.nn.Parameter(
+            torch.ones(nlayers), requires_grad=has_direct
+        )
+        self.layer_scales_s = torch.nn.Parameter(
+            torch.ones(nlayers), requires_grad=has_direct
+        )
+
+        # Change of basis mapping the (1x0e+1x2e) stress head output onto a
+        # symmetric 3x3 Cartesian tensor: cart = einsum("ni,iab->nab", sph, cob)
+        self.register_buffer(
+            "stress_change_of_basis",
+            CartesianTensor("ij=ji").reduced_tensor_products().change_of_basis,
+        )
+
+        # DeNS: force-conditioning encoder (injected after the first layer,
+        # once node_feats carry hidden_irreps) and the noise-vector head.
+        self.dens = dens
+        if dens:
+            self.force_encoder = ForceEncodingBlock(
+                hidden_irreps, max_ell=max_ell, cueq_config=cueq_config
+            )
+            self.denoise_decoder = LinearForceDecoderBlock(
+                irreps_in=hidden_irreps,
+                irrep_out="1x1o",
+                cueq_config=cueq_config,
+            )
+
     def forward(
-            self, 
-            data: Dict[str, torch.Tensor], 
+            self,
+            data: Dict[str, torch.Tensor],
             backprop: bool = False,
             compute_displacement: bool = False
     ):
@@ -232,68 +500,85 @@ class RACE(torch.nn.Module):
             species = data["species"]
             node_attrs = to_one_hot(species.unsqueeze(-1), self.num_species)
         node_feats = self.node_embedding(node_attrs)
+        skip_attrs = self._skip_attrs(node_attrs)
 
         edge_index = data["edge_index"]
         lengths = torch.norm(Rij, dim=1)
 
-        nonzero_idx = torch.arange(len(lengths), device=lengths.device)[lengths != 0]
+        nonzero_idx = torch.nonzero(lengths != 0).squeeze(-1)
         Rij = Rij[nonzero_idx]
         lengths = lengths[nonzero_idx]
         edge_index = edge_index[:, nonzero_idx]
         
         edge_attrs = self.spherical_harmonics(Rij)
-        edge_feats = self.radial_embedding(lengths.unsqueeze(1), 
+        # Smooth envelope (1 at r=0, 0 at r_max); gates the per-edge weights
+        # inside the interaction blocks so messages vanish at the cutoff.
+        edge_cutoff = self.radial_embedding.cutoff_fn(lengths.unsqueeze(1))
+        edge_feats = self.radial_embedding(lengths.unsqueeze(1),
                                            node_attrs,
-                                           data["edge_index"],
+                                           edge_index,
                                            species)
-#        ###
-#        i_sp = species[data["edge_index"][0]]
-#        j_sp = species[data["edge_index"][1]]
-#        sp = (i_sp + j_sp) / 2
-#        edge_feats = edge_feats * sp[:, None]
+        # Species-pair conditioning: sender/receiver element embeddings join
+        # the radial features feeding the conv-weight MLPs.
+        species_emb = self.species_embedding(node_attrs)
+        edge_feats = torch.cat(
+            [edge_feats, species_emb[edge_index[0]], species_emb[edge_index[1]]],
+            dim=-1,
+        )
 
-        x_node_feats = self.linear_x(node_feats)
+        x_node_feats_shared = self._shared_x_feats(node_feats)
 
         frc_out = []
-        sts_out = []                                 
+        sts_out = []
         outputs = []
-        node_logvar = [] 
-        node_f_logvar = [] 
-        node_feats_list = []
-        for interaction, product, readout, force_decoder, stress_decoder in zip(
+        node_logvar = []
+        node_f_logvar = []
+        for ilayer, (interaction, product, readout, force_decoder, stress_decoder) in enumerate(zip(
                 self.interactions, self.products, self.readouts, self.force_decoders, self.stress_decoders
-            ):
+            )):
+            # Scalar factor for the product basis, taken from the features as
+            # they enter this layer (before the interaction overwrites them).
+            # This is what makes RaceEquivariantBlock bilinear in the atomic
+            # environment rather than a species-conditioned linear map.
+            if x_node_feats_shared is None:
+                x_node_feats = self._layer_x_feats(ilayer, node_feats)
+            else:
+                x_node_feats = x_node_feats_shared
+
             node_feats, sc = interaction(
-                node_attrs=node_attrs,
+                node_attrs=skip_attrs,
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
                 edge_index=edge_index,
+                edge_cutoff=edge_cutoff,
             )
             node_feats = product(
                 x_node_feats=x_node_feats,
                 node_feats=node_feats,
-                sc=sc, 
+                sc=sc,
             )
+            # DeNS conditioning: inject the original frame's DFT forces once
+            # node_feats carry hidden_irreps. No-op when the key is absent
+            # (inference) or the forces are zero (ForceEncodingBlock gate).
+            if ilayer == 0 and self.dens:
+                if "dens_forces" in data:
+                    node_feats = node_feats + self.force_encoder(
+                        data["dens_forces"])
+                elif self.training:
+                    # Standard training batch: feed zero forces so the
+                    # encoder contributes exactly zero yet stays in the
+                    # autograd graph — every DeNS parameter then receives a
+                    # (zero) gradient each iteration, which DDP requires
+                    # even without find_unused_parameters.
+                    node_feats = node_feats + self.force_encoder(
+                        torch.zeros_like(data["positions"]))
             node_energies = readout(node_feats) # [n_nodes, len(heads)]  == [nbatch*num_nodes, "1x0e" or "2x0e"]
 
             if "direct" in self.regress_forces:
-                l_0_dim = 0
-                l_1_dim = 0
-                for mul, (l, p) in self.hidden_irreps:
-                    if str(l) == "0":
-                        l_0_dim += mul
-                    elif str(l) == "1":
-                        l_1_dim += mul
+                frc_out.append(force_decoder(node_feats))
+                sts_out.append(stress_decoder(node_feats))
 
-                node_force_dir = force_decoder(node_feats)
-                node_forces = node_force_dir
-                frc_out.append(node_forces)
-                node_stress_dir = stress_decoder(node_feats) 
-                node_stresses = node_stress_dir 
-                sts_out.append(node_stresses)
-
-            node_feats_list.append(node_feats)
             outputs.append(node_energies[:,0])
             if str(self.output_irreps) == "2x0e":
                 node_logvar.append(node_energies[:,1])
@@ -301,12 +586,13 @@ class RACE(torch.nn.Module):
                 node_logvar.append(node_energies[:,1])
                 node_f_logvar.append(node_energies[:,2:])
 
-        # Sum over energy contributions
+        # Weighted sum over per-layer energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
-        node_energy = self.act_fn(node_energy)
+        node_energy = self.act_fn(node_energy) * self.layer_scales_e
 
         # Global pooling
         node_energy = torch.sum(node_energy, dim=-1) # [nbatch*num_nodes]  # total_energy
+
         graph_energy = scatter_sum(
                 src=node_energy,
                 index=data["batch"],
@@ -353,6 +639,17 @@ class RACE(torch.nn.Module):
         preds["energy_var"] = graph_energy_var
         preds["forces_var"] = node_frc_var
         preds["node_energy"] = node_energy
+        # DeNS: predict the rattling noise vector from the (conditioned)
+        # final-layer node features.
+        if self.dens:
+            if "dens_forces" in data:
+                preds["noise_pred"] = self.denoise_decoder(node_feats)
+            elif self.training:
+                # Standard training batch: tie the noise head into the loss
+                # graph with zero weight (adds exactly 0 to the energy) so
+                # its parameters also receive a gradient under DDP.
+                preds["energy"] = preds["energy"] \
+                    + 0.0 * self.denoise_decoder(node_feats).sum()
 
         forces: Optional[torch.Tensor] = None
         stress: Optional[torch.Tensor] = None
@@ -405,7 +702,7 @@ class RACE(torch.nn.Module):
         preds["displacement"] = displacement
 
         return preds
-    
+
     def set_criterion(self, criterion_tag, criterion):
         self.criterion_tag = criterion_tag
         if "direct" in self.regress_forces:

@@ -1,5 +1,5 @@
 from .base_trainer import BaseTrainer
-from .mp_trainer import MPTrainer, MPTrainer_V2
+from .mp_trainer import MPTrainer, MPTrainerPkl, MPTrainer_V2
 from .mve_trainer import MVETrainer
 from .multihead_trainer import MultiheadTrainer
 
@@ -23,6 +23,7 @@ TRAINER_REGISTRY = {
     "materials_project": MPTrainer_V2,
     "mp_v1": MPTrainer,
     "mp_v2": MPTrainer_V2,
+    "mp_pkl": MPTrainerPkl,
 }
 if GATrainer is not None:
     TRAINER_REGISTRY.update({

@@ -46,6 +46,76 @@ def reduce_loss(raw_loss: torch.Tensor, ddp: Optional[bool] = None) -> torch.Ten
     return raw_loss.mean()
 
 
+class _TagAwareElementwiseLoss(torch.nn.Module):
+    """Tag-aware wrapper around an elementwise loss, matching HuberLoss's
+    interface: energies are normalized per atom when num_atoms is given
+    (a per-graph atom-count vector); forces/stress are compared as-is.
+    """
+
+    def __init__(self, loss_fn: Callable, reduction: str = "mean"):
+        super().__init__()
+        self.loss_fn = loss_fn
+        self.reduction = reduction
+
+    def forward(
+        self, pred, target, tag, num_atoms=None, ddp: Optional[bool] = None
+    ) -> torch.Tensor:
+        if tag == "energy" and num_atoms is not None:
+            pred = pred / num_atoms
+            target = target / num_atoms
+        raw = self.loss_fn(pred, target, reduction="none")
+        if ddp:
+            return reduce_loss(raw, ddp)
+        if self.reduction == "sum":
+            return raw.sum()
+        return raw.mean()
+
+
+class L1Loss(_TagAwareElementwiseLoss):
+    def __init__(self, reduction: str = "mean"):
+        super().__init__(torch.nn.functional.l1_loss, reduction)
+
+
+class MSELoss(_TagAwareElementwiseLoss):
+    def __init__(self, reduction: str = "mean"):
+        super().__init__(torch.nn.functional.mse_loss, reduction)
+
+
+# Per-target Huber deltas.
+#
+# One shared delta cannot suit all three targets: they live on different
+# scales (energy ~1e-2 eV/atom, forces ~1e-1 eV/A, stress ~1e-2 eV/A^3), and
+# delta is an absolute-error threshold. Set it far above a target's typical
+# error and that whole term stays in the quadratic branch, so the Huber
+# degenerates to plain MSE and its outlier robustness never engages; set it
+# far below and the term is effectively L1. A single value therefore cannot
+# put more than one target in the intended regime.
+#
+# Falls back to the shared `huber_delta`, so configs that do not set the
+# per-target keys behave exactly as before.
+HUBER_DELTA_KEYS = {
+    'energy_loss': 'huber_delta_energy',
+    'force_loss': 'huber_delta_force',
+    'stress_loss': 'huber_delta_stress',
+}
+
+
+def resolve_huber_delta(
+    loss_config: Dict[str, Any], loss_key: str, default: float = 0.01
+) -> float:
+    """Huber delta for one target.
+
+    Precedence: `huber_delta_<target>` -> shared `huber_delta` -> `default`.
+    The default also guards the case where neither key is present, which
+    previously passed delta=None straight into torch's huber_loss.
+    """
+    specific = HUBER_DELTA_KEYS.get(loss_key)
+    if specific is not None and loss_config.get(specific) is not None:
+        return loss_config[specific]
+    shared = loss_config.get('huber_delta')
+    return default if shared is None else shared
+
+
 class HuberLoss(torch.nn.Module):
     def __init__(self, huber_delta=0.01) -> None:
         super().__init__()

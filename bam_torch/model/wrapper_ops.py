@@ -23,7 +23,8 @@ try:
     import cuequivariance as cue
     import cuequivariance_torch as cuet
 
-    CUET_AVAILABLE = True
+    # cuet constructors require CUDA even when the package imports on CPU.
+    CUET_AVAILABLE = torch.cuda.is_available()
 except (ImportError, ModuleNotFoundError):
     CUET_AVAILABLE = False
 
@@ -31,7 +32,7 @@ try:
     import openequivariance as oeq
 
     OEQ_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
+except (ImportError, ModuleNotFoundError, AssertionError):
     OEQ_AVAILABLE = False
 
 
