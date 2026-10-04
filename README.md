@@ -130,7 +130,7 @@ if __name__ == '__main__':
 ## Running Examples
 
 This branch provides the RACE+DeNS experiment in
-[`examples/mp-train-willow-260729-v2-260928/`](examples/mp-train-willow-260729-v2-260928/README.md).
+[`examples/mp-train-bam-mp-dens/`](examples/mp-train-bam-mp-dens/README.md).
 Its README covers dataset preparation, fresh single-GPU and distributed
 training, and checkpoint resume. The legacy `example-*` folders are not
 included in this branch.
@@ -166,7 +166,7 @@ bam-torch/
 │   ├── training/        # Training loop, loss computation, and optimization routines
 │   └── utils/           # Common utility functions and helper tools
 ├── examples/
-│   └── mp-train-willow-260729-v2-260928/ # RACE+DeNS experiment
+│   └── mp-train-bam-mp-dens/ # RACE+DeNS experiment
 ├── README.md            # Project documentation
 ├── install_deps.py      # Dependency installation script
 ├── pyproject.toml       # Build configuration
