@@ -166,7 +166,6 @@ bam-torch/
 │   ├── training/        # Training loop, loss computation, and optimization routines
 │   └── utils/           # Common utility functions and helper tools
 ├── examples/
-│   ├── dataset/            # Shared example datasets
 │   └── mp-train-willow-260729-v2-260928/ # RACE+DeNS experiment
 ├── README.md            # Project documentation
 ├── install_deps.py      # Dependency installation script
