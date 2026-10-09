@@ -2,7 +2,9 @@
 
 import ast
 import gc
+import inspect
 import os
+import re
 from contextlib import nullcontext
 
 import numpy as np
@@ -13,6 +15,7 @@ from ase.io import read
 from matscipy.neighbours import neighbour_list
 from torch_geometric.data import Data
 
+from bam_torch.model.wrapper_ops import OEQ_AVAILABLE
 from bam_torch.training.base_trainer import BaseTrainer
 from bam_torch.training.loss import (
     HuberLoss,
@@ -184,6 +187,41 @@ class DensTrainer(BaseTrainer):
         return bool(dens_config.get('enabled', False)
                     if isinstance(dens_config, dict) else dens_config)
 
+    def set_model(self):
+        """BaseTrainer model plus a truthful equivariant-backend report.
+
+        `oeq_config: true` asks for OpenEquivariance, `false`/absent for e3nn.
+        The backend is read from the built model, not from config keys. If
+        OpenEquivariance was requested but is not in the model, the printed
+        `equiv. lib.` line says what is used and why.
+        """
+        start = len(self.msg)
+        model = super().set_model()
+        if not self.json_data.get('oeq_config'):
+            return model
+        modules = {type(m).__module__.split('.')[0] for m in model.modules()}
+        if 'openequivariance' in modules:
+            return model
+        actual = 'CuEquivariance' if 'cuequivariance_torch' in modules else 'e3nn'
+        if not OEQ_AVAILABLE:
+            reason = 'OpenEquivariance requested but not installed'
+        elif actual == 'CuEquivariance':
+            reason = 'OpenEquivariance ignored: CuEquivariance takes precedence'
+        elif ('interaction_block' in inspect.signature(type(model)).parameters
+              and self.json_data.get('interaction_block', 'slow') != 'fast'):
+            reason = 'OpenEquivariance ignored: needs interaction_block fast'
+        else:
+            reason = 'OpenEquivariance ignored: not used by this model'
+        added, n = re.subn(
+            r'(equiv\. lib\.:\n\033\[33m) -- [^\n]*?(\033\[0m)',
+            lambda m: f'{m.group(1)} -- {actual} ({reason}){m.group(2)}',
+            self.msg[start:], count=1,
+        )
+        if n == 0:  # BaseTrainer wording changed: never lose the notice
+            added += (f'\nequiv. lib. (DeNS):\n\033[33m -- {actual} ({reason})'
+                      '\033[0m\n')
+        self.msg = self.msg[:start] + added
+        return model
 
     def configure_dataloader(self):
         if 'enr_avg_per_element' not in self.json_data:
