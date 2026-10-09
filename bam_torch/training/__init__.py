@@ -1,5 +1,6 @@
 from .base_trainer import BaseTrainer
-from .mp_trainer import MPTrainer, MPTrainerPkl, MPTrainer_V2
+from .dens_trainer import DensTrainer
+from .mp_trainer import MPTrainerPkl, MPTrainer_V2
 from .mve_trainer import MVETrainer
 from .multihead_trainer import MultiheadTrainer
 
@@ -21,7 +22,8 @@ TRAINER_REGISTRY = {
     "multi_head": MultiheadTrainer,
     "mp": MPTrainer_V2,
     "materials_project": MPTrainer_V2,
-    "mp_v1": MPTrainer,
+    "dens": DensTrainer,
+    "mp_v1": DensTrainer,
     "mp_v2": MPTrainer_V2,
     "mp_pkl": MPTrainerPkl,
 }
