@@ -10,7 +10,10 @@ separately.
 The branch starts from BAM-torch commit
 `c8b563b6cea1c67e08820c29459b934763148642`, the baseline of the experimental
 working tree. Required model, extxyz training, and batching changes are included
-alongside DeNS. The newer upstream `main` was not substituted for this baseline.
+alongside DeNS. The experiment itself was run on that baseline; this branch has
+since been merged with upstream `main`, and the legacy `example-*` folders are
+kept. Note that the default `RACE` model now includes the species embedding and
+per-layer scales, so checkpoints trained on earlier `main` revisions do not load.
 
 - `input.json`: original experiment settings, with checkpoint restart enabled.
 - `input.fresh.json`: the same settings with `NN.restart` disabled.
