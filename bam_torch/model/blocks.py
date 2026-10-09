@@ -187,14 +187,14 @@ class InteractionBlock(torch.nn.Module):
                 'nonscalar_range': (ns_start, ns_end) if ns_start is not None else None,
                 'ns_count': ns_count,
             }
-        
+
         self._setup()
 
     @abstractmethod
     def _setup(self) -> None:
         raise NotImplementedError
-    
-    
+
+
     @abstractmethod
     def forward(
         self,
@@ -246,7 +246,7 @@ class InteractionBlock(torch.nn.Module):
             rms_inv = torch.rsqrt((centered ** 2).mean(dim=-1, keepdim=True) + eps)
             out[:, start:end] = centered * rms_inv
 
-        return out 
+        return out
 
 nonlinearities = {1: torch.nn.functional.silu, -1: torch.tanh}
 
@@ -316,7 +316,7 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         sender = edge_index[0]
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
@@ -331,13 +331,13 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
         )  # [n_nodes, irreps]
         message = self.linear(message) / self.avg_num_neighbors
         message = message + sc
-        
+
         return self.reshape(message), None  # [n_nodes, irreps]
 
 
 
 @compile_mode("script")
-class ConcatenateRaceInteractionBlock(InteractionBlock): 
+class ConcatenateRaceInteractionBlock(InteractionBlock):
     """
     RACE's default (slow) interaction block
     """
@@ -375,7 +375,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
             self.edge_attrs_irreps,
             self.irreps_mid
         )
-        self.irreps_out = (self.irreps_mid 
+        self.irreps_out = (self.irreps_mid
                            + self.target_irreps).sort().irreps.simplify()
         # Convolution weights
         input_dim = self.edge_feats_irreps.num_irreps
@@ -398,7 +398,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         )
         concatenated_irreps = self.concatenate_irreps_tensor.get_concatenated_irreps()
         self.tensor_regroup_by_irreps = TensorRegroupByIrreps(concatenated_irreps)
-        
+
     def forward(
         self,
         node_attrs: torch.Tensor,
@@ -411,7 +411,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         """
         node_attrs: to_one_hot(species)
         node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors) 
+        edge_attrs: spherical harmonics(vectors)
                     == spherical harmonics(Rab)
         edge_feats: radial_embedding(lengths)
         edge_index: torch.Tensor([senders, receivers])
@@ -450,7 +450,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
 
 
 @compile_mode("script")
-class RaceInteractionBlock(InteractionBlock): 
+class RaceInteractionBlock(InteractionBlock):
     """
     RACE's improved interaction block
     """
@@ -525,7 +525,7 @@ class RaceInteractionBlock(InteractionBlock):
         """
         node_attrs: to_one_hot(species)
         node_feats: node_embedding(node_attrs)
-        edge_attrs: spherical harmonics(vectors) 
+        edge_attrs: spherical harmonics(vectors)
                     == spherical harmonics(Rab)
         edge_feats: radial_embedding(lengths)
         edge_index: torch.Tensor([senders, receivers])
@@ -602,7 +602,7 @@ class EquivariantProductBasisBlock(torch.nn.Module):
         sc: Optional[torch.Tensor],
         node_attrs: torch.Tensor,
     ) -> torch.Tensor:
-        
+
         node_feats = self.symmetric_contractions(node_feats, node_attrs)
         if self.use_sc and sc is not None:
             return self.linear(node_feats) + sc
@@ -637,19 +637,19 @@ class RaceEquivariantBlock(torch.nn.Module):
             shared_weights=True,
             cueq_config=cueq_config,
         )
-        
+
     def forward(
         self,
         x_node_feats: torch.Tensor,
         node_feats: torch.Tensor,
         sc: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        
+
         node_feats = self.conv_tp(x_node_feats, node_feats, None)
         if self.use_sc and sc is not None:
             node_feats = self.linear(node_feats) + sc
             return node_feats
-        
+
         node_feats = self.linear(node_feats)
         return node_feats
 

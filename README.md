@@ -3,7 +3,8 @@
 [![Python](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5.1-red)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Paper](https://img.shields.io/badge/Paper-arXiv-green)](https://arxiv.org/abs/2510.03046)
+[![Paper](https://img.shields.io/badge/Paper-npj%20Comput%20Mater-green)](https://doi.org/10.1038/s41524-026-02258-9)
+[![DOI](https://img.shields.io/badge/DOI-10.1038%2Fs41524--026--02258--9-blue)](https://doi.org/10.1038/s41524-026-02258-9)
 
 ## Overview
 
@@ -32,7 +33,7 @@ BAM (Bayesian Atoms Modeling) is an implementation of **Bayesian E(3) Equivarian
 
 ### Prerequisites
 
-- Python 3.11
+- Python 3.11+
 - CUDA 12.4+ (for GPU support)
 - PyTorch 2.5.1+
 
@@ -129,11 +130,34 @@ if __name__ == '__main__':
 
 ## Running Examples
 
-This branch provides the RACE+DeNS experiment in
-[`examples/bam-mp-dens/`](examples/bam-mp-dens/README.md).
-Its README covers dataset preparation, fresh single-GPU and distributed
-training, and checkpoint resume. The legacy `example-*` folders are not
-included in this branch.
+There are examples in `examples/example-*/`
+
+### Single-GPU Training
+Run on a single node without using a job scheduler, by setting the environment variable:
+```bash
+$ CUDA_VISIBLE_DEVICES=0 python main.py
+```
+
+Alternatively, set `"gpu-parallel": false` in `input.json`:
+```bash
+$ python main.py
+```
+
+### Multi-GPU Training (DistributedDataParallel)
+Run on a single node with multiple GPUs by setting the environment variables:
+```bash
+$ CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py
+```
+
+Alternatively, set `"gpu-parallel": true` in `input.json`:
+```bash
+$ python main.py
+```
+This automatically detects all available GPUs and utilizes them for distributed computation.
+
+For an example of using multiple nodes and multiple GPUs with the SLURM scheduler, please refer to `examples/example-3BPA_300K-multiGPU/`
+
+The RACE+DeNS experiment is in [`examples/bam-mp-dens/`](examples/bam-mp-dens/README.md); its README covers dataset preparation, fresh single-GPU and distributed training, and checkpoint resume.
 
 ### Evaluation
 ```python
@@ -164,9 +188,11 @@ bam-torch/
 │   ├── predicting/      # Inference and prediction pipelines (Model evaluation)
 │   ├── tase/            # ASE interface for ML potentials
 │   ├── training/        # Training loop, loss computation, and optimization routines
-│   └── utils/           # Common utility functions and helper tools
+│   |── utils/           # Common utility functions and helper tools
+|   └── economics/       # The implementation is based on the catalyst sustainability workflow from the accompanying SCC manuscript.
 ├── examples/
-│   └── bam-mp-dens/ # RACE+DeNS experiment
+│   ├── example-3BPA_300K/    # QM9 benchmark example
+│   └── bam-mp-dens/          # RACE+DeNS experiment
 ├── README.md            # Project documentation
 ├── install_deps.py      # Dependency installation script
 ├── pyproject.toml       # Build configuration
@@ -335,13 +361,17 @@ at startup. Note that backend selection follows `cueq → oeq → e3nn`, so set
 If you use BAM in your research, please cite our paper:
 
 ```bibtex
-@article{bam2025,
-  title={Bayesian E(3)-Equivariant Interatomic Potential with Iterative Restratification of Many-body Message Passing},
-  author={Soohaeng Yoo Willow, Tae Hyeon Park, Gi Beom Sim, Sung Wook Moon, Seung Kyu Min, D. ChangMo Yang, Hyun Woo Kim, Juho Lee, Chang Woo Myung},
-  journal={arXiv:2510.03046},
-  year={2025}
+@article{willow2026bam,
+  title   = {Bayesian equivariant interatomic potential with iterative restratification of many-body message passing},
+  author  = {Willow, Soohaeng Yoo and Park, Tae Hyeon and Sim, Gi Beom and Moon, Sung Wook and Min, Seung Kyu and Seo, Sangjae and Kim, Jaewook and Yang, D. ChangMo and Kim, Hyun Woo and Lee, Juho and Myung, Chang Woo},
+  journal = {npj Computational Materials},
+  year    = {2026},
+  doi     = {10.1038/s41524-026-02258-9},
+  url     = {https://doi.org/10.1038/s41524-026-02258-9}
 }
 ```
+
+> The preprint version is available at [arXiv:2510.03046](https://arxiv.org/abs/2510.03046).
 
 ## License
 
@@ -351,4 +381,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Built upon [e3nn](https://github.com/e3nn/e3nn) for E(3) equivariant operations
 - Main Development Group at [SKKU](https://www.myung.skku.edu/)
-

@@ -10,7 +10,7 @@ from bam_torch.utils.utils import get_graphset_to_predict
 
 
 class RACECalculator(Calculator, MultiheadEvaluator):
-    implemented_properties = ['energy', 'forces', 'stress']
+    implemented_properties = ['energy', 'forces', 'stress', 'free_energy']
 
     def __init__(
         self, 
@@ -90,9 +90,13 @@ class RACECalculator(Calculator, MultiheadEvaluator):
             e_corr = self.e_corr
         energy = preds["energy"] + node_enr_avg + e_corr
 
-        self.results['energy'] = float(energy)
+        self.results['energy'] = float(energy.detach())
         self.results['forces'] = np.array(preds['forces'].detach().cpu())
         self.results['stress'] = np.array(preds['stress'][0].detach().cpu())
+        # ASE optimizers / phonopy may request the force-consistent (free)
+        # energy; BAM has no entropic or electronic-temperature term, so the
+        # free energy is identical to the potential energy.
+        self.results['free_energy'] = self.results['energy']
 
     def configure_device(self, device=None):
         if device is None and self.json_data is not None:

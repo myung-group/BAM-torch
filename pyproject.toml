@@ -9,9 +9,9 @@ description = "uncertainty-aware atomistic simulations at scale"
 authors = [
     {name = "Myung Group", email = "myung.group@gmail.com"}
 ]
-license = {text = "LGPL-3.0"}
+license = {text = "MIT"}
 classifiers = [
-    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -25,7 +25,7 @@ dependencies = [
     "ase",
     "matscipy",
     "torch>=2.5.1",
-    "e3nn",
+    "e3nn>=0.5.6",
     "pytorch_warmup",
     "torch_geometric",
     "torch-ema"
@@ -43,6 +43,7 @@ cueq = ["cuequivariance-torch", "cuequivariance", "cuequivariance-ops-torch-cu12
 oeq = ["openequivariance"]
 laplace = ["laplace-torch", "torchmetrics", "curvlinops-for-pytorch==2.0.1"]
 group_averaging = ["mendeleev", "pandas", "torch_scatter", "torch_cluster"]
+economics = ["pandas", "scikit-learn", "openpyxl"]
 
 [project.urls]
 Homepage = "https://github.com/myung-group/BAM-torch"

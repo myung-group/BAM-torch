@@ -94,9 +94,57 @@ class MultiheadEvaluator(Evaluator):
             regress_forces = "false"
         
         mlp_irreps = o3.Irreps(f"{features_dim}x0e")
-        
+
+        # The checkpoint's interaction block must be reproduced here: "slow" and
+        # "fast" build different tensor-product paths, so rebuilding a "fast"
+        # checkpoint with the default "slow" leaves most weights unloaded (and
+        # trips a shape mismatch when EMA weights are applied).
+        interaction_block = model_config.get(
+            'interaction_block', self.json_data.get('interaction_block', 'slow')
+        )
+
+        # Mirror the trainer's backend selection (cueq -> oeq -> e3nn) so
+        # inference can use the same accelerated kernels training used. Only
+        # the "fast" block has the weighted tensor-product paths these
+        # backends need; "slow" always runs on e3nn.
+        from bam_torch.model.wrapper_ops import (
+            CuEquivarianceConfig,
+            OEQConfig,
+            CUET_AVAILABLE,
+            OEQ_AVAILABLE,
+        )
+
+        # The caller's config wins when it names a backend, so a run can turn
+        # acceleration off (or on) without rewriting the checkpoint; otherwise
+        # fall back to what the checkpoint recorded at training time.
+        if 'cueq_config' in self.json_data:
+            cueq_request = self.json_data.get('cueq_config')
+        else:
+            cueq_request = model_config.get('cueq_config')
+        if 'oeq_config' in self.json_data:
+            oeq_request = self.json_data.get('oeq_config')
+        else:
+            oeq_request = model_config.get('oeq_config')
+        cueq_config = None
+        oeq_config = None
+        if interaction_block == 'fast':
+            if cueq_request and CUET_AVAILABLE:
+                cueq_config = CuEquivarianceConfig(
+                    enabled=True,
+                    layout="ir_mul",
+                    group="O3_e3nn",
+                    optimize_all=True,
+                )
+                print("  - Equivariant backend: CuEquivariance")
+            elif oeq_request and OEQ_AVAILABLE:
+                oeq_config = OEQConfig(enabled=True, optimize_all=True)
+                if model_config.get('oeq_conv_fusion', False):
+                    oeq_config.conv_fusion = "atomic"
+                print("  - Equivariant backend: OpenEquivariance")
+
         # Create RACEUnified model
         model = RACEUnified(
+            interaction_block=interaction_block,
             cutoff=cutoff,
             avg_num_neighbors=avg_num_neighbors,
             num_species=num_species,
@@ -112,17 +160,28 @@ class MultiheadEvaluator(Evaluator):
             regress_forces=regress_forces,
             compute_stress=True,
             heads=heads,
-            cueq_config=None,
+            cueq_config=cueq_config,
+            oeq_config=oeq_config,
         )
         
-        # Load weights
+        # Load weights: raw `params` provide buffers + structure; the EMA weights
+        # (deployment weights) are applied on top when present. EMA may be stored
+        # either as a ready `ema_params` state_dict or as torch_ema `ema_state`.
+        model.load_state_dict(ckpt['params'], strict=False)
+        ema_state = ckpt.get('ema_state')
         if 'ema_params' in ckpt:
-            state_dict = ckpt['ema_params']
+            model.load_state_dict(ckpt['ema_params'], strict=False)
             print("  - Using EMA parameters for evaluation (recommended for inference)")
+        elif ema_state is not None and ema_state.get('shadow_params'):
+            from torch_ema import ExponentialMovingAverage
+            ema = ExponentialMovingAverage(
+                model.parameters(), decay=ema_state.get('decay', 0.999)
+            )
+            ema.load_state_dict(ema_state)
+            ema.copy_to(model.parameters())
+            print("  - Using EMA parameters (from ema_state) for evaluation")
         else:
-            state_dict = ckpt['params']
             print("  - Using regular parameters (EMA not available in checkpoint)")
-        model.load_state_dict(state_dict, strict=False)
         model = model.to(self.device)
         model.eval()
         

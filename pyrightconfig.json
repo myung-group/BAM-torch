@@ -1,0 +1,15 @@
+{
+  "include": ["bam_torch"],
+  "reportPrivateImportUsage": "none",
+  "reportCallIssue": "none",
+  "reportArgumentType": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportOperatorIssue": "none",
+  "reportInvalidTypeForm": "none",
+  "reportMissingImports": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "error",
+  "reportPossiblyUnboundVariable": "error",
+  "reportUnusedExpression": "warning"
+}

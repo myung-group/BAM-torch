@@ -117,7 +117,6 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
 
         if regress_forces or regress_forces == 'direct':
             frc = atoms.get_forces()
-            volume = atoms.get_volume()
             stress = np.zeros(6)
         else:
             frc = np.zeros((len(atoms), 3))
@@ -127,8 +126,11 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             cell = np.diag([30., 30., 30.])
             atoms.set_cell(cell)
         
-        if 'stress' in atoms._calc.results.keys():
+        calculator = atoms.calc
+        has_stress = calculator is not None and 'stress' in calculator.results
+        if has_stress:
             stress = atoms.get_stress()
+            volume = atoms.get_volume()
         else:
             stress = np.zeros(6)
             volume = np.zeros(1)
@@ -166,6 +168,7 @@ def get_graphset(data, cutoff, uniq_element, enr_avg_per_element,
             cell=torch.tensor(np.array(cell), dtype=torch.float32).view(1, 3, 3),
             edge_index=torch.tensor(np.array([iatoms, jatoms]), dtype=torch.long),  # senders, recerivers
             stress=torch.tensor(stress, dtype=torch.float32),
+            stress_valid=torch.tensor([has_stress], dtype=torch.bool),
             volume=torch.tensor([volume] if np.isscalar(volume) else volume, dtype=torch.float32)
         )                          
         graph_list.append(graph)
@@ -249,16 +252,9 @@ def get_dataloader(fname, ntrain, nvalid,
     
     loaders = []
     for dataset in [train_data, valid_data]:
-        graphset = get_graphset(dataset, cutoff, uniq_element, 
+        graphset = get_graphset(dataset, cutoff, uniq_element,
                                 enr_avg_per_element, enr_var,
                                 regress_forces, max_neigh)
-        pad_nodes_to = 0 # nbatch * max_nodes 
-        pad_edges_to = 0 # nbatch * max_edges
-        for graph in graphset:
-            pad_nodes_to = max(graph.num_nodes, pad_nodes_to)
-            pad_edges_to = max(graph.num_edges, pad_edges_to)
-        graphset = get_graphset_with_pad(deepcopy(graphset), pad_nodes_to, pad_edges_to)
-        #padded_graphset = graphset
         data_sampler = None
         if world_size > 1:
             data_sampler = DistributedSampler(

@@ -1,0 +1,81 @@
+{
+    "_comment": "Edit the paths below to point at your own data/teacher checkpoint.",
+
+    "device": "gpu",
+    "model": "race",
+    "gpu-parallel": false,
+    "trainer": "distill",
+
+    "fname_traj": "/path/to/data/splits/train.traj",
+    "ntrain": "/path/to/data/splits/train.traj",
+    "nvalid": "/path/to/data/splits/valid.traj",
+
+    "element": "auto",
+    "cutoff": 6.0,
+    "avg_num_neighbors": 60,
+    "num_species": 89,
+    "hidden_channels": "64x0e+64x1o",
+    "features_dim": 32,
+    "num_radial_basis": 8,
+    "nlayers": 2,
+    "max_ell": 1,
+    "output_channels": "1x0e",
+    "active_fn": "identity",
+    "regress_forces": true,
+    "cueq_config": false,
+    "nbatch": 8,
+    "pbc": true,
+
+    "NN": {
+        "data_seed": 1300,
+        "init_seed": 1301,
+        "learning_rate": 0.005,
+        "weight_decay": 0,
+        "nepoch": 200,
+        "nsave": 1,
+        "ema": true,
+        "ema_decay": 0.999,
+        "restart": false,
+        "fname_pkl": "student_runtime.pkl",
+
+        "loss_config": {
+            "energy_loss": "huber",
+            "force_loss": "huber",
+            "huber_delta": 0.1
+        },
+        "enr_lambda": 1,
+        "frc_lambda": 10,
+        "l2_lambda": 0.0,
+
+        "distill": {
+            "teacher_ckpt": "/path/to/checkpoints/teacher.pkl",
+            "teacher_pt_train": "/path/to/data/splits/teacher_train.pt",
+            "teacher_pt_valid": "/path/to/data/splits/teacher_valid.pt",
+            "lambda_dft": 0.5
+        }
+    },
+
+    "scheduler": {
+        "scheduler": "ReduceLROnPlateau",
+        "lr_gamma": 0.1,
+        "decay_factor": 0.9,
+        "max_steps": 30,
+        "warmup_steps": 5,
+        "warmup_factor": 0.2,
+        "patience": 15,
+        "threshold": 1e-6,
+        "lr_init": 0.005
+    },
+
+    "log_length": "simple",
+    "log_interval": 1,
+    "log_config": {
+        "step": ["date", "epoch"],
+        "train": ["loss", "loss_e", "loss_f", "loss_e_t", "loss_f_t"],
+        "valid": ["loss", "loss_e", "loss_f", "loss_e_t", "loss_f_t"],
+        "lr": ["lr"]
+    },
+
+    "train": {"fname_log": "loss_train.out"},
+    "predict": {"evaluate_tag": false}
+}

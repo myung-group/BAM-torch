@@ -1192,6 +1192,7 @@ class MPTrainerPkl(BaseTrainer):
                     k: [] for k in self.enr_avg_per_element.keys()
                 }
             self.ckpt['valid_scale_shift_origin'] = []
+            data_files = valid_files
 
         epoch_loss_dict = {key: [] for key in loss_log_config}
         for filename in data_files:
@@ -1396,18 +1397,10 @@ class MPTrainerPkl(BaseTrainer):
 
     def compute_loss(self, preds, data):
         lambda_config = self.json_data["NN"]
-        e_lambda = lambda_config.get('enr_lambda')
-        f_lambda = lambda_config.get('frc_lambda')
-        s_lambda = lambda_config.get('str_lambda')
-        lambd = lambda_config.get('l2_lambda')
-        if e_lambda == None:
-            e_lambda = 1
-        if f_lambda == None:
-            f_lambda = 1
-        if s_lambda == None:
-            s_lambda = 1
-        if lambd == None:
-            lambd == 0
+        e_lambda = lambda_config.get('enr_lambda', 1)
+        f_lambda = lambda_config.get('frc_lambda', 1)
+        s_lambda = lambda_config.get('str_lambda', 1)
+        lambd = lambda_config.get('l2_lambda', 0)
 
         loss = {"loss": []}
         energy_target = data["energy"].flatten()
@@ -1424,10 +1417,31 @@ class MPTrainerPkl(BaseTrainer):
                                                         tag="forces")
             loss["loss"].append(f_lambda * loss["loss_f"])
         if "stress" in preds:
-            stress_target = data["stress"].flatten()
-            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(),
-                                                         stress_target,
-                                                         tag="stress")
+            stress_pred = preds["stress"].reshape(-1, 6)
+            stress_target = data["stress"].reshape(-1, 6)
+            stress_valid = data.get("stress_valid")
+            if stress_valid is None:
+                raise KeyError("stress_valid is required for stress loss")
+            if not isinstance(stress_valid, torch.Tensor) or stress_valid.dtype != torch.bool:
+                raise TypeError("stress_valid must be a torch.bool tensor")
+            if stress_valid.ndim != 1 or stress_valid.numel() != stress_pred.shape[0]:
+                raise ValueError(
+                    "stress_valid must have one bool value per stress configuration"
+                )
+            if stress_pred.shape != stress_target.shape:
+                raise ValueError(
+                    "stress and stress target must have matching [-1, 6] shapes"
+                )
+            if stress_valid.any():
+                valid_stress_pred = stress_pred[stress_valid].reshape(-1)
+                valid_stress_target = stress_target[stress_valid].reshape(-1)
+                loss["loss_s"] = self.loss_fn["stress_loss"](
+                    valid_stress_pred,
+                    valid_stress_target,
+                    tag="stress"
+                )
+            else:
+                loss["loss_s"] = stress_pred[stress_valid].sum()
             loss["loss"].append(s_lambda * loss["loss_s"])
 
         if lambd != 0:
@@ -1775,10 +1789,31 @@ class MPTrainer_V2(BaseTrainer):
                                                         tag="forces")
             loss["loss"].append(f_lambda * loss["loss_f"])
         if "stress" in preds:
-            stress_target = data["stress"].flatten()
-            loss["loss_s"] = self.loss_fn["stress_loss"](preds["stress"].flatten(),
-                                                         stress_target,
-                                                         tag="stress")
+            stress_pred = preds["stress"].reshape(-1, 6)
+            stress_target = data["stress"].reshape(-1, 6)
+            stress_valid = data.get("stress_valid")
+            if stress_valid is None:
+                raise KeyError("stress_valid is required for stress loss")
+            if not isinstance(stress_valid, torch.Tensor) or stress_valid.dtype != torch.bool:
+                raise TypeError("stress_valid must be a torch.bool tensor")
+            if stress_valid.ndim != 1 or stress_valid.numel() != stress_pred.shape[0]:
+                raise ValueError(
+                    "stress_valid must have one bool value per stress configuration"
+                )
+            if stress_pred.shape != stress_target.shape:
+                raise ValueError(
+                    "stress and stress target must have matching [-1, 6] shapes"
+                )
+            if stress_valid.any():
+                valid_stress_pred = stress_pred[stress_valid].reshape(-1)
+                valid_stress_target = stress_target[stress_valid].reshape(-1)
+                loss["loss_s"] = self.loss_fn["stress_loss"](
+                    valid_stress_pred,
+                    valid_stress_target,
+                    tag="stress"
+                )
+            else:
+                loss["loss_s"] = stress_pred[stress_valid].sum()
             loss["loss"].append(s_lambda * loss["loss_s"])
 
         if lambd != 0:
@@ -1811,10 +1846,29 @@ class MPTrainer_V2(BaseTrainer):
             loss["loss"].append(f_lambda * loss["loss_f"])
 
         if "stress" in preds and self.loss_fn.get("stress_loss") is not None:
-            stress_target = data["stress"].flatten()
-            loss["loss_s"] = self.loss_fn["stress_loss"](
-                preds["stress"].flatten(), stress_target
-            )
+            stress_pred = preds["stress"].reshape(-1, 6)
+            stress_target = data["stress"].reshape(-1, 6)
+            stress_valid = data.get("stress_valid")
+            if stress_valid is None:
+                raise KeyError("stress_valid is required for stress loss")
+            if not isinstance(stress_valid, torch.Tensor) or stress_valid.dtype != torch.bool:
+                raise TypeError("stress_valid must be a torch.bool tensor")
+            if stress_valid.ndim != 1 or stress_valid.numel() != stress_pred.shape[0]:
+                raise ValueError(
+                    "stress_valid must have one bool value per stress configuration"
+                )
+            if stress_pred.shape != stress_target.shape:
+                raise ValueError(
+                    "stress and stress target must have matching [-1, 6] shapes"
+                )
+            if stress_valid.any():
+                valid_stress_pred = stress_pred[stress_valid].reshape(-1)
+                valid_stress_target = stress_target[stress_valid].reshape(-1)
+                loss["loss_s"] = self.loss_fn["stress_loss"](
+                    valid_stress_pred, valid_stress_target
+                )
+            else:
+                loss["loss_s"] = stress_pred[stress_valid].sum()
             loss["loss"].append(s_lambda * loss["loss_s"])
         elif (hasattr(self.model, "training_mode_for_lammps") \
                 and self.model.training_mode_for_lammps):

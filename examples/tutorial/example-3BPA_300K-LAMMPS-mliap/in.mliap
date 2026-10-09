@@ -1,0 +1,22 @@
+units metal
+newton on
+boundary p p p
+atom_style atomic
+atom_modify map yes
+
+read_data     3bpa_300K.data
+timestep 0.0005   # 0.5 fs
+
+pair_style mliap unified ./bam_mliap_oeq.pt 0
+pair_coeff * * C H N O
+
+velocity all create 300.0 12345 mom yes rot yes dist gaussian
+
+dump myDump all custom 10 dump.lammpstrj id type element x y z fx fy fz
+dump_modify myDump element C H N O
+thermo 10
+thermo_style custom step temp pe ke etotal press
+
+# NVT (Nose-Hoover), Tdamp = 0.05 ps
+fix 1 all nvt temp 300.0 300.0 0.05
+run 1000
