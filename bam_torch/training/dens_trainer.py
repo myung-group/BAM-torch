@@ -177,8 +177,13 @@ def preprocess_graph(
 
 class DensTrainer(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
+        if isinstance(json_data.get('dens'), bool):
+            json_data = dict(json_data, dens={'enabled': json_data['dens']})
         self._xyz_split_frames: dict[str, list[Atoms]] = {}
+        self._epoch = -1
         super().__init__(json_data, rank, world_size)
+        if self.log_interval is None:
+            self.log_interval = 2
 
     def _dens_enabled(self):
         """DeNS on? The force encoder / noise head only receive gradients on
@@ -280,6 +285,13 @@ class DensTrainer(BaseTrainer):
     def train(self):
         """Main training loop for BAM models.
         """
+        if 'valid_interval' not in self.json_data:
+            # BaseTrainer only resets this flag on rank 0 improvements.
+            # Keep its unguarded periodic save disabled on every other rank.
+            if self.rank != 0:
+                self.l_ckpt_saved = True
+            return super().train()
+
         #if self.model_ckpt is not None and 'loss' in self.model_ckpt:
         #    self.loss_valid_min = torch.tensor(float(self.model_ckpt['loss']['valid']))
         #else:
@@ -321,291 +333,314 @@ class DensTrainer(BaseTrainer):
             except:
                 pass
 
-            train_loss_log_config = self.log_config['train']
-            self.ckpt['train_scale_shift'] = {
-                k: [] for k in self.enr_avg_per_element.keys()
-            }
-            self.ckpt['train_scale_shift_origin'] = []
-            # {metric: [running_sum, running_count]} accumulated across all
-            # train batches in this epoch, mirroring valid_acc.
-            train_acc = {}
+            self._train_shards(epoch, train_files, valid_files)
 
-            n_xyz = len(train_files)
-            for ixyz, filename in enumerate(train_files):
-                ##################################
-                #### TRAIN
-                ##################################
-                #print ('train', ixyz, filename)
-                mode='train'
-                self.model.train()
-                # DeNS: decide per (epoch, file) whether this loader runs the
-                # denoising task. Seeded so every DDP rank draws the same
-                # flag (each rank still rattles with its own noise, which is
-                # fine — BucketedDataLoader gives each graph to one rank).
-                dens_config = self.json_data.get('dens', {})
-                dens_file = False
-                if dens_config.get('enabled', False):
-                    rng = np.random.default_rng(
-                        self.json_data['NN']['data_seed']
-                        + 100_000 * (epoch + self.start_epoch) + ixyz
-                    )
-                    dens_file = bool(
-                        rng.random() < dens_config.get('probability', 0.5)
-                    )
-                data_loader = self.configure_dataloader_from_xyz(
-                    filename, mode=mode, dens=dens_file
+    def train_one_epoch(self, mode='train', data_loader=None):
+        """Adapt shard data and DeNS losses to BaseTrainer's epoch controller."""
+        train_files, valid_files = self.get_xyz_data_path()
+        if mode == 'train':
+            self._epoch += 1
+            return self._train_shards(self._epoch, train_files, valid_files)
+        return self._validate_shards(valid_files)
+
+    def _train_shards(self, epoch, train_files, valid_files):
+        shard_mode = 'valid_interval' in self.json_data
+        train_loss_log_config = self.log_config['train']
+        self.ckpt['train_scale_shift'] = {
+            k: [] for k in self.enr_avg_per_element.keys()
+        }
+        self.ckpt['train_scale_shift_origin'] = []
+        # {metric: [running_sum, running_count]} accumulated across all
+        # train batches in this epoch, mirroring valid_acc.
+        train_acc = {}
+
+        n_xyz = len(train_files)
+        for ixyz, filename in enumerate(train_files):
+            ##################################
+            #### TRAIN
+            ##################################
+            #print ('train', ixyz, filename)
+            mode='train'
+            self.model.train()
+            # DeNS: decide per (epoch, file) whether this loader runs the
+            # denoising task. Seeded so every DDP rank draws the same
+            # flag (each rank still rattles with its own noise, which is
+            # fine — BucketedDataLoader gives each graph to one rank).
+            dens_config = self.json_data.get('dens', {})
+            dens_file = False
+            if self._dens_enabled():
+                rng = np.random.default_rng(
+                    self.json_data['NN']['data_seed']
+                    + 100_000 * (epoch + self.start_epoch) + ixyz
                 )
-                if hasattr(data_loader, 'set_epoch'):
-                    data_loader.set_epoch(epoch)
-
-                for idata, data in enumerate(data_loader):
-                    #print ('idata', idata)
-                    data.to(self.device)
-                    data = data_to_dict(data)  # This is for torch.jit compile
-
-                    # Forward + loss + backward for the current batch.
-                    self.optimizer.zero_grad()
-                    loss_dict = self._train_backward(data)
-                    torch.nn.utils.clip_grad_value_(
-                        self.model.parameters(),
-                        clip_value=1.0)
-                    self.optimizer.step()
-
-                    if self.ema is not None:
-                        self.ema.update()
-                    # done backprop
-
-                    for key, sc in loss_dict['sums'].items():
-                        if key not in train_acc:
-                            train_acc[key] = [
-                                torch.zeros((), dtype=torch.float64),
-                                torch.zeros((), dtype=torch.float64),
-                            ]
-                        train_acc[key][0] += sc['sum'].detach().to(torch.float64).cpu()
-                        train_acc[key][1] += sc['count'].detach().to(torch.float64).cpu()
-
-                    if self.ddp:
-                        torch.distributed.barrier()
-
-                    if (idata+1)%500 == 0:
-                        curr_train_loss_dict = self._reduce_train_metrics(
-                            train_acc, train_loss_log_config
-                        )
-                        if self.rank == 0:
-                            train_losses = ' '.join(f"{k}={float(v):.6f}"
-                                    for k, v in curr_train_loss_dict.items())
-                            print(f"[per-xyz] epoch={epoch+1} xyz={ixyz+1}/{n_xyz} "
-                                  f"{min(idata/len(data_loader)*100, 100.0):5.2f}% "
-                                  f"train: {train_losses}", flush=True,
-                                  file=self.logger.fout)
-                    data.clear()
-                    del data, loss_dict
-
-
-                curr_train_loss_dict = self._reduce_train_metrics(
-                    train_acc, train_loss_log_config
+                dens_file = bool(
+                    rng.random() < dens_config.get('probability', 0.5)
                 )
-                if self.rank == 0:
+            data_loader = self.configure_dataloader_from_xyz(
+                filename, mode=mode, dens=dens_file
+            )
+            if hasattr(data_loader, 'set_epoch'):
+                data_loader.set_epoch(epoch)
 
-                    self.update_check_point(
-                        epoch,
-                        curr_train_loss_dict,
-                        {'loss': self.loss_valid_min}
-                    )
-                    ckpt_to_save = dict(self.ckpt)
-                    torch.save(ckpt_to_save, 'model_train.pkl')
+            for idata, data in enumerate(data_loader):
+                #print ('idata', idata)
+                data.to(self.device)
+                data = data_to_dict(data)  # This is for torch.jit compile
 
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                    torch.cuda.empty_cache()
-                gc.collect()
-                del data_loader
+                # Forward + loss + backward for the current batch.
+                self.optimizer.zero_grad()
+                loss_dict = self._train_backward(data)
+                torch.nn.utils.clip_grad_value_(
+                    self.model.parameters(),
+                    clip_value=1.0)
+                self.optimizer.step()
 
-                # Validate (and checkpoint) every `valid_interval` train files,
-                # but always on the last file of the epoch — otherwise runs
-                # with fewer train files than the interval would never
-                # validate and never save a checkpoint.
-                valid_interval = self.json_data.get('valid_interval', 5)
-                if (ixyz+1) % valid_interval != 0 and (ixyz+1) != n_xyz:
-                    continue
+                if self.ema is not None:
+                    self.ema.update()
+                # done backprop
 
-                ##################################
-                #### VALID
-                ##################################
-                # valid
-                loss_log_config = self.log_config['valid']
-                self.ckpt['valid_scale_shift'] = {
-                    k: [] for k in self.enr_avg_per_element.keys()
-                }
-                self.ckpt['valid_scale_shift_origin'] = []
-                # Accumulate sum / count separately per metric so the final
-                # mean is Σ sums / Σ counts — invariant to batch size.
-                valid_acc = {}
-                param_context = (
-                    self.ema.average_parameters() if self.ema is not None else nullcontext()
-                )
-                self.model.eval()
-                mode='valid'
-                # No torch.no_grad(): force/stress need autograd through energy,
-                # even in eval mode for energy-conserving force fields.
-                with param_context:
-                    for valid_filename in valid_files:
+                for key, sc in loss_dict['sums'].items():
+                    if key not in train_acc:
+                        train_acc[key] = [
+                            torch.zeros((), dtype=torch.float64),
+                            torch.zeros((), dtype=torch.float64),
+                        ]
+                    train_acc[key][0] += sc['sum'].detach().to(torch.float64).cpu()
+                    train_acc[key][1] += sc['count'].detach().to(torch.float64).cpu()
 
-                        data_loader = self.configure_dataloader_from_xyz(
-                            valid_filename,
-                            mode=mode
-                        )
-                        for data in data_loader:
-                            data.to(self.device)
-                            data = data_to_dict(data)  # This is for torch.jit compile
-                            preds = self.model(data, backprop=False)
-                            #preds = self.scale_shift(preds, data, mode)
+                if self.ddp:
+                    torch.distributed.barrier()
 
-                            partial = self.compute_loss_valid(preds, data)
-                            for key, sc in partial.items():
-                                if key not in valid_acc:
-                                    valid_acc[key] = [
-                                        torch.zeros((), dtype=torch.float64),
-                                        torch.zeros((), dtype=torch.float64),
-                                    ]
-                                valid_acc[key][0] += sc['sum'].detach().to(torch.float64).cpu()
-                                valid_acc[key][1] += sc['count'].detach().to(torch.float64).cpu()
-
-                            data.clear()
-                            del data, preds, partial
-                        if torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                            torch.cuda.empty_cache()
-                        gc.collect()
-                        del data_loader
-
-                    # Reduce per-rank sums/counts so every rank divides the
-                    # same global totals. Each rank sees only its shard from
-                    # BucketedDataLoader, so without this the reported metric
-                    # is per-shard, not global.
-                    if self.ddp:
-                        for key in sorted(valid_acc.keys()):
-                            for i in range(2):
-                                t = valid_acc[key][i].to(self.device)
-                                torch.distributed.all_reduce(
-                                    t, op=torch.distributed.ReduceOp.SUM
-                                )
-                                valid_acc[key][i] = t.cpu()
-
-                    # Single division at the end gives the unbiased global metric.
-                    metrics = {
-                        key: (s / c).to(torch.float32)
-                        for key, (s, c) in valid_acc.items()
-                    }
-                    # Keep the controller metric invariant to task-weight changes.
-                    metrics['loss'] = metrics['loss_e_h']
-                    # Keep 'loss' regardless of log_config: the should_save
-                    # comparison below and update_check_point require it
-                    # (same coupling as in _reduce_train_metrics).
-                    valid_keys = list(loss_log_config)
-                    if 'loss' not in valid_keys:
-                        valid_keys.append('loss')
-                    last_valid_loss_dict = {
-                        key: metrics.get(key, torch.tensor(float('nan')))
-                        for key in valid_keys
-                    }
-
-                    if self.ddp:
-                        torch.distributed.barrier()
-
-                # last_valid_loss_dict is now identical across ranks (valid
-                # accumulators were all-reduced), so this comparison agrees
-                # everywhere. Compute + all-reduce train metrics on every rank
-                # so the value written to the checkpoint reflects the global
-                # average, then guard only the actual print/save on rank 0.
-                should_save = bool(last_valid_loss_dict['loss'] < self.loss_valid_min)
-                curr_train_loss_dict = None
-                if should_save:
+                if (idata+1)%500 == 0:
                     curr_train_loss_dict = self._reduce_train_metrics(
                         train_acc, train_loss_log_config
                     )
-                    self.loss_valid_min = last_valid_loss_dict['loss']
+                    if self.rank == 0:
+                        train_losses = ' '.join(f"{k}={float(v):.6f}"
+                                for k, v in curr_train_loss_dict.items())
+                        print(f"[per-xyz] epoch={epoch+1} xyz={ixyz+1}/{n_xyz} "
+                              f"{min(idata/len(data_loader)*100, 100.0):5.2f}% "
+                              f"train: {train_losses}", flush=True,
+                              file=self.logger.fout)
+                data.clear()
+                del data, loss_dict
 
-                if self.rank == 0:
-                    valid_losses = ' '.join(f"{k}={float(v):.6f}"
-                        for k, v in last_valid_loss_dict.items())
-                    print(f"[per-xyz] epoch={epoch+1} xyz={ixyz+1}/{n_xyz} "
-                          f"valid: {valid_losses}",
-                          flush=True,
-                          file=self.logger.fout)
 
-                    if should_save:
-                        self.update_check_point(
-                            epoch,
-                            curr_train_loss_dict,
-                            last_valid_loss_dict
-                        )
-                        # Build a save-only copy so the per-epoch list buffers
-                        # in self.ckpt stay appendable for subsequent xyz files.
-                        ckpt_to_save = dict(self.ckpt)
-                        ckpt_to_save['train_scale_shift'] = {
-                            k: (
-                                torch.stack(v).mean()
-                                if len(v) > 0
-                                else torch.tensor(0.0, device=self.device)
-                            )
-                            for k, v in self.ckpt['train_scale_shift'].items()
-                        }
-                        ckpt_to_save['valid_scale_shift'] = {
-                            k: (
-                                torch.stack(v).mean()
-                                if len(v) > 0
-                                else torch.tensor(0.0, device=self.device)
-                            )
-                            for k, v in self.ckpt['valid_scale_shift'].items()
-                        }
-                        ckpt_to_save['valid_scale_shift_origin'] = torch.tensor(
-                            self.ckpt['valid_scale_shift_origin']
-                        ).mean()
-                        torch.save(ckpt_to_save, self.json_data['NN']['fname_pkl'])
+            curr_train_loss_dict = self._reduce_train_metrics(
+                train_acc, train_loss_log_config
+            )
+            if self.rank == 0 and shard_mode:
 
-                        # All-time best, kept outside the chain's promotion
-                        # path. Written to a temp file and atomically renamed:
-                        # the 12h wall clock SIGKILLs this process, and a torn
-                        # 156MB pickle would be unrecoverable.
-                        if last_valid_loss_dict['loss'] < self.global_best:
-                            self.global_best = last_valid_loss_dict['loss']
-                            torch.save(ckpt_to_save, 'model_best.pkl.tmp')
-                            os.replace('model_best.pkl.tmp', 'model_best.pkl')
-                            print(f"[best] model_best.pkl updated: "
-                                  f"valid={float(self.global_best):.6f} "
-                                  f"epoch={epoch+1} xyz={ixyz+1}/{n_xyz}",
-                                  flush=True, file=self.logger.fout)
-
-                torch.cuda.empty_cache()
-                gc.collect()
-
-                # Update scheduler (learning rate)
-                scheduler_cfg = self.json_data.get("scheduler", {})
-                is_plateau = (
-                    isinstance(scheduler_cfg, dict)
-                    and scheduler_cfg.get("scheduler") == "ReduceLROnPlateau"
+                self.update_check_point(
+                    epoch,
+                    curr_train_loss_dict,
+                    {'loss': self.loss_valid_min}
                 )
-                if is_plateau:
-                    self.scheduler.step(last_valid_loss_dict['loss'])
-                else:
-                    self.scheduler.step()
+                ckpt_to_save = dict(self.ckpt)
+                torch.save(ckpt_to_save, 'model_train.pkl')
 
-                # log_config declares an "lr" entry but nothing ever emitted
-                # it, so reading the schedule meant opening a 156MB
-                # checkpoint. Log it right after the step, next to the metric
-                # that drives it, so a decay and the patience counter filling
-                # up are both visible as they happen.
-                if self.rank == 0:
-                    _inner = getattr(self.scheduler, 'scheduler', None)
-                    _best = getattr(_inner, 'best', float('nan'))
-                    print(f"[lr] epoch={epoch+1} xyz={ixyz+1}/{n_xyz} "
-                          f"lr={self.scheduler.get_lr():.4e} "
-                          f"bad={getattr(_inner, 'num_bad_epochs', '?')}/"
-                          f"{getattr(_inner, 'patience', '?')} "
-                          f"cooldown={getattr(_inner, 'cooldown_counter', '?')} "
-                          f"best={float(_best):.7f}",
-                          flush=True, file=self.logger.fout)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            gc.collect()
+            del data_loader
+
+            if not shard_mode:
+                continue
+
+            # Validate (and checkpoint) every `valid_interval` train files,
+            # but always on the last file of the epoch — otherwise runs
+            # with fewer train files than the interval would never
+            # validate and never save a checkpoint.
+            valid_interval = self.json_data.get('valid_interval', 1)
+            if (ixyz+1) % valid_interval != 0 and (ixyz+1) != n_xyz:
+                continue
+
+            ##################################
+            #### VALID
+            ##################################
+            # valid
+            param_context = (
+                self.ema.average_parameters() if self.ema is not None else nullcontext()
+            )
+            with param_context:
+                last_valid_loss_dict = self._validate_shards(valid_files)
+
+            # last_valid_loss_dict is now identical across ranks (valid
+            # accumulators were all-reduced), so this comparison agrees
+            # everywhere. Compute + all-reduce train metrics on every rank
+            # so the value written to the checkpoint reflects the global
+            # average, then guard only the actual print/save on rank 0.
+            should_save = bool(last_valid_loss_dict['loss'] < self.loss_valid_min)
+            curr_train_loss_dict = None
+            if should_save:
+                curr_train_loss_dict = self._reduce_train_metrics(
+                    train_acc, train_loss_log_config
+                )
+                self.loss_valid_min = last_valid_loss_dict['loss']
+
+            if self.rank == 0:
+                valid_losses = ' '.join(f"{k}={float(v):.6f}"
+                    for k, v in last_valid_loss_dict.items())
+                print(f"[per-xyz] epoch={epoch+1} xyz={ixyz+1}/{n_xyz} "
+                      f"valid: {valid_losses}",
+                      flush=True,
+                      file=self.logger.fout)
+
+                if should_save:
+                    self.update_check_point(
+                        epoch,
+                        curr_train_loss_dict,
+                        last_valid_loss_dict
+                    )
+                    # Build a save-only copy so the per-epoch list buffers
+                    # in self.ckpt stay appendable for subsequent xyz files.
+                    ckpt_to_save = dict(self.ckpt)
+                    ckpt_to_save['train_scale_shift'] = {
+                        k: (
+                            torch.stack(v).mean()
+                            if len(v) > 0
+                            else torch.tensor(0.0, device=self.device)
+                        )
+                        for k, v in self.ckpt['train_scale_shift'].items()
+                    }
+                    ckpt_to_save['valid_scale_shift'] = {
+                        k: (
+                            torch.stack(v).mean()
+                            if len(v) > 0
+                            else torch.tensor(0.0, device=self.device)
+                        )
+                        for k, v in self.ckpt['valid_scale_shift'].items()
+                    }
+                    ckpt_to_save['valid_scale_shift_origin'] = torch.tensor(
+                        self.ckpt['valid_scale_shift_origin']
+                    ).mean()
+                    torch.save(ckpt_to_save, self.json_data['NN']['fname_pkl'])
+
+                    # All-time best, kept outside the chain's promotion
+                    # path. Written to a temp file and atomically renamed:
+                    # the 12h wall clock SIGKILLs this process, and a torn
+                    # 156MB pickle would be unrecoverable.
+                    if last_valid_loss_dict['loss'] < self.global_best:
+                        self.global_best = last_valid_loss_dict['loss']
+                        torch.save(ckpt_to_save, 'model_best.pkl.tmp')
+                        os.replace('model_best.pkl.tmp', 'model_best.pkl')
+                        print(f"[best] model_best.pkl updated: "
+                              f"valid={float(self.global_best):.6f} "
+                              f"epoch={epoch+1} xyz={ixyz+1}/{n_xyz}",
+                              flush=True, file=self.logger.fout)
+
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            # Update scheduler (learning rate)
+            scheduler_cfg = self.json_data.get("scheduler", {})
+            is_plateau = (
+                isinstance(scheduler_cfg, dict)
+                and scheduler_cfg.get("scheduler") == "ReduceLROnPlateau"
+            )
+            if is_plateau:
+                self.scheduler.step(last_valid_loss_dict['loss'])
+            else:
+                self.scheduler.step()
+
+            # log_config declares an "lr" entry but nothing ever emitted
+            # it, so reading the schedule meant opening a 156MB
+            # checkpoint. Log it right after the step, next to the metric
+            # that drives it, so a decay and the patience counter filling
+            # up are both visible as they happen.
+            if self.rank == 0:
+                _inner = getattr(self.scheduler, 'scheduler', None)
+                _best = getattr(_inner, 'best', float('nan'))
+                print(f"[lr] epoch={epoch+1} xyz={ixyz+1}/{n_xyz} "
+                      f"lr={self.scheduler.get_lr():.4e} "
+                      f"bad={getattr(_inner, 'num_bad_epochs', '?')}/"
+                      f"{getattr(_inner, 'patience', '?')} "
+                      f"cooldown={getattr(_inner, 'cooldown_counter', '?')} "
+                      f"best={float(_best):.7f}",
+                      flush=True, file=self.logger.fout)
+        if shard_mode:
+            return {}
+        return self._reduce_train_metrics(train_acc, train_loss_log_config)
+
+    def _validate_shards(self, valid_files):
+        loss_log_config = self.log_config['valid']
+        self.ckpt['valid_scale_shift'] = {
+            k: [] for k in self.enr_avg_per_element.keys()
+        }
+        self.ckpt['valid_scale_shift_origin'] = []
+        # Accumulate sum / count separately per metric so the final
+        # mean is Σ sums / Σ counts — invariant to batch size.
+        valid_acc = {}
+        self.model.eval()
+        mode='valid'
+        # No torch.no_grad(): force/stress need autograd through energy,
+        # even in eval mode for energy-conserving force fields.
+        for valid_filename in valid_files:
+
+            data_loader = self.configure_dataloader_from_xyz(
+                valid_filename,
+                mode=mode
+            )
+            for data in data_loader:
+                data.to(self.device)
+                data = data_to_dict(data)  # This is for torch.jit compile
+                preds = self.model(data, backprop=False)
+                #preds = self.scale_shift(preds, data, mode)
+
+                partial = self.compute_loss_valid(preds, data)
+                for key, sc in partial.items():
+                    if key not in valid_acc:
+                        valid_acc[key] = [
+                            torch.zeros((), dtype=torch.float64),
+                            torch.zeros((), dtype=torch.float64),
+                        ]
+                    valid_acc[key][0] += sc['sum'].detach().to(torch.float64).cpu()
+                    valid_acc[key][1] += sc['count'].detach().to(torch.float64).cpu()
+
+                data.clear()
+                del data, preds, partial
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            gc.collect()
+            del data_loader
+
+        # Reduce per-rank sums/counts so every rank divides the
+        # same global totals. Each rank sees only its shard from
+        # BucketedDataLoader, so without this the reported metric
+        # is per-shard, not global.
+        if self.ddp:
+            for key in sorted(valid_acc.keys()):
+                for i in range(2):
+                    t = valid_acc[key][i].to(self.device)
+                    torch.distributed.all_reduce(
+                        t, op=torch.distributed.ReduceOp.SUM
+                    )
+                    valid_acc[key][i] = t.cpu()
+
+        # Single division at the end gives the unbiased global metric.
+        metrics = {
+            key: (s / c).to(torch.float32)
+            for key, (s, c) in valid_acc.items()
+        }
+        # Keep the controller metric invariant to task-weight changes.
+        metrics['loss'] = metrics['loss_e_h']
+        # Keep 'loss' regardless of log_config: the should_save
+        # comparison below and update_check_point require it
+        # (same coupling as in _reduce_train_metrics).
+        valid_keys = list(loss_log_config)
+        if 'loss' not in valid_keys:
+            valid_keys.append('loss')
+        last_valid_loss_dict = {
+            key: metrics.get(key, torch.tensor(float('nan')))
+            for key in valid_keys
+        }
+
+        if self.ddp:
+            torch.distributed.barrier()
+
+        return last_valid_loss_dict
 
 
     def get_xyz_data_path(self):
