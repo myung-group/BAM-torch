@@ -10,6 +10,7 @@ Or in Python:
 """
 
 import argparse
+import inspect
 import torch
 from e3nn import o3
 from copy import deepcopy
@@ -38,6 +39,21 @@ def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
     elif regress_forces == False:  # no force computation
         regress_forces = "false"
 
+    # RACE architecture used by the DeNS experiment, forwarded as in
+    # BaseTrainer.set_model so such checkpoints can be rebuilt.
+    model_params = inspect.signature(RACE).parameters
+    model_kwargs = {}
+    for key in ('species_embedding_dim', 'x_features_dim',
+                'skip_species_dim', 'x_feats_per_layer', 'x_feats_rms_norm'):
+        if key in model_params and key in cfg:
+            model_kwargs[key] = cfg[key]
+    if 'dens' in model_params:
+        dens_config = cfg.get('dens', {})
+        model_kwargs['dens'] = bool(
+            dens_config.get('enabled', False)
+            if isinstance(dens_config, dict) else dens_config
+        )
+
     # Create model with exact config
     model = RACE(
         cutoff=cfg['cutoff'],
@@ -54,6 +70,7 @@ def recreate_model_pt_from_pkl(pkl_path='model.pkl', output_path='model.pt'):
         # "slow" and "fast" build different tensor-product paths, so the
         # block the checkpoint was trained with has to be reproduced here.
         interaction_block=cfg.get('interaction_block', 'slow'),
+        **model_kwargs,
     )
 
     # Load weights (remove DDP prefix if exists)
