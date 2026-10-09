@@ -95,7 +95,7 @@ class ForceEncodingBlock(torch.nn.Module):
         self.register_buffer("gate_index", gate_index)
 
     def forward(self, forces: torch.Tensor) -> torch.Tensor:  # [n_nodes, 3]
-        mag = forces.norm(dim=-1, keepdim=True)                  # [n, 1]
+        mag = forces.norm(p=2, dim=-1, keepdim=True)             # [n, 1]
         # Both Bessel (sin(wx)/x) and normalized SH are 0/0 at zero input;
         # substitute a dummy magnitude/direction there and kill the result
         # through the gate instead.
@@ -182,9 +182,9 @@ class ProductBasisXFeatsMixin:
     layer>0 input irreps, so the two are not state_dict-compatible. Opt in from
     the config ("x_feats_per_layer": true).
 
-    NOTE: the per-layer path indexes a ModuleList by a loop variable, which
-    TorchScript cannot compile. None of these models are scripted today (the
-    LAMMPS exporters build them eagerly); revisit if that changes.
+    NOTE: the LAMMPS exporters script RACE. Its constant configuration flags
+    prune the unused projection path, and per-layer projections enumerate the
+    ModuleList rather than indexing it with a runtime loop variable.
     """
 
     def _init_x_feats(
@@ -241,7 +241,11 @@ class ProductBasisXFeatsMixin:
         self, ilayer: int, node_feats: torch.Tensor
     ) -> torch.Tensor:
         """Per-layer factor, projected from the features entering `ilayer`."""
-        x = self.linear_x[ilayer](node_feats)
+        x: Optional[torch.Tensor] = None
+        for i, linear in enumerate(self.linear_x):
+            if i == ilayer:
+                x = linear(node_feats)
+        assert x is not None
         if self.x_feats_rms_norm:
             # x is pure 0e, so an RMS over its channel axis is
             # rotation-invariant. Rescaling to unit magnitude keeps the product
@@ -256,6 +260,8 @@ class ProductBasisXFeatsMixin:
 class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
     """Restratification Atomic Cluster Expansion (RACE) model
     """
+    __constants__ = ["x_feats_per_layer", "x_feats_rms_norm", "dens"]
+
     def __init__(
         self,
         cutoff: float = 6.0,
@@ -553,9 +559,10 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
             # they enter this layer (before the interaction overwrites them).
             # This is what makes RaceEquivariantBlock bilinear in the atomic
             # environment rather than a species-conditioned linear map.
-            if x_node_feats_shared is None:
+            if self.x_feats_per_layer:
                 x_node_feats = self._layer_x_feats(ilayer, node_feats)
             else:
+                assert x_node_feats_shared is not None
                 x_node_feats = x_node_feats_shared
 
             node_feats, sc = interaction(
@@ -663,7 +670,7 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
                 # Standard training batch: tie the noise head into the loss
                 # graph with zero weight (adds exactly 0 to the energy) so
                 # its parameters also receive a gradient under DDP.
-                preds["energy"] = preds["energy"] \
+                preds["energy"] = graph_energy \
                     + 0.0 * self.denoise_decoder(node_feats).sum()
 
         forces: Optional[torch.Tensor] = None
