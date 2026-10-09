@@ -1,0 +1,130 @@
+{
+  "device": "gpu",
+  "model": "race",
+  "trainer": "mp_v1",
+  "interaction_block": "fast",
+  "oeq_config": true,
+  "oeq_conv_fusion": true,
+  "grad_checkpoint": true,
+  "gpu-parallel": false,
+  "fname_traj": "train_data",
+  "ntrain": "train_data",
+  "nvalid": "valid_data",
+  "element": "auto",
+  "enr_avg_per_element": "get_enr_avg_per_element.txt",
+  "cutoff": 7.0,
+  "avg_num_neighbors": 92,
+  "num_species": 89,
+  "hidden_channels": "128x0e + 128x1o + 128x2e + 128x3o",
+  "features_dim": 128,
+  "species_embedding_dim": 16,
+  "x_features_dim": 8,
+  "skip_species_dim": 4,
+  "x_feats_per_layer": true,
+  "x_feats_rms_norm": true,
+  "num_radial_basis": 12,
+  "radial_polynomial_p": 6,
+  "nlayers": 5,
+  "max_ell": 3,
+  "output_channels": "1x0e",
+  "active_fn": "identity",
+  "regress_forces": true,
+  "cueq_config": false,
+  "nbatch": 30,
+  "pbc": true,
+  "l_separated_layer_norm": false,
+  "n_buckets": 8,
+  "bucket_reference": "edges",
+  "max_edges_per_batch": 15000,
+  "valid_interval": 20,
+  "NN": {
+    "optimizer": "Adam",
+    "data_seed": 1300,
+    "init_seed": 1301,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "nepoch": 5,
+    "nsave": 5,
+    "restart": true,
+    "fname_pkl": "model_fd128.pkl",
+    "ema": true,
+    "loss_config": {
+      "huber_loss": "huber",
+      "energy_loss": "huber",
+      "force_loss": "huber",
+      "stress_loss": "huber",
+      "huber_delta": 0.25,
+      "huber_delta_energy": 0.05,
+      "huber_delta_force": 0.25,
+      "huber_delta_stress": 0.05
+    },
+    "enr_lambda": 1.0,
+    "frc_lambda": 1.0,
+    "str_lambda": 1.0,
+    "l2_lambda": 0.0
+  },
+  "scheduler": {
+    "scheduler": "ReduceLROnPlateau",
+    "decay_factor": 0.5,
+    "patience": 2,
+    "threshold": 0.001,
+    "cooldown": 1,
+    "min_lr": 1e-06
+  },
+  "log_length": "simple",
+  "log_interval": 2,
+  "log_config": {
+    "step": [
+      "date",
+      "epoch"
+    ],
+    "train": [
+      "loss",
+      "loss_e_h",
+      "loss_f_h",
+      "loss_s_h",
+      "loss_dn_h",
+      "loss_e",
+      "loss_f",
+      "loss_s",
+      "loss_dn"
+    ],
+    "valid": [
+      "loss",
+      "loss_e_h",
+      "loss_f_h",
+      "loss_s_h",
+      "loss_e",
+      "loss_f",
+      "loss_s"
+    ],
+    "lr": [
+      "lr"
+    ]
+  },
+  "train": {
+    "fname_log": "loss_train.out"
+  },
+  "predict": {
+    "evaluate_tag": false,
+    "loss_config": {
+      "energy_loss": "mae",
+      "force_loss": "mae",
+      "huber_delta": 0.1
+    },
+    "fname_traj": "test_20.traj",
+    "ndata": "test_20.traj",
+    "model": "model_fd128.pkl",
+    "fname_plog": "predict.out"
+  },
+  "dens": {
+    "enabled": true,
+    "probability": 0.4,
+    "sigma_sampling": "uniform",
+    "sigma_min": 0.01,
+    "sigma_max": 0.1,
+    "corrupt_ratio": 0.4,
+    "denoise_lambda": 10.0,
+    "energy_lambda": 1.0
+  }
+}

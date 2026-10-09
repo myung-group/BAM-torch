@@ -703,6 +703,17 @@ class BaseTrainer:
                 f'\ninteraction block:\n'
                 f'\033[33m -- {interaction_block}\033[0m\n'
             )
+        # RACE architecture used by the DeNS experiment.
+        for key in ('species_embedding_dim', 'x_features_dim',
+                    'skip_species_dim', 'x_feats_per_layer', 'x_feats_rms_norm'):
+            if key in model_params and key in model_config:
+                model_kwargs[key] = model_config[key]
+        if 'dens' in model_params:
+            dens_config = model_config.get('dens', {})
+            model_kwargs['dens'] = bool(
+                dens_config.get('enabled', False)
+                if isinstance(dens_config, dict) else dens_config
+            )
         model = model_cls(**model_kwargs)
         return model
 

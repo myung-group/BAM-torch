@@ -157,6 +157,7 @@ class InteractionBlock(torch.nn.Module):
         self.target_irreps = target_irreps
         self.hidden_irreps = hidden_irreps
         self.avg_num_neighbors = avg_num_neighbors
+        self.inv_sqrt_avg_num_neighbors = 1.0 / float(avg_num_neighbors) ** 0.5
         if radial_MLP is None:
             radial_MLP = [64, 64, 64]
         self.radial_MLP = radial_MLP
@@ -405,6 +406,7 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_cutoff: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         node_attrs: to_one_hot(species)
@@ -417,13 +419,14 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         sender = edge_index[0]
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
-        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
 
         skip = self.skip_tp_node(node_feats, node_attrs)
         if not torch.jit.is_scripting() and self.l_separated_layer_norm:
             node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
         mix = self.conv_tp_weights(edge_feats)  # tp_weights
+        if edge_cutoff is not None:
+            mix = mix * edge_cutoff
         mji = self.conv_tp(
             node_feats[sender], edge_attrs
         ) # messages in BAM-jax
@@ -436,8 +439,8 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, irreps]
-        message = message / torch.sqrt(avg_num_neighbors)
-        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
+        message = message * self.inv_sqrt_avg_num_neighbors
+        message = self.linear_down(message) * self.inv_sqrt_avg_num_neighbors
 
         return (
             message,
@@ -517,6 +520,7 @@ class RaceInteractionBlock(InteractionBlock):
         edge_attrs: torch.Tensor,
         edge_feats: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_cutoff: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         node_attrs: to_one_hot(species)
@@ -529,13 +533,14 @@ class RaceInteractionBlock(InteractionBlock):
         sender = edge_index[0]
         receiver = edge_index[1]
         num_nodes = node_feats.shape[0]
-        avg_num_neighbors = torch.tensor(self.avg_num_neighbors)
 
         skip = self.skip_tp_node(node_feats, node_attrs)
         if not torch.jit.is_scripting() and self.l_separated_layer_norm:
             node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
         radial_wgt = self.conv_tp_weights(edge_feats)
+        if edge_cutoff is not None:
+            radial_wgt = radial_wgt * edge_cutoff
         if not torch.jit.is_scripting() and self._use_oeq_conv_fusion:
             message = self.conv_tp(
                 node_feats,
@@ -550,9 +555,8 @@ class RaceInteractionBlock(InteractionBlock):
             message = scatter_sum(
                 src=mji, index=receiver, dim=0, dim_size=num_nodes
             )  # [n_nodes, irreps]
-
-        message = message / torch.sqrt(avg_num_neighbors)
-        message = self.linear_down(message) / torch.sqrt(avg_num_neighbors)
+        message = message * self.inv_sqrt_avg_num_neighbors
+        message = self.linear_down(message) * self.inv_sqrt_avg_num_neighbors
 
         return (
             message,

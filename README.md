@@ -157,6 +157,8 @@ This automatically detects all available GPUs and utilizes them for distributed 
 
 For an example of using multiple nodes and multiple GPUs with the SLURM scheduler, please refer to `examples/example-3BPA_300K-multiGPU/`
 
+The RACE+DeNS experiment is in [`examples/bam-mp-dens/`](examples/bam-mp-dens/README.md); its README covers dataset preparation, fresh single-GPU and distributed training, and checkpoint resume.
+
 ### Evaluation
 ```python
 import json
@@ -190,6 +192,7 @@ bam-torch/
 |   └── economics/       # The implementation is based on the catalyst sustainability workflow from the accompanying SCC manuscript.
 ├── examples/
 │   ├── example-3BPA_300K/    # QM9 benchmark example
+│   └── bam-mp-dens/          # RACE+DeNS experiment
 ├── README.md            # Project documentation
 ├── install_deps.py      # Dependency installation script
 ├── pyproject.toml       # Build configuration

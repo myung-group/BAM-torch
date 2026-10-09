@@ -1,0 +1,12 @@
+/train_data
+/valid_data
+/*.pkl
+/*.pkl.prev
+/*.out
+/*.err
+/input_json_from_trained_model.txt
+/SEGMENT.txt
+/.segment.lock/
+/.segment.lock.stale.*/
+/._*
+/*.bak*
