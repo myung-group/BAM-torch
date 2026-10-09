@@ -315,6 +315,100 @@ R: Random samples B: High BALD score samples.
 }
 ```
 
+### Using DeNS (`input.json`)
+
+DeNS (denoising non-equilibrium structures) is an auxiliary task for RACE. Some
+training files are rattled with random displacements, the original forces are
+given to the model as conditioning input, and a separate head predicts the
+displacement. It runs with `"trainer": "dens"`. The key `mp_v1` is an alias of
+`dens` (same class), so older configs keep working. The former pickle trainer is
+now `mp_pkl`: if you used the old pickle-based `mp_v1`, switch to `mp_pkl`.
+Only `dens` supports DeNS; `base`, `mve`, `mh`, `ga`, `distill` and `mp_pkl` don't.
+
+A minimal configuration needs no energy-reference file. `fname_traj`, `ntrain`
+and `nvalid` point to a file or to a folder of `.extxyz`, `.xyz` or `.traj` files
+(each frame needs an energy):
+
+```json
+{
+    "device": "gpu",
+    "model": "race",
+    "trainer": "dens",
+    "interaction_block": "fast",
+    "oeq_config": false,
+    "cueq_config": false,
+    "regress_forces": true,
+    "fname_traj": "train_data",
+    "ntrain": "train_data",
+    "nvalid": "valid_data",
+    "element": "auto",
+    "cutoff": 6.0,
+    "num_species": 89,
+    "avg_num_neighbors": 30,
+    "hidden_channels": "64x0e+64x1o+64x2e",
+    "features_dim": 64,
+    "num_radial_basis": 8,
+    "nbatch": 8,
+    "NN": {
+        "data_seed": 10,
+        "init_seed": 11,
+        "learning_rate": 0.001,
+        "nepoch": 100,
+        "nsave": 5,
+        "restart": false,
+        "fname_pkl": "model.pkl",
+        "loss_config": {"energy_loss": "mse", "force_loss": "mse", "stress_loss": "mse"}
+    },
+    "scheduler": {"scheduler": "ReduceLROnPlateau", "decay_factor": 0.5, "patience": 5},
+    "log_interval": 2,
+    "train": {"fname_log": "loss_train.out"},
+    "predict": {"evaluate_tag": false},
+    "dens": {"enabled": true, "probability": 0.5}
+}
+```
+
+A larger working setup (shard schedule, OpenEquivariance, the DeNS experiment
+architecture) is [`examples/bam-mp-dens/input.fresh.json`](examples/bam-mp-dens/input.fresh.json).
+Keys shared with the basic example above (`NN`, `scheduler`, `log_*`, model
+sizes) behave as they do for `base`. The keys that matter for `dens`:
+
+| Key | Default | Meaning |
+|:----|:--------|:--------|
+| `trainer` | | `"dens"` (or its alias `"mp_v1"`). |
+| `fname_traj`, `ntrain`, `nvalid` | | `ntrain`/`nvalid`: a file or a folder (`.extxyz`, `.xyz`, `.traj`, read in sorted order). Or set `ntrain` and `nvalid` to integers to split the last `ntrain + nvalid` frames of the single file `fname_traj`, shuffled with `NN.data_seed`. |
+| `element` | `null` | `"auto"` or `null` takes the elements from the data. A list of atomic numbers makes any other element an error. |
+| `enr_avg_per_element` | absent | Optional file with per-element reference energies. When absent they are fitted from the train and valid data, as `base` does. |
+| `valid_interval` | absent | Present: shard schedule, validating after every `valid_interval` train files and on the last file of each epoch, saving `NN.fname_pkl` when the valid loss improves (also writes `model_train.pkl` and `model_best.pkl`). Absent: the `base` per-epoch schedule, validating every `log_interval` epochs and saving every `NN.nsave` epochs. |
+| `log_interval` | `2` | Validation interval in epochs when `valid_interval` is absent. |
+| `dens.enabled` | `false` | Turns on the force encoder and the noise head. `"dens": true` is shorthand for `{"enabled": true}`. |
+| `dens.probability` | `0.5` | Chance that a training file is rattled in a given epoch. Drawn per file and epoch from `NN.data_seed`, not per batch. |
+| `dens.sigma_sampling` | `"uniform"` | `"uniform"` or `"log"` (log-uniform) draw of the noise scale per structure. |
+| `dens.sigma_min`, `dens.sigma_max` | `0.05`, `0.30` | Range of the noise scale (Å). |
+| `dens.corrupt_ratio` | `0.5` | Fraction of atoms displaced in a rattled structure, in (0, 1]; `null` displaces every atom. Displaced atoms get the noise loss, the rest keep the force loss. |
+| `dens.denoise_lambda`, `dens.energy_lambda` | `10.0`, `1.0` | Weights of the noise loss and of the energy loss on rattled batches. |
+| `n_buckets`, `max_edges_per_batch` | `8`, `16384` | Graphs are bucketed by edge count and a batch holds at most `max_edges_per_batch` edges. |
+| `bucket_reference` | | Appears in the example configs, but the trainer always buckets by edges. |
+| `cache_parsed_frames` | `true` | Keep parsed frames in memory instead of re-reading files on every rattled visit. |
+| `interaction_block` | `"slow"` | `"fast"` is needed for OpenEquivariance (see below). |
+| `oeq_config`, `oeq_conv_fusion` | absent, `false` | `oeq_config: true` asks for OpenEquivariance, `false` for e3nn. The startup `equiv. lib.` line shows the backend actually used and why OEQ was skipped, if it was. `oeq_conv_fusion: true` enables atomic conv fusion. |
+| `cueq_config` | absent | Checked first: absent or `true` uses cuEquivariance when it is installed. Set it to `false` to get OEQ or e3nn. |
+| `species_embedding_dim`, `skip_species_dim`, `x_features_dim`, `x_feats_per_layer`, `x_feats_rms_norm` | `null`, `null`, `8`, `false`, `true` | RACE options used by the DeNS experiment. The defaults give the same layout as main's RACE, so main checkpoints load; setting `species_embedding_dim` changes the parameter set. |
+| `NN.loss_config` | | Needs `energy_loss`, `force_loss` and `stress_loss` for `dens`, because the trainer also predicts stress. Each takes `"mae"` (or `"l1"`), `"mse"`, `"rmse"` or `"huber"` (upper case works too, and `"h"` for Huber). |
+| `NN.ema`, `NN.ema_decay` | `true`, `0.999` | Validation uses the EMA weights. |
+| `NN.restart`, `NN.fname_pkl` | | Resume from / save to this checkpoint, as for `base`. Keep the architecture keys identical when resuming. |
+
+Things to know:
+
+- With a single training file and `dens.probability` p, the seeded draw can skip
+  denoising for several epochs in a row (in one test with p = 0.4, a one-file
+  run had no rattled batch in its first 6 epochs). Use several files or a higher p.
+- In the per-epoch table, `nan` in the denoising columns (`loss_dn`, `loss_dn_h`)
+  means no rattled batch ran that epoch, and `nan` in the stress columns means
+  every batch was rattled. These are placeholders, not bad losses.
+- GPU runs with `oeq_config: false` were bit-for-bit reproducible in our tests.
+  With `oeq_config: true` and `oeq_conv_fusion: true`, repeated runs differed
+  at the 1e-9 to 1e-7 level.
+
 ### Fast RACE (OpenEquivariance-accelerated)
 
 The RACE interaction block has two variants, selected via `interaction_block`:
