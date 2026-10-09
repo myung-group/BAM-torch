@@ -278,7 +278,11 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         l_separated_layer_norm: bool = False,
         interaction_block: str = "slow",
         radial_polynomial_p: int = 2,
-        species_embedding_dim: int = 16,
+        # Opt-in switch for the DeNS-experiment layout. None keeps the original
+        # RACE (same state_dict as before, so existing checkpoints load). An int
+        # adds the species-pair radial embedding, edge-cutoff gating of the
+        # conv weights, learnable per-layer scales and the stress basis buffer.
+        species_embedding_dim: Optional[int] = None,
         x_features_dim: int = 8,
         # Project the species one-hot to this dimension before the per-layer
         # skip tensor product (skip_tp_node); None keeps the full one-hot
@@ -349,14 +353,18 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         # Species-pair conditioning of the radial network: a learned scalar
         # embedding of each endpoint's one-hot species is concatenated to the
         # Bessel features, so message weights can differ per element pair
-        # instead of being purely distance-based. dim=0 disables (no-op cat).
+        # instead of being purely distance-based. Only built when
+        # species_embedding_dim is set.
         self.species_embedding_dim = species_embedding_dim
-        self.species_embedding = torch.nn.Linear(
-            num_species, species_embedding_dim, bias=False
-        )
+        species_edge_dim = 0
+        if species_embedding_dim is not None:
+            self.species_embedding = torch.nn.Linear(
+                num_species, species_embedding_dim, bias=False
+            )
+            species_edge_dim = 2 * species_embedding_dim
         # Edge embedding
         edge_feats_irreps = o3.Irreps(
-            f"{self.radial_embedding.out_dim + 2 * species_embedding_dim}x0e"
+            f"{self.radial_embedding.out_dim + species_edge_dim}x0e"
         )
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell) # interaction_irreps in JAX
         #num_features = hidden_irreps.count(o3.Irrep(0, 1))
@@ -437,25 +445,26 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
             self.force_decoders.append(force_decoder)
             self.stress_decoders.append(stress_decoder)
 
-        # Learnable per-layer mixing weights for the summed contributions
-        # (init to 1.0 == the previous plain sum).
-        self.layer_scales_e = torch.nn.Parameter(torch.ones(nlayers))
-        # Force/stress scales only train when the direct heads exist; frozen
-        # otherwise so DDP sees no never-used trainable params in auto mode.
-        has_direct = "direct" in regress_forces
-        self.layer_scales_f = torch.nn.Parameter(
-            torch.ones(nlayers), requires_grad=has_direct
-        )
-        self.layer_scales_s = torch.nn.Parameter(
-            torch.ones(nlayers), requires_grad=has_direct
-        )
+        if species_embedding_dim is not None:
+            # Learnable per-layer mixing weights for the summed contributions
+            # (init to 1.0 == the previous plain sum).
+            self.layer_scales_e = torch.nn.Parameter(torch.ones(nlayers))
+            # Force/stress scales only train when the direct heads exist; frozen
+            # otherwise so DDP sees no never-used trainable params in auto mode.
+            has_direct = "direct" in regress_forces
+            self.layer_scales_f = torch.nn.Parameter(
+                torch.ones(nlayers), requires_grad=has_direct
+            )
+            self.layer_scales_s = torch.nn.Parameter(
+                torch.ones(nlayers), requires_grad=has_direct
+            )
 
-        # Change of basis mapping the (1x0e+1x2e) stress head output onto a
-        # symmetric 3x3 Cartesian tensor: cart = einsum("ni,iab->nab", sph, cob)
-        self.register_buffer(
-            "stress_change_of_basis",
-            CartesianTensor("ij=ji").reduced_tensor_products().change_of_basis,
-        )
+            # Change of basis mapping the (1x0e+1x2e) stress head output onto a
+            # symmetric 3x3 Cartesian tensor: cart = einsum("ni,iab->nab", sph, cob)
+            self.register_buffer(
+                "stress_change_of_basis",
+                CartesianTensor("ij=ji").reduced_tensor_products().change_of_basis,
+            )
 
         # DeNS: force-conditioning encoder (injected after the first layer,
         # once node_feats carry hidden_irreps) and the noise-vector head.
@@ -513,18 +522,22 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         edge_attrs = self.spherical_harmonics(Rij)
         # Smooth envelope (1 at r=0, 0 at r_max); gates the per-edge weights
         # inside the interaction blocks so messages vanish at the cutoff.
-        edge_cutoff = self.radial_embedding.cutoff_fn(lengths.unsqueeze(1))
+        # None (no gating) keeps the original RACE.
+        edge_cutoff: Optional[torch.Tensor] = None
+        if self.species_embedding_dim is not None:
+            edge_cutoff = self.radial_embedding.cutoff_fn(lengths.unsqueeze(1))
         edge_feats = self.radial_embedding(lengths.unsqueeze(1),
                                            node_attrs,
                                            edge_index,
                                            species)
         # Species-pair conditioning: sender/receiver element embeddings join
         # the radial features feeding the conv-weight MLPs.
-        species_emb = self.species_embedding(node_attrs)
-        edge_feats = torch.cat(
-            [edge_feats, species_emb[edge_index[0]], species_emb[edge_index[1]]],
-            dim=-1,
-        )
+        if self.species_embedding_dim is not None:
+            species_emb = self.species_embedding(node_attrs)
+            edge_feats = torch.cat(
+                [edge_feats, species_emb[edge_index[0]], species_emb[edge_index[1]]],
+                dim=-1,
+            )
 
         x_node_feats_shared = self._shared_x_feats(node_feats)
 
@@ -588,7 +601,9 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
 
         # Weighted sum over per-layer energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
-        node_energy = self.act_fn(node_energy) * self.layer_scales_e
+        node_energy = self.act_fn(node_energy)
+        if self.species_embedding_dim is not None:
+            node_energy = node_energy * self.layer_scales_e
 
         # Global pooling
         node_energy = torch.sum(node_energy, dim=-1) # [nbatch*num_nodes]  # total_energy
