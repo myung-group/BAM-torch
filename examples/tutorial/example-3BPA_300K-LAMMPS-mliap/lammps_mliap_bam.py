@@ -53,6 +53,8 @@ coupling needs ``cupy``; torch>=2.6 needs TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 ``torch.library.register_autocast`` no-op shim (OEQ imports it at module
 scope).
 """
+import inspect
+import re
 from typing import Dict, List, Optional
 
 import torch
@@ -119,21 +121,38 @@ class BAMEdgeModel(torch.nn.Module):
             species, num_classes=race.num_species
         ).to(next(race.parameters()).dtype)
         node_feats = race.node_embedding(node_attrs)
+        # RACE options of the DeNS-experiment layout (RACEUnified has none):
+        # skip-TP species projection, species-pair edge features with
+        # edge-cutoff gating and layer energy scales, per-layer x features.
+        skip_attrs = (race._skip_attrs(node_attrs)
+                      if hasattr(race, "_skip_attrs") else node_attrs)
+        species_embedding_dim = getattr(race, "species_embedding_dim", None)
+        x_feats_per_layer = getattr(race, "x_feats_per_layer", False)
         lengths = torch.norm(Rij, dim=1)
         edge_attrs = race.spherical_harmonics(Rij)
+        edge_cutoff = None
+        if species_embedding_dim is not None:
+            edge_cutoff = race.radial_embedding.cutoff_fn(lengths.unsqueeze(1))
         edge_feats = race.radial_embedding(lengths.unsqueeze(1), node_attrs,
                                            edge_index, species)
-        x_node_feats = race.linear_x(node_feats)
+        if species_embedding_dim is not None:
+            species_emb = race.species_embedding(node_attrs)
+            edge_feats = torch.cat([edge_feats, species_emb[edge_index[0]],
+                                    species_emb[edge_index[1]]], dim=-1)
+        x_node_feats = None if x_feats_per_layer else race.linear_x(node_feats)
 
         outputs = []
         n_l = len(race.interactions)
         for k in range(n_l):
+            # per-layer x is projected from the features entering layer k
+            x_k = (race._layer_x_feats(k, node_feats) if x_feats_per_layer
+                   else x_node_feats)
             node_feats, sc = race.interactions[k](
-                node_attrs=node_attrs, node_feats=node_feats,
+                node_attrs=skip_attrs, node_feats=node_feats,
                 edge_attrs=edge_attrs, edge_feats=edge_feats,
-                edge_index=edge_index)
+                edge_index=edge_index, edge_cutoff=edge_cutoff)
             node_feats = race.products[k](
-                x_node_feats=x_node_feats, node_feats=node_feats, sc=sc)
+                x_node_feats=x_k, node_feats=node_feats, sc=sc)
             if self.is_multihead:
                 node_heads = torch.full((node_feats.shape[0],), self.head_idx,
                                         dtype=torch.long, device=node_feats.device)
@@ -144,7 +163,10 @@ class BAMEdgeModel(torch.nn.Module):
                 node_feats = LAMMPS_MP.apply(node_feats.contiguous(),
                                              lammps_data)
 
-        node_energy = race.act_fn(torch.stack(outputs, dim=-1)).sum(dim=-1)
+        node_energy = race.act_fn(torch.stack(outputs, dim=-1))
+        if species_embedding_dim is not None:
+            node_energy = node_energy * race.layer_scales_e
+        node_energy = node_energy.sum(dim=-1)
         return node_energy[:nlocal] + self.enr_avg[species[:nlocal]]
 
 
@@ -263,10 +285,36 @@ def _build_race(cfg, backend, heads=None):
             raise RuntimeError("backend='oeq' requested but openequivariance "
                                "is not importable")
         kw["oeq_config"] = OEQConfig(enabled=True, optimize_all=True)
+        # Same kernel as in training (BaseTrainer.set_model); fusion is fine
+        # here because this route runs eager, not TorchScript.
+        if cfg.get("oeq_conv_fusion", False):
+            kw["oeq_config"].conv_fusion = "atomic"
     cls = RACE
     if heads:
         cls = RACEUnified
         kw["heads"] = list(heads)
+    # Architecture options, forwarded with BaseTrainer.set_model's conditions.
+    # regress_forces 'direct' adds force/stress decoders: they are never
+    # evaluated here (forces are -dE/drij), but the state_dict and the
+    # positional EMA shadow list must line up with the checkpoint.
+    regress_forces = cfg.get("regress_forces", "auto")
+    if regress_forces is True:
+        regress_forces = "autograd"
+    elif regress_forces is False:
+        regress_forces = "false"
+    params = inspect.signature(cls).parameters
+    if "l_separated_layer_norm" in params:
+        kw["l_separated_layer_norm"] = cfg.get("l_separated_layer_norm", False)
+    if "radial_polynomial_p" in params and "radial_polynomial_p" in cfg:
+        kw["radial_polynomial_p"] = cfg["radial_polynomial_p"]
+    for key in ("species_embedding_dim", "x_features_dim", "skip_species_dim",
+                "x_feats_per_layer", "x_feats_rms_norm"):
+        if key in params and key in cfg:
+            kw[key] = cfg[key]
+    if "dens" in params:
+        dens = cfg.get("dens", {})
+        kw["dens"] = bool(dens.get("enabled", False)
+                          if isinstance(dens, dict) else dens)
     return cls(cutoff=cfg["cutoff"], avg_num_neighbors=cfg["avg_num_neighbors"],
                 num_species=cfg["num_species"], max_ell=cfg["max_ell"],
                 num_basis_func=cfg["num_radial_basis"],
@@ -274,8 +322,40 @@ def _build_race(cfg, backend, heads=None):
                 nlayers=cfg["nlayers"], features_dim=cfg["features_dim"],
                 output_irreps=o3.Irreps(cfg.get("output_channels", "1x0e")),
                 active_fn=cfg.get("active_fn", "identity"),
-                regress_forces="false",
+                regress_forces=regress_forces,
                 interaction_block=cfg.get("interaction_block", "slow"), **kw)
+
+
+# Keys that legitimately differ between TP backends: e3nn-generated buffers and
+# empty placeholders.  Every learned weight is backend independent.
+_BACKEND_KEY = re.compile(r"(^|\.)(output_mask|_w3j\w*|_tensor_constant\w*)$")
+_READOUT_BIAS = re.compile(r"(^|\.)readouts\.\d+\.bias$")
+
+
+def _load_weights(race, sd):
+    """load_state_dict(strict=False) that rejects any key mismatch except
+    backend buffers and the readout biases of checkpoints written before
+    readouts had one (zero-initialised, i.e. exactly the bias-free readout).
+    That older format lacks every readout bias; a partial gap is an error."""
+    res = race.load_state_dict(sd, strict=False)
+    own = race.state_dict()
+    no_bias = [k for k in res.missing_keys if _READOUT_BIAS.search(k)]
+    n_bias = sum(1 for k in own if _READOUT_BIAS.search(k))
+    if no_bias and (len(no_bias) != n_bias
+                    or any(own[k].any() for k in no_bias)):
+        no_bias = []
+    if no_bias:
+        print("  - checkpoint has no readout bias (older format); using the "
+              "zero bias for %s" % no_bias)
+    missing = [k for k in res.missing_keys if k not in no_bias
+               and not (_BACKEND_KEY.search(k) or own[k].numel() == 0)]
+    unexpected = [k for k in res.unexpected_keys
+                  if not (_BACKEND_KEY.search(k) or sd[k].numel() == 0)]
+    if missing or unexpected:
+        raise RuntimeError(
+            "checkpoint does not match the model rebuilt from its input.json "
+            "(architecture options?): missing %s, unexpected %s"
+            % (missing, unexpected))
 
 
 def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
@@ -319,9 +399,19 @@ def rebuild_bam_mliap(pkl_path: str, backend: str = "e3nn",
         print("  - multi-head checkpoint: %s -> using %r (index %d)"
               % (heads, heads[head_idx], head_idx))
 
+    if backend == "oeq" and cfg.get("interaction_block", "slow") != "fast":
+        print("  - backend: e3nn (OpenEquivariance only accelerates "
+              "interaction_block 'fast'; this checkpoint uses %r)"
+              % cfg.get("interaction_block", "slow"))
+        backend = "e3nn"
+    else:
+        print("  - backend: %s%s" % (backend, " (oeq_conv_fusion: atomic)"
+              if backend == "oeq" and cfg.get("oeq_conv_fusion", False)
+              else ""))
+
     race = _build_race(cfg, backend, heads=heads)
     sd = {k.replace("module.", ""): v for k, v in ck["params"].items()}
-    race.load_state_dict(sd, strict=False)   # e3nn-only buffers differ per backend
+    _load_weights(race, sd)
     ema_state = ck.get("ema_state")
     if ema_state and ema_state.get("shadow_params"):
         from torch_ema import ExponentialMovingAverage
@@ -408,7 +498,7 @@ def rebuild_from_state(payload):
     """
     race = _build_race(payload["cfg"], payload["backend"],
                        heads=payload.get("heads") or None)
-    race.load_state_dict(payload["state_dict"], strict=False)
+    _load_weights(race, payload["state_dict"])
     race.criterion = None
     race.eval()
     obj = LAMMPS_MLIAP_BAM(race, payload["enr"], elements=payload["elements"],
