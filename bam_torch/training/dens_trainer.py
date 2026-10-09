@@ -184,12 +184,51 @@ class DensTrainer(BaseTrainer):
 
 
     def configure_dataloader(self):
-        with open(self.json_data['enr_avg_per_element'], 'r', encoding='utf-8') as file:
-            content = file.read()
-        enr_avg_per_element, uniq_element = ast.literal_eval(content)
+        if 'enr_avg_per_element' not in self.json_data:
+            from bam_torch.utils.utils import get_enr_avg_per_element
+
+            train_files, valid_files = self.get_xyz_data_path()
+            element = self.json_data.get('element')
+            auto_element = element is None or element == 'auto'
+            datasets = []
+            # Like BaseTrainer, this fit needs all frames in memory once.
+            # Reuse the existing cache without overriding cache_parsed_frames.
+            for key, files in [('ntrain', train_files), ('nvalid', valid_files)]:
+                frames = []
+                for path in files:
+                    shard = self._read_frames_cached(path, cache=key == 'ntrain' and self._dens_enabled())
+                    for index, atoms in enumerate(shard):
+                        if not auto_element:
+                            for number in atoms.numbers:
+                                if number not in element:
+                                    raise ValueError(
+                                        f"Element {number} not in configured element list "
+                                        f"in {path}, frame {index}"
+                                    )
+                        if atoms.calc is None or 'energy' not in atoms.calc.results:
+                            raise ValueError(f"Missing energy in {path}, frame {index}")
+                    frames.extend(shard)
+                if not frames:
+                    raise ValueError(
+                        f"No supported frames for '{key}' in {self.json_data[key]}"
+                    )
+                datasets.append(frames)
+            train_frames, valid_frames = datasets
+            traj = train_frames + valid_frames
+            if auto_element:
+                element = sorted(set(atom.number for atoms in traj for atom in atoms))
+            enr_avg_per_element, uniq_element, variance = get_enr_avg_per_element(
+                traj, element
+            )
+        else:
+            with open(self.json_data['enr_avg_per_element'], 'r', encoding='utf-8') as file:
+                content = file.read()
+            enr_avg_per_element, uniq_element = ast.literal_eval(content)
         self.ATOM_ENERGIES = np.array ([
             enr for n, enr in enr_avg_per_element.items()
         ])
+        if 'enr_avg_per_element' not in self.json_data and self.rank == 0:
+            print(f'mean energy per element:\n {enr_avg_per_element}\n')
         #print ('ATOM_ENERGIES', self.ATOM_ENERGIES)
         # BaseTrainer.__init__ unpacks as (train_loader, valid_loader, uniq_element, enr_avg_per_element)
         return None, None, uniq_element, enr_avg_per_element
