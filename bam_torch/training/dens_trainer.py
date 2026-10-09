@@ -7,6 +7,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import read
 from matscipy.neighbours import neighbour_list
@@ -173,6 +174,7 @@ def preprocess_graph(
 
 class DensTrainer(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
+        self._xyz_split_frames: dict[str, list[Atoms]] = {}
         super().__init__(json_data, rank, world_size)
 
     def _dens_enabled(self):
@@ -215,6 +217,10 @@ class DensTrainer(BaseTrainer):
                 datasets.append(frames)
             train_frames, valid_frames = datasets
             traj = train_frames + valid_frames
+            if isinstance(self.json_data.get('ntrain'), int):
+                # BaseTrainer fits the selected tail in source order, before
+                # the seeded permutation assigns train/valid membership.
+                traj = self._xyz_split_frames['all']
             if auto_element:
                 element = sorted(set(atom.number for atoms in traj for atom in atoms))
             enr_avg_per_element, uniq_element, variance = get_enr_avg_per_element(
@@ -565,25 +571,64 @@ class DensTrainer(BaseTrainer):
 
 
     def get_xyz_data_path(self):
+        if isinstance(self.json_data.get('ntrain'), int):
+            path = self.json_data.get('fname_traj')
+            ntrain = self.json_data['ntrain']
+            nvalid = self.json_data.get('nvalid')
+            if not isinstance(nvalid, int) or ntrain <= 0 or nvalid <= 0:
+                raise ValueError("Integer 'ntrain' and 'nvalid' must both be positive")
+            if path is None or not os.path.isfile(path):
+                raise ValueError(
+                    "'fname_traj' must be a file for integer 'ntrain'/'nvalid' "
+                    "(.extxyz, .xyz, .traj supported)"
+                )
+            if not getattr(self, '_xyz_split_frames', None):
+                frames = self._read_frames_cached(path, cache=self._dens_enabled())
+                nsamp = ntrain + nvalid
+                if len(frames) < nsamp:
+                    raise ValueError(
+                        f"Requested ntrain={ntrain} + nvalid={nvalid} frames "
+                        f"from {path}, but only {len(frames)} are available"
+                    )
+                traj = frames[-nsamp:]
+                generator = torch.Generator().manual_seed(
+                    self.json_data['NN']['data_seed']
+                )
+                idx = torch.randperm(nsamp, generator=generator).tolist()
+                self._xyz_split_frames = {
+                    'train': [traj[i] for i in idx[:ntrain]],
+                    'valid': [traj[i] for i in idx[ntrain:]],
+                    'all': traj,
+                }
+            return [(path, 'train')], [(path, 'valid')]
+
         def _list_xyzs(path, key):
             if path is None:
                 raise ValueError(
-                    f"'{key}' must be set to a .extxyz file or a directory of .extxyz files"
+                    f"'{key}' must be set to a file or a directory of "
+                    ".extxyz, .xyz or .traj files"
                 )
             if os.path.isdir(path):
-                return sorted(
+                files = sorted(
                     os.path.join(path, f)
                     for f in os.listdir(path)
-                    if f.endswith(".extxyz")
+                    if f.endswith((".extxyz", ".xyz", ".traj"))
+                    and os.path.isfile(os.path.join(path, f))
                 )
+                if not files:
+                    raise ValueError(
+                        f"No supported files for '{key}' in {path}; "
+                        "supported suffixes: .extxyz, .xyz, .traj"
+                    )
+                return files
             return [path]
 
         train_files = _list_xyzs(self.json_data.get('ntrain'), 'ntrain')
         valid_files = _list_xyzs(self.json_data.get('nvalid'), 'nvalid')
         return train_files, valid_files
 
-    def _read_frames_cached(self, xyz_file_path, cache=True):
-        """Parse an xyz file once per process and reuse the frames.
+    def _read_frames_cached(self, xyz_file_path, cache=True) -> list[Atoms]:
+        """Read an ASE file or an in-memory split shard, reusing frames.
 
         DeNS file-visits re-preprocess every time (fresh noise needs new
         neighbour lists) but must not re-READ from disk: on a shared
@@ -593,6 +638,12 @@ class DensTrainer(BaseTrainer):
         Set `cache_parsed_frames: false` (top level) to trade the ~few-KB/
         frame host memory back for re-reads.
         """
+        def _read_frames() -> list[Atoms]:
+            frames = read(xyz_file_path, index=slice(None))
+            return frames if isinstance(frames, list) else [frames]
+
+        if isinstance(xyz_file_path, tuple):
+            return self._xyz_split_frames[xyz_file_path[1]]
         if cache and self.json_data.get('cache_parsed_frames', True):
             store = getattr(self, '_xyz_frames_cache', None)
             if store is None:
@@ -600,10 +651,16 @@ class DensTrainer(BaseTrainer):
                 self._xyz_frames_cache = store
             frames = store.get(xyz_file_path)
             if frames is None:
-                frames = read(xyz_file_path, index=slice(None))
+                try:
+                    frames = _read_frames()
+                except (OSError, ValueError, EOFError) as exc:
+                    raise ValueError(f"Cannot read frames from {xyz_file_path}: {exc}") from exc
                 store[xyz_file_path] = frames
             return frames
-        return read(xyz_file_path, index=slice(None))
+        try:
+            return _read_frames()
+        except (OSError, ValueError, EOFError) as exc:
+            raise ValueError(f"Cannot read frames from {xyz_file_path}: {exc}") from exc
 
     def configure_dataloader_from_xyz(self, xyz_file_path, mode, dens=False):
         # DeNS loaders bypass the graph cache: the rattling noise must be
