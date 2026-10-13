@@ -223,15 +223,14 @@ class NLLLoss(torch.nn.Module):
             tgt_frc = targets['forces'] #.flatten()
             frc_var = preds['forces_var']
 
-            def map_lower_triangle(l):
-                return torch.tensor([
-                    [l[0], 0.0, 0.0],
-                    [l[5], l[1], 0.0],
-                    [l[4], l[3], l[2]],
-                ])
+            zero = torch.zeros_like(frc_var[:, 0])
+            frc_var_mapped = torch.stack([
+                torch.stack([frc_var[:, 0], zero, zero], dim=-1),
+                torch.stack([frc_var[:, 5], frc_var[:, 1], zero], dim=-1),
+                torch.stack([frc_var[:, 4], frc_var[:, 3], frc_var[:, 2]], dim=-1),
+            ], dim=-2)
             eps = 1e-3
             identity = torch.eye(3).to(frc_var.device)
-            frc_var_mapped = torch.stack([map_lower_triangle(l) for l in frc_var]).to(frc_var.device)
             frc_var_squared = torch.einsum('bij,bkj->bik', frc_var_mapped, frc_var_mapped)
             frc_var_squared += eps * identity
 

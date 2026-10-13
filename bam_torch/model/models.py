@@ -302,6 +302,7 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         # force-conditioning encoder and a noise-prediction head. Both are
         # dormant unless the input dict carries "dens_forces".
         dens: bool = False,
+        max_logvar: float = 8.0,
     ):
         super().__init__()
 
@@ -320,6 +321,7 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         hidden_irreps = hidden_irreps.sort().irreps
         self.hidden_irreps = hidden_irreps
         self.nlayers = nlayers
+        self.max_logvar = max_logvar
         interaction_cls = _resolve_race_interaction_block(interaction_block)
 
         # criterion drives the direct->auto force switch; forward() reads it,
@@ -648,9 +650,12 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
                 dim=-1,
                 dim_size=num_graphs,
             )
-        graph_energy_var = torch.exp(graph_logvar) 
+        graph_energy_var = torch.exp(
+            graph_logvar.clamp(min=-self.max_logvar, max=self.max_logvar)
+        )
 
         # Forces variance
+        node_f_logvar_ts = node_f_logvar_ts.clamp(-self.max_logvar, self.max_logvar)
         node_frc_var = torch.cat(
             [torch.exp(node_f_logvar_ts[:, :3]), node_f_logvar_ts[:, 3:]], 
             dim=1
