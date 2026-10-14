@@ -62,11 +62,12 @@ def validate_mve_config(config):
     configured_losses = config.get('NN', {}).get('loss_config', {})
     if configured_losses and any(configured_losses.get(key) != 'nll' for key in ('energy_loss', 'force_loss', 'stress_loss')):
         raise ValueError("MVE v1 requires Gaussian nll for energy, force and stress")
-    optional = ('target_norm', 'beta', 'epsilon', 'mask')
+    optional = ('target_norm', 'beta', 'epsilon', 'mask', 'energy_size_exponent', 'max_logvar')
     unknown = set(mve) - {'enabled', 'version', 'floors', 'units', 'controller', *optional}
     if unknown:
         raise ValueError(f"MVE does not support settings: {sorted(unknown)}")
-    for key in (*optional, 'controller', 'mve_target_norm', 'tracked_epsilon', 'stress_mask'):
+    for key in (*optional, 'controller', 'mve_target_norm', 'tracked_epsilon', 'stress_mask',
+                'logvar_n_alpha_init', 'logvar_n_alpha_learn'):
         if key in config or key in config.get('NN', {}):
             raise ValueError(f"MVE accepts {key} only under canonical mve settings (no aliases)")
     norm = mve.get('target_norm', {'enabled': False})
@@ -95,6 +96,15 @@ def validate_mve_config(config):
         raise ValueError('mve.mask.max_gpa must explicitly be 50 when enabled')
     if not mask['enabled'] and set(mask) != {'enabled'}:
         raise ValueError('disabled mve.mask cannot specify threshold')
+    size = mve.get('energy_size_exponent', {'init': 1.0, 'learn': True})
+    if (not isinstance(size, dict) or set(size) != {'init', 'learn'} or type(size['learn']) is not bool or
+            isinstance(size['init'], bool) or not isinstance(size['init'], (int, float)) or
+            not math.isfinite(size['init'])):
+        raise ValueError('mve.energy_size_exponent needs a finite init and a boolean learn')
+    max_logvar = mve.get('max_logvar', 8.0)
+    if (isinstance(max_logvar, bool) or not isinstance(max_logvar, (int, float)) or
+            not math.isfinite(max_logvar) or max_logvar <= 0):
+        raise ValueError('mve.max_logvar must be a positive finite number')
     controller = mve.get('controller', {'factor': 0.5, 'patience': 1, 'min_lr': 1e-8})
     if (not isinstance(controller, dict) or set(controller) != {'factor', 'patience', 'min_lr'} or
         not isinstance(controller['patience'], int) or isinstance(controller['patience'], bool) or controller['patience'] < 0 or
@@ -769,6 +779,10 @@ class BaseTrainer:
         model_params = inspect.signature(model_cls).parameters
         if mve_enabled:
             model_kwargs['mve'] = True
+            size = model_config['mve'].get('energy_size_exponent', {'init': 1.0, 'learn': True})
+            model_kwargs['energy_size_exponent_init'] = float(size['init'])
+            model_kwargs['energy_size_exponent_learn'] = size['learn']
+            model_kwargs['max_logvar'] = float(model_config['mve'].get('max_logvar', 8.0))
         # Only forward if the chosen model implements separated layer-norm
         if 'l_separated_layer_norm' in model_params:
             model_kwargs['l_separated_layer_norm'] = model_config.get(

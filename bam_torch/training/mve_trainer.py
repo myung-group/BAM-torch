@@ -22,6 +22,9 @@ from .target_norm import SCHEMA as STATS_SCHEMA, fit_train_stats, geometry_diges
 
 GPA_TO_EV_PER_A3 = 1 / 160.21766208
 TASKS = {'energy': 'e', 'forces': 'f', 'stress': 's'}
+# Checkpoints record which metric chose the best parameters; older physical-MSE
+# checkpoints are rejected rather than mixed with whitened selection values.
+SELECTION_POLICY = 'lambda-weighted-data-scale-whitened-mse'
 
 
 def mve_graphs(frames, cutoff, species, references, frame_ids=None, stress_mask_gpa=None):
@@ -272,8 +275,11 @@ class MVETrainer(BaseTrainer):
             raise ValueError('MVE epoch has no eligible E/F/S observations')
         metrics['loss'] = total
         metrics['counts'] = counts
-        metrics['residual_selection'] = sum(self.json_data['NN'].get({'e':'enr_lambda','f':'frc_lambda','s':'str_lambda'}[short], 1) * mse[key]
-                                             for key, short in TASKS.items() if mse[key] is not None)
+        # Selection/LR control uses the lambda-weighted data-scale-whitened
+        # residual MSE, so total-energy eV^2 of large cells cannot dominate.
+        metrics['residual_selection'] = sum(self.json_data['NN'].get({'e':'enr_lambda','f':'frc_lambda','s':'str_lambda'}[short], 1) * whitened[key]
+                                             for key, short in TASKS.items() if whitened[key] is not None)
+        metrics['physical_mse'] = mse
         metrics['whitened_mse'] = whitened
         return metrics, counts
 
@@ -326,8 +332,9 @@ class MVETrainer(BaseTrainer):
                 'counts': {short: counts[key] for key, short in TASKS.items()},
                 'count_s_unmasked': unmasked_stress,
                 'count_s_masked_out': unmasked_stress - counts['stress'],
-                'residual_selection': sum(self.json_data['NN'].get({'e':'enr_lambda','f':'frc_lambda','s':'str_lambda'}[short], 1) * residual[key]
-                                          for key, short in TASKS.items() if residual[key] is not None),
+                'residual_selection': sum(self.json_data['NN'].get({'e':'enr_lambda','f':'frc_lambda','s':'str_lambda'}[short], 1) * whitened[key]
+                                          for key, short in TASKS.items() if whitened[key] is not None),
+                'physical_mse': residual,
                 'whitened_mse': whitened}
 
     def _update_epsilon(self, valid):
@@ -365,6 +372,7 @@ class MVETrainer(BaseTrainer):
         best_epoch = self.best_epoch if self.best_params is not None else epoch
         manifest = {'schema': 'bam_torch.equivariant_mve.v2', 'version': 2,
                     'config_digest': self.config_digest, 'parameter_policy': 'raw-best',
+                    'residual_selection': SELECTION_POLICY,
                     'basis': 'e3nn-0e+2e', 'units': MVE_UNITS, 'floors': self.floors,
                     'stats_digest': stats_digest(self.train_stats)}
         torch.save({'manifest': manifest, 'input.json': deepcopy(self.canonical_config),
@@ -447,6 +455,7 @@ def load_mve_checkpoint(path, device='cpu'):
         raise ValueError('MVE checkpoint train statistics/provenance invalid')
     expected = {'schema': 'bam_torch.equivariant_mve.v2', 'version': 2,
                 'config_digest': mve_config_digest(config), 'parameter_policy': 'raw-best',
+                'residual_selection': SELECTION_POLICY,
                 'basis': 'e3nn-0e+2e', 'units': MVE_UNITS, 'floors': config['mve']['floors'],
                 'stats_digest': stats_digest(stats)}
     if manifest != expected or any(key not in checkpoint for key in
