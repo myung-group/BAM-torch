@@ -1,4 +1,6 @@
 import torch
+import math
+from e3nn.io import CartesianTensor
 import torch.distributed as dist
 from typing import Any, Callable, Dict, List, Optional, Type, Union, Tuple
 from bam_torch.utils.utils import apply_along_axis
@@ -193,71 +195,96 @@ class HuberLoss(torch.nn.Module):
         )
 
 
-class NLLLoss(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
+MVE_UNITS = {"energy": "eV^2", "forces": "(eV/Å)^2", "stress": "(eV/Å^3)^2"}
+MVE_FLOORS = {"energy": 1e-4, "forces": 1e-4, "stress": 1e-6}
 
-    def forward(
-        self, preds, targets, tag='stress', ddp: Optional[bool] = None
-    ) -> torch.Tensor:
 
-        # Energy
-        if tag == 'energy':
-            prd_enr = preds['energy'].flatten()
-            tgt_enr = targets['energy'].flatten()
-            enr_var = preds['energy_var']
+def stress_voigt_to_irrep(dtype=torch.float32, device="cpu"):
+    """ASE Voigt (xx, yy, zz, yz, xz, xy) -> orthonormal (0e, 2e).
 
-            diff_enr = (tgt_enr - prd_enr)
-            energy_term = (torch.einsum('i,i->i', diff_enr, diff_enr) / enr_var).mean()
-            energy_log_term = torch.log(enr_var).mean()
+    e3nn's CartesianTensor supplies the same normalized irrep basis used by
+    the 6x0e+6x2e stress generator; symmetric off-diagonals occur twice.
+    """
+    basis = CartesianTensor("ij=ji").reduced_tensor_products().change_of_basis.to(
+        dtype=dtype, device=device
+    )
+    tensors = torch.zeros(6, 3, 3, dtype=dtype, device=device)
+    tensors[0, 0, 0] = tensors[1, 1, 1] = tensors[2, 2, 2] = 1
+    for row, i, j in ((3, 1, 2), (4, 0, 2), (5, 0, 1)):
+        tensors[row, i, j] = tensors[row, j, i] = 1
+    return torch.einsum("aij,bij->ab", basis, tensors)
 
-            loss_dict = {
-                'loss_e': energy_term,
-                'log_e' : energy_log_term,
-                'enr_var': enr_var.mean(),
-            }
 
-        # Forces
-        if tag == 'forces' or tag == 'force':
-            prd_frc = preds['forces']
-            tgt_frc = targets['forces'] #.flatten()
-            frc_var = preds['forces_var']
+def assemble_effective_covariances(raw, floors, units=MVE_UNITS, adaptive=None, scales=None, atom_counts=None):
+    """Validate raw E/F/S covariance and add fixed plus optional adaptive floor once."""
+    if units != MVE_UNITS or set(floors) != set(MVE_UNITS):
+        raise ValueError("MVE covariance units or E/F/S floor keys do not match v1")
+    adaptive = adaptive or {key: 0.0 for key in MVE_UNITS}
+    if set(adaptive) != set(MVE_UNITS):
+        raise ValueError('MVE adaptive floor keys must be exactly E/F/S')
+    for key, factor in adaptive.items():
+        if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor < 0:
+            raise ValueError(f'MVE {key} adaptive floor must be finite and nonnegative')
+        if factor and (not isinstance(scales, dict) or key not in scales or
+                       not math.isfinite(scales[key]) or scales[key] <= 0):
+            raise ValueError(f'MVE {key} adaptive floor needs a positive train-only scale')
+    if adaptive['energy'] and (atom_counts is None or atom_counts.shape != raw['energy'].shape or
+                               not torch.isfinite(atom_counts).all() or (atom_counts <= 0).any()):
+        raise ValueError('MVE energy adaptive floor needs positive graph atom counts')
+    shapes = {"energy": (), "forces": (3, 3), "stress": (6, 6)}
+    result = {}
+    for key, trailing in shapes.items():
+        value = raw[key]
+        if not isinstance(value, torch.Tensor) or value.ndim != len(trailing) + 1 or value.shape[1:] != trailing:
+            raise ValueError(f"MVE {key}_var must have shape [observations{',' if trailing else ''}{','.join(map(str, trailing))}]")
+        if not torch.isfinite(value).all():
+            raise ValueError(f"MVE {key}_var contains nonfinite values")
+        floor = floors[key]
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)) or not math.isfinite(floor) or floor <= 0:
+            raise ValueError(f"MVE {key} floor must be strictly positive and finite")
+        if key == "energy":
+            if (value < 0).any():
+                raise ValueError("MVE raw energy variance must be nonnegative")
+            addition = adaptive[key] * (atom_counts * scales[key]).square() if adaptive[key] else 0.0
+            result[key] = value + floor + addition
+        else:
+            if not torch.allclose(value, value.transpose(-1, -2), atol=1e-6, rtol=1e-6):
+                raise ValueError(f"MVE raw {key} covariance must be symmetric")
+            if (torch.linalg.eigvalsh(value) < -1e-6).any():
+                raise ValueError(f"MVE raw {key} covariance must be positive semidefinite")
+            addition = adaptive[key] * scales[key] ** 2 if adaptive[key] else 0.0
+            result[key] = value + (floor + addition) * torch.eye(trailing[0], device=value.device, dtype=value.dtype)
+    return result
 
-            zero = torch.zeros_like(frc_var[:, 0])
-            frc_var_mapped = torch.stack([
-                torch.stack([frc_var[:, 0], zero, zero], dim=-1),
-                torch.stack([frc_var[:, 5], frc_var[:, 1], zero], dim=-1),
-                torch.stack([frc_var[:, 4], frc_var[:, 3], frc_var[:, 2]], dim=-1),
-            ], dim=-2)
-            eps = 1e-3
-            identity = torch.eye(3).to(frc_var.device)
-            frc_var_squared = torch.einsum('bij,bkj->bik', frc_var_mapped, frc_var_mapped)
-            frc_var_squared += eps * identity
 
-            diff_frc = (tgt_frc - prd_frc)
-            inv_cov = torch.linalg.inv(frc_var_squared)
-            force_term = torch.einsum('bi,bij,bj->b', diff_frc, inv_cov, diff_frc).mean()
-            _, force_log_term = torch.linalg.slogdet(frc_var_squared)
-            force_log_term = force_log_term.mean()
+def detached_beta_weights(covariance, beta, atom_counts=None, min_floor=1e-12):
+    """Per-task serial-global detached observation weights, mean exactly one."""
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(beta) or beta < 0:
+        raise ValueError('MVE beta must be finite and nonnegative')
+    if not math.isfinite(min_floor) or min_floor <= 0:
+        raise ValueError('MVE beta minimum scale must be positive')
+    if covariance.ndim == 1:
+        if atom_counts is None or atom_counts.shape != covariance.shape or (atom_counts <= 0).any():
+            raise ValueError('MVE energy beta needs positive graph atom counts')
+        variance = covariance / atom_counts.square()
+    elif covariance.ndim == 3:
+        variance = torch.diagonal(covariance, dim1=-2, dim2=-1).mean(-1)
+    else:
+        raise ValueError('MVE beta expects energy[G] or force/stress[N,d,d]')
+    if not len(variance) or beta == 0:
+        return torch.ones_like(variance).detach()
+    unnormalized = variance.detach().clamp(min=min_floor).pow(beta)
+    return (unnormalized / unnormalized.mean()).detach()
 
-            loss_dict = {
-                'loss_f': force_term,
-                'log_f' : force_log_term,
-                'frc_var': frc_var.mean(),
-            }
 
-        # Stress
-        if tag == 'stress':
-            if type(preds) == dict:
-                prd_sts = preds['stress'].flatten()
-                tgt_sts = targets['stress'].flatten()
-            else:
-                prd_sts = preds
-                tgt_sts = targets
-
-            diff_sts = (tgt_sts - prd_sts)
-            stress_term = torch.einsum('i,i->i', diff_sts, diff_sts).mean()
-
-            loss_dict = {'loss_s': stress_term}
-
-        return loss_dict
+def gaussian_observation_nll(residual, covariance):
+    """One Gaussian NLL per observation, including d log(2π)."""
+    if residual.ndim != 2 or covariance.shape != (residual.shape[0], residual.shape[1], residual.shape[1]):
+        raise ValueError("MVE residual/covariance observation dimensions disagree")
+    if not torch.isfinite(residual).all() or not torch.isfinite(covariance).all():
+        raise ValueError("MVE Gaussian residual and effective covariance must be finite")
+    chol = torch.linalg.cholesky(covariance)
+    whitened = torch.linalg.solve_triangular(chol, residual.unsqueeze(-1), upper=False)
+    quadratic = whitened.square().sum(dim=(-2, -1))
+    logdet = 2 * torch.log(torch.diagonal(chol, dim1=-2, dim2=-1)).sum(dim=-1)
+    return 0.5 * (quadratic + logdet + residual.shape[1] * math.log(2 * math.pi))

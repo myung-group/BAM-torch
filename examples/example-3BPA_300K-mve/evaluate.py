@@ -1,21 +1,18 @@
 from bam_torch.predicting.evaluator import Evaluator
-from bam_torch.utils.utils import find_input_json, date
-import json
-import torch
+from bam_torch.utils.utils import date
+import argparse
 
 
 if __name__ == '__main__':
-    print(date()) 
-    input_json_path = find_input_json()
-    torch.cuda.empty_cache()
-
-    with open(input_json_path) as f:
-        json_data = json.load(f)
-
-        if json_data['predict']:
-            evaluator = Evaluator(json_data)
-            evaluator.evaluate()
-        else:
-            print('we are making')
-
+    parser = argparse.ArgumentParser(description='MVE v1 CPU checkpoint prediction')
+    parser.add_argument('checkpoint')
+    parser.add_argument('prediction_file', help='ASE-readable geometries; labels optional')
+    parser.add_argument('--output', default='mve_predictions.json')
+    args = parser.parse_args()
+    print(date())
+    evaluator = Evaluator({'trainer': 'mve', 'predict': {
+        'model': args.checkpoint, 'fname_traj': args.prediction_file,
+        'uncertainty_output': args.output,
+    }})
+    evaluator.evaluate()
     print(date())

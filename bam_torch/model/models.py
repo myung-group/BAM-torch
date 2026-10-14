@@ -303,8 +303,20 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         # dormant unless the input dict carries "dens_forces".
         dens: bool = False,
         max_logvar: float = 8.0,
+        mve: bool = False,
     ):
         super().__init__()
+
+        self.mve = mve
+        if not mve and str(o3.Irreps(output_irreps)) in ("8x0e", "29x0e"):
+            raise ValueError("Legacy scalar MVE heads 8x0e/29x0e are unsupported; use explicit MVE v1")
+        if mve:
+            if str(o3.Irreps(output_irreps)) != "2x0e+3x1o+6x2e":
+                raise ValueError("MVE v1 requires output_channels='2x0e+3x1o+6x2e'")
+            if dens or "auto" not in regress_forces:
+                raise ValueError("MVE v1 requires autograd forces and disallows DeNS")
+            if not hidden_irreps.count(o3.Irrep("1o")) or not hidden_irreps.count(o3.Irrep("2e")):
+                raise ValueError("MVE v1 hidden_channels requires both 1o and 2e irreps")
 
         if active_fn in ["swish", "silu", "SiLU"]:
             self.act_fn = torch.nn.SiLU()
@@ -395,6 +407,9 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         self.readouts = torch.nn.ModuleList()
         self.force_decoders = torch.nn.ModuleList()
         self.stress_decoders = torch.nn.ModuleList()
+        if self.mve:
+            self.force_cov_decoders = torch.nn.ModuleList()
+            self.stress_cov_decoders = torch.nn.ModuleList()
 
         target_irreps = o3.Irreps(f"{hidden_irreps.count(o3.Irrep(0, 1))}x0e")
         for i in range(nlayers):
@@ -430,7 +445,7 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
                 irreps_in=hidden_irreps,
                 MLP_irreps="64x0e",
                 gate=gate,
-                irrep_out=output_irreps,
+                irrep_out="2x0e" if self.mve else output_irreps,
                 cueq_config=cueq_config,
                 biases=True
             )
@@ -452,6 +467,13 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
                 stress_decoder = torch.nn.Identity() 
             self.force_decoders.append(force_decoder)
             self.stress_decoders.append(stress_decoder)
+            if self.mve:
+                self.force_cov_decoders.append(LinearForceDecoderBlock(
+                    irreps_in=hidden_irreps, irrep_out="3x1o", cueq_config=cueq_config,
+                ))
+                self.stress_cov_decoders.append(LinearForceDecoderBlock(
+                    irreps_in=hidden_irreps, irrep_out="6x0e+6x2e", cueq_config=cueq_config,
+                ))
 
         if species_embedding_dim is not None:
             # Learnable per-layer mixing weights for the summed contributions
@@ -553,7 +575,8 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         sts_out = []
         outputs = []
         node_logvar = []
-        node_f_logvar = []
+        force_cov_columns = []
+        stress_cov_columns = []
         for ilayer, (interaction, product, readout, force_decoder, stress_decoder) in enumerate(zip(
                 self.interactions, self.products, self.readouts, self.force_decoders, self.stress_decoders
             )):
@@ -602,11 +625,16 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
                 sts_out.append(stress_decoder(node_feats))
 
             outputs.append(node_energies[:,0])
-            if str(self.output_irreps) == "2x0e":
+            if self.mve:
+                node_logvar.append(node_energies[:, 1])
+                force_cov_columns.append(self.force_cov_decoders[ilayer](node_feats).reshape(-1, 3, 3))
+                generators = self.stress_cov_decoders[ilayer](node_feats)
+                stress_cov_columns.append(torch.cat((
+                    generators[:, :6].unsqueeze(-1),
+                    generators[:, 6:].reshape(-1, 6, 5),
+                ), dim=-1))
+            elif str(self.output_irreps) == "2x0e":
                 node_logvar.append(node_energies[:,1])
-            elif str(self.output_irreps) == "8x0e":
-                node_logvar.append(node_energies[:,1])
-                node_f_logvar.append(node_energies[:,2:])
 
         # Weighted sum over per-layer energy contributions
         node_energy = torch.stack(outputs, dim=-1) # [nbatch*num_nodes, nlayers]
@@ -625,24 +653,10 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
             )
 
         node_logvar_ts = torch.zeros(node_feats.shape[0], device=node_energy.device)
-        node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), device=node_energy.device)
         # Uncertainty quantification
-        if str(self.output_irreps) == "8x0e":
+        if self.mve or str(self.output_irreps) == "2x0e":
             node_logvar_ts = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
             node_logvar_ts = node_logvar_ts.mean(dim=-1) # [nbatch*num_nodes]
-            # force variance L Voigt notation - xx, yy, zz, yz, xz, xy
-            node_f_logvar_ts = torch.stack(node_f_logvar, dim=-1) # [nbatch*num_nodes, 6, nlayers]
-            node_f_logvar_ts = node_f_logvar_ts.mean(dim=-1) # [nbatch*num_nodes, 6]
-        elif str(self.output_irreps) == "2x0e":
-            node_logvar_ts = torch.stack(node_logvar, dim=-1) # [nbatch*num_nodes, nlayers]
-            node_logvar_ts = node_logvar_ts.mean(dim=-1) # [nbatch*num_nodes]
-            node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), 
-                                           device=node_energy.device)
-        elif str(self.output_irreps) == "1x0e":
-            node_logvar_ts = torch.zeros(node_feats.shape[0], 
-                                         device=node_energy.device)
-            node_f_logvar_ts = torch.zeros((node_feats.shape[0], 6), 
-                                           device=node_energy.device)
         # Eenrgy variance
         graph_logvar = scatter_mean(
                 src=node_logvar_ts,
@@ -655,16 +669,24 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         )
 
         # Forces variance
-        node_f_logvar_ts = node_f_logvar_ts.clamp(-self.max_logvar, self.max_logvar)
-        node_frc_var = torch.cat(
-            [torch.exp(node_f_logvar_ts[:, :3]), node_f_logvar_ts[:, 3:]], 
-            dim=1
-        ).view(-1, 6)
+        if self.mve:
+            vectors = torch.cat(force_cov_columns, dim=1)
+            node_frc_var = torch.einsum('nki,nkj->nij', vectors, vectors)
+            generators = torch.cat(stress_cov_columns, dim=1)
+            graph_generators = scatter_mean(
+                generators.reshape(node_feats.shape[0], -1), data['batch'],
+                dim=0, dim_size=num_graphs,
+            ).reshape(num_graphs, -1, 6)
+            graph_stress_var = torch.einsum('gki,gkj->gij', graph_generators, graph_generators)
+        else:
+            node_frc_var = node_energy.new_tensor([1., 1., 1., 0., 0., 0.]).expand(node_feats.shape[0], 6)
 
         preds: Dict[str, Optional[torch.Tensor]] = {}
         preds["energy"] = graph_energy # total energy
         preds["energy_var"] = graph_energy_var
         preds["forces_var"] = node_frc_var
+        if self.mve:
+            preds["stress_var"] = graph_stress_var
         preds["node_energy"] = node_energy
         # DeNS: predict the rattling noise vector from the (conditioned)
         # final-layer node features.

@@ -13,6 +13,9 @@ import random
 import atexit
 import inspect
 import pprint
+import hashlib
+import json
+import math
 import numpy as np
 from contextlib import nullcontext
 from copy import deepcopy
@@ -29,6 +32,88 @@ from bam_torch.model.wrapper_ops import (
 )
 from bam_torch.model import MODEL_REGISTRY
 from .loss import RMSELoss, l2_regularization
+
+
+def mve_config_digest(config):
+    return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def validate_mve_config(config):
+    """Canonical v1 contract shared by training and checkpoint reconstruction."""
+    mve = config.get('mve')
+    if not isinstance(mve, dict) or mve.get('enabled') is not True:
+        raise ValueError("trainer=mve requires mve.enabled=true and mve.version=1")
+    if type(mve.get('version')) is not int or mve['version'] != 1:
+        raise ValueError("MVE requires explicit mve.version=1; legacy checkpoints are unsupported")
+    if config.get('trainer') != 'mve' or config.get('model', '').lower() != 'race':
+        raise ValueError("MVE v1 supports only trainer=mve with model=race")
+    if config.get('output_channels') != '2x0e+3x1o+6x2e':
+        raise ValueError("MVE v1 requires exact output_channels='2x0e+3x1o+6x2e'; legacy 8x0e/29x0e are unsupported")
+    if config.get('regress_forces') not in ('auto', 'autograd'):
+        raise ValueError("MVE v1 requires regress_forces=auto")
+    dens = config.get('dens', {})
+    if ((dens.get('enabled') if isinstance(dens, dict) else bool(dens)) or
+            config.get('gpu-parallel') or config.get('device') not in ('cpu', 'cuda')):
+        raise ValueError("MVE requires explicit cpu/cuda serial device and disallows DeNS/GPU parallel")
+    if config.get('NN', {}).get('ema') is not False or config.get('NN', {}).get('restart', False):
+        raise ValueError("MVE disallows EMA and legacy NN.restart; use distinct restart_from input/output")
+    if config.get('interaction_block', 'slow') != 'slow' or config.get('oeq_config', False) or config.get('cueq_config', False):
+        raise ValueError("MVE supports only slow e3nn interactions")
+    configured_losses = config.get('NN', {}).get('loss_config', {})
+    if configured_losses and any(configured_losses.get(key) != 'nll' for key in ('energy_loss', 'force_loss', 'stress_loss')):
+        raise ValueError("MVE v1 requires Gaussian nll for energy, force and stress")
+    optional = ('target_norm', 'beta', 'epsilon', 'mask')
+    unknown = set(mve) - {'enabled', 'version', 'floors', 'units', 'controller', *optional}
+    if unknown:
+        raise ValueError(f"MVE does not support settings: {sorted(unknown)}")
+    for key in (*optional, 'controller', 'mve_target_norm', 'tracked_epsilon', 'stress_mask'):
+        if key in config or key in config.get('NN', {}):
+            raise ValueError(f"MVE accepts {key} only under canonical mve settings (no aliases)")
+    norm = mve.get('target_norm', {'enabled': False})
+    if not isinstance(norm, dict) or set(norm) - {'enabled', 'external'} or type(norm.get('enabled')) is not bool:
+        raise ValueError('mve.target_norm requires enabled boolean and optional external stats path')
+    if 'external' in norm and (not norm['enabled'] or not isinstance(norm['external'], str) or not norm['external']):
+        raise ValueError('mve.target_norm.external needs enabled=true and a nonempty path')
+    beta = mve.get('beta', 0)
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(beta) or beta < 0:
+        raise ValueError('mve.beta must be a finite nonnegative number')
+    epsilon = mve.get('epsilon', {'enabled': False})
+    if not isinstance(epsilon, dict) or set(epsilon) - {'enabled', 'c', 'min'} or type(epsilon.get('enabled')) is not bool:
+        raise ValueError('mve.epsilon requires enabled boolean and optional c/min')
+    if epsilon['enabled']:
+        if any(not isinstance(epsilon.get(name), dict) or
+               set(epsilon[name]) != {'energy', 'forces', 'stress'} or
+               any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
+                   for v in epsilon[name].values()) for name in ('c', 'min')):
+            raise ValueError('mve.epsilon c/min require positive finite E/F/S values')
+    elif set(epsilon) != {'enabled'}:
+        raise ValueError('disabled mve.epsilon cannot supply c/min')
+    mask = mve.get('mask', {'enabled': False})
+    if not isinstance(mask, dict) or type(mask.get('enabled')) is not bool or set(mask) - {'enabled', 'max_gpa'}:
+        raise ValueError('mve.mask requires enabled boolean and optional max_gpa')
+    if mask['enabled'] and mask.get('max_gpa') != 50:
+        raise ValueError('mve.mask.max_gpa must explicitly be 50 when enabled')
+    if not mask['enabled'] and set(mask) != {'enabled'}:
+        raise ValueError('disabled mve.mask cannot specify threshold')
+    controller = mve.get('controller', {'factor': 0.5, 'patience': 1, 'min_lr': 1e-8})
+    if (not isinstance(controller, dict) or set(controller) != {'factor', 'patience', 'min_lr'} or
+        not isinstance(controller['patience'], int) or isinstance(controller['patience'], bool) or controller['patience'] < 0 or
+        any(isinstance(controller[name], bool) or not isinstance(controller[name], (int, float)) or
+            not math.isfinite(controller[name]) or controller[name] <= 0 for name in ('factor', 'min_lr')) or
+        controller['factor'] >= 1):
+        raise ValueError('mve.controller needs 0<factor<1, patience>=0 and positive min_lr')
+    if not isinstance(mve.get('floors'), dict):
+        raise ValueError("MVE v1 requires explicit mve.floors for energy, forces and stress")
+    from .loss import MVE_FLOORS, MVE_UNITS
+    if set(mve['floors']) != set(MVE_FLOORS):
+        raise ValueError("MVE v1 floors require exactly energy, forces, stress")
+    if mve.get('units') != MVE_UNITS:
+        raise ValueError("MVE v1 requires explicit canonical covariance units")
+    from .loss import assemble_effective_covariances
+    assemble_effective_covariances({
+        'energy': torch.zeros(1), 'forces': torch.zeros(1, 3, 3),
+        'stress': torch.zeros(1, 6, 6),
+    }, mve['floors'], mve['units'])
 
 
 class BaseTrainer:
@@ -611,6 +696,11 @@ class BaseTrainer:
 
     def set_model(self):
         model_config = self.json_data
+        mve_enabled = model_config.get('trainer') == 'mve' or bool(
+            isinstance(model_config.get('mve'), dict) and model_config['mve'].get('enabled')
+        )
+        if mve_enabled:
+            validate_mve_config(model_config)
 
         cutoff = model_config.get('cutoff', 6.0)
         num_species = model_config.get('num_species', 4)
@@ -638,7 +728,7 @@ class BaseTrainer:
         cueq_config = None
         oeq_config = None
 
-        if (cueq_request is None or cueq_request) and CUET_AVAILABLE:
+        if not mve_enabled and (cueq_request is None or cueq_request) and CUET_AVAILABLE:
             cueq_config = CuEquivarianceConfig(
                 enabled=True,
                 layout="ir_mul",
@@ -646,7 +736,7 @@ class BaseTrainer:
                 optimize_all=True,
             )
             self.msg += f'\nequiv. lib.:\n\033[33m -- CuEquivariance\033[0m\n'
-        elif oeq_request and OEQ_AVAILABLE:
+        elif not mve_enabled and oeq_request and OEQ_AVAILABLE:
             oeq_config = OEQConfig(
                 enabled=True,
                 optimize_all=True,
@@ -677,6 +767,8 @@ class BaseTrainer:
             cueq_config=cueq_config,
         )
         model_params = inspect.signature(model_cls).parameters
+        if mve_enabled:
+            model_kwargs['mve'] = True
         # Only forward if the chosen model implements separated layer-norm
         if 'l_separated_layer_norm' in model_params:
             model_kwargs['l_separated_layer_norm'] = model_config.get(

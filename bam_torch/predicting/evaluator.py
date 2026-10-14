@@ -3,10 +3,14 @@ import torch
 import gc
 import atexit
 import pprint
+import json
+from pathlib import Path
 from copy import deepcopy
 
 from bam_torch.utils.logger import Logger
 from bam_torch.training.base_trainer import BaseTrainer
+from bam_torch.training.mve_trainer import load_mve_checkpoint, mve_graphs
+from bam_torch.training.loss import MVE_UNITS, assemble_effective_covariances, stress_voigt_to_irrep
 from bam_torch.utils.utils import (
     get_dataloader_to_predict, 
     date, 
@@ -18,7 +22,10 @@ import numpy as np
 
 class Evaluator(BaseTrainer):
     def __init__(self, json_data, rank=0, world_size=1):
-        self.json_data = json_data
+        if json_data.get('trainer') == 'mve' or json_data.get('mve', {}).get('enabled'):
+            self._init_mve(json_data, rank, world_size)
+            return
+        self.json_data = deepcopy(json_data)
         self.json_data['NN']['restart'] = False
         self.json_data["predict"]["evaluate_tag"] = True
         self.json_data["nbatch"] = 1
@@ -30,6 +37,89 @@ class Evaluator(BaseTrainer):
             self.json_data["NN"]["loss_config"] = pd_config.get("loss_config")
 
         super().__init__(self.json_data, self.rank, self.world_size)
+
+    def _init_mve(self, runtime, rank, world_size):
+        if rank != 0 or world_size != 1:
+            raise ValueError("Phase 1 MVE evaluation requires serial CPU")
+        predict = deepcopy(runtime.get('predict', {}))
+        allowed = {'model', 'fname_traj', 'uncertainty_output'}
+        if set(predict) - allowed:
+            raise ValueError(f"MVE v1 prediction accepts only {sorted(allowed)}; unexpected: {sorted(set(predict) - allowed)}")
+        if not predict.get('model') or not predict.get('fname_traj'):
+            raise ValueError("MVE prediction requires checkpoint and predict.fname_traj")
+        checkpoint = load_mve_checkpoint(predict['model'])
+        self.model_ckpt = checkpoint
+        # Model construction sees the SAVED canonical configuration, never a
+        # mutated prediction request or a fresh copy of the training dataset.
+        self.json_data = deepcopy(checkpoint['input.json'])
+        for key, value in runtime.items():
+            if key not in ('trainer', 'predict') and (key not in self.json_data or value != self.json_data[key]):
+                raise ValueError(f"MVE prediction cannot override saved canonical setting {key}")
+        if runtime.get('trainer') != 'mve':
+            raise ValueError("MVE prediction requires trainer=mve")
+        self.json_data['predict'] = deepcopy(predict)
+        self.device, self.msg = torch.device('cpu'), ''
+        self.rank, self.world_size, self.ddp = 0, 1, False
+        self.model = self.set_model().to(self.device)
+        self.model.load_state_dict(checkpoint['params'], strict=True)
+        self.model.eval()
+        self.mve_prediction = True
+
+    def evaluate_mve(self):
+        from ase.io import read
+        from torch_geometric.loader import DataLoader
+
+        predict = self.json_data['predict']
+        frames = read(predict['fname_traj'], index=':')
+        if not frames:
+            raise ValueError("MVE prediction input contains no frames")
+        checkpoint = self.model_ckpt
+        graphs = mve_graphs(frames, self.json_data['cutoff'],
+                            checkpoint['uniq_element'], checkpoint['enr_avg_per_element'])
+        records = []
+        q = stress_voigt_to_irrep()
+        b = torch.linalg.inv(q)
+        measured = checkpoint['adaptive']['measured']
+        for graph in DataLoader(graphs, batch_size=1, shuffle=False):
+            preds = self.model(graph, backprop=False)
+            has_physical_stress = bool(graph['stress_geometry_valid'][0])
+            atom_counts = torch.bincount(graph['batch'], minlength=len(preds['energy'])).to(preds['energy'].dtype)
+            covariance = assemble_effective_covariances({
+                'energy': preds['energy_var'],
+                'forces': preds['forces_var'], 'stress': preds['stress_var'],
+            }, self.json_data['mve']['floors'], MVE_UNITS, measured,
+                checkpoint['train_stats']['scales'], atom_counts)
+            correction = sum(checkpoint['enr_avg_per_element'][int(index)]
+                             for index in graph['species'])
+            record = {
+                'frame_id': int(graph['frame_id'][0]),
+                'energy': preds['energy'].detach().reshape(-1).add(correction).tolist(),
+                'forces': preds['forces'].detach().tolist(),
+                'stress_geometry_valid': has_physical_stress,
+                'stress_voigt': preds['stress'].detach().reshape(-1, 6).tolist() if has_physical_stress else None,
+                'raw': {key: preds[key + '_var'].detach().tolist() if key != 'stress' or has_physical_stress else None
+                        for key in ('energy', 'forces', 'stress')},
+                'effective': {key: tensor.detach().tolist() if key != 'stress' or has_physical_stress else None
+                              for key, tensor in covariance.items()},
+                'stress_voigt_effective': (b @ covariance['stress'] @ b.T).detach().tolist() if has_physical_stress else None,
+            }
+            records.append(record)
+        manifest = checkpoint['manifest']
+        payload = {'schema': manifest['schema'], 'version': manifest['version'],
+                   'config_digest': manifest['config_digest'],
+                   'parameter_policy': manifest['parameter_policy'],
+                   'adaptive_floor_policy': 'measured-at-checkpoint-validation',
+                   'adaptive': checkpoint['adaptive'],
+                   'train_stats_provenance': {key: checkpoint['train_stats'][key]
+                                              for key in ('split_digest', 'source_digest')},
+                   'basis': {'stress_canonical': 'e3nn-0e+2e',
+                             'stress_mean': 'ASE-Voigt:xx,yy,zz,yz,xz,xy',
+                             'voigt_to_irrep': q.tolist(), 'voigt_derived': 'Q-inverse Sigma Q-inverse-transpose'},
+                   'units': manifest['units'], 'floors': manifest['floors'],
+                   'predictions': records}
+        output = Path(predict.get('uncertainty_output', 'mve_predictions.json'))
+        output.write_text(json.dumps(payload, indent=2))
+        return payload
 
     def setup(self):
         """Configure all core training components.
@@ -46,6 +136,8 @@ class Evaluator(BaseTrainer):
         self.log_config, self.log_interval, self.logger, self.fout = self.configure_logger()
 
     def evaluate(self, element_wise=True):
+        if getattr(self, 'mve_prediction', False):
+            return self.evaluate_mve()
         self.logger.print_logger_head()
         target = {}
         eval_loss_dict = {'loss':[],
