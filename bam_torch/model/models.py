@@ -303,6 +303,10 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         # dormant unless the input dict carries "dens_forces".
         dens: bool = False,
         max_logvar: float = 8.0,
+        # MVE energy variance size exponent alpha (energy_var ~ n**alpha);
+        # init=0 with learn=False gives the size-independent head.
+        energy_size_exponent_init: float = 1.0,
+        energy_size_exponent_learn: bool = True,
         mve: bool = False,
     ):
         super().__init__()
@@ -334,6 +338,17 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
         self.hidden_irreps = hidden_irreps
         self.nlayers = nlayers
         self.max_logvar = max_logvar
+        if mve:
+            # Total-energy error grows with graph size, but a mean-pooled
+            # per-atom log variance cannot. Give the energy variance that size
+            # dependence: energy_var = n**alpha * exp(mean per-atom logvar).
+            # alpha=1 is the independent per-atom error prior (2 would be fully
+            # correlated). Ported from the Hawk mp_vars-eq trainer, where the
+            # size-independent head collapsed on mixed-size MPTrj batches.
+            self.logvar_n_alpha = torch.nn.Parameter(
+                torch.tensor(float(energy_size_exponent_init)),
+                requires_grad=bool(energy_size_exponent_learn),
+            )
         interaction_cls = _resolve_race_interaction_block(interaction_block)
 
         # criterion drives the direct->auto force switch; forward() reads it,
@@ -664,6 +679,11 @@ class RACE(SkipSpeciesMixin, ProductBasisXFeatsMixin, torch.nn.Module):
                 dim=-1,
                 dim_size=num_graphs,
             )
+        if self.mve:
+            atoms_per_graph = torch.bincount(
+                data['batch'], minlength=num_graphs
+            ).to(graph_logvar.dtype).clamp(min=1)
+            graph_logvar = graph_logvar + self.logvar_n_alpha * torch.log(atoms_per_graph)
         graph_energy_var = torch.exp(
             graph_logvar.clamp(min=-self.max_logvar, max=self.max_logvar)
         )
