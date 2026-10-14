@@ -255,6 +255,73 @@ class PhaseTwoTests(unittest.TestCase):
         torch.testing.assert_close(with_adaptive['residual_selection'], valid['residual_selection'])
         self.assertNotAlmostEqual(float(with_adaptive['loss'].detach()), float(valid['loss'].detach()), places=5)
 
+    def test_energy_size_exponent_and_max_logvar_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            trajectory = directory/'train.extxyz'
+            write(trajectory, [fixture(), fixture(zero=True)], format='extxyz')
+            settings = config(trajectory, directory/'model.pt')
+            validate_mve_config(settings)
+            for bad in ({'energy_size_exponent': {'init': 1.0}},
+                        {'energy_size_exponent': {'init': True, 'learn': True}},
+                        {'energy_size_exponent': {'init': float('nan'), 'learn': True}},
+                        {'energy_size_exponent': {'init': 1.0, 'learn': 1}},
+                        {'max_logvar': 0}, {'max_logvar': True}, {'max_logvar': float('inf')}):
+                broken = copy.deepcopy(settings)
+                broken['mve'].update(bad)
+                with self.assertRaises(ValueError):
+                    validate_mve_config(broken)
+            for key, value in (('max_logvar', 12.0), ('logvar_n_alpha_init', 1.0),
+                               ('logvar_n_alpha_learn', True)):
+                for nested in (False, True):
+                    aliased = copy.deepcopy(settings)
+                    (aliased['NN'] if nested else aliased)[key] = value
+                    with self.assertRaisesRegex(ValueError, 'canonical mve'):
+                        validate_mve_config(aliased)
+            default = MVETrainer(copy.deepcopy(settings))
+            self.assertEqual(float(default.model.logvar_n_alpha.detach()), 1.0)
+            self.assertTrue(default.model.logvar_n_alpha.requires_grad)
+            self.assertEqual(default.model.max_logvar, 8.0)
+            settings['NN']['fname_pkl'] = str(directory/'other.pt')
+            settings['mve'].update(energy_size_exponent={'init': 0.5, 'learn': False}, max_logvar=12.0)
+            custom = MVETrainer(settings)
+            self.assertEqual(float(custom.model.logvar_n_alpha.detach()), 0.5)
+            self.assertFalse(custom.model.logvar_n_alpha.requires_grad)
+            self.assertEqual(custom.model.max_logvar, 12.0)
+
+    def test_selection_uses_lambda_weighted_whitened_not_physical_mse(self):
+        trainer = object.__new__(MVETrainer)
+        trainer.floors = dict(MVE_FLOORS)
+        trainer.train_stats = {'scales': {'energy': 2., 'forces': 4., 'stress': 5.}}
+        trainer.next_adaptive = {key: 0. for key in MVE_FLOORS}
+        trainer.json_data = {'mve': {'target_norm': {'enabled': True}, 'beta': 0},
+                             'NN': {'enr_lambda': 2, 'frc_lambda': 3, 'str_lambda': 5}}
+        q = stress_voigt_to_irrep()
+        target = {'batch': torch.tensor([0, 0, 1, 1, 1]),
+                  'energy': torch.tensor([8., 30.]),
+                  'forces': torch.tensor([[4., 0, 0]] * 5),
+                  'stress': torch.tensor([[5., 0, 0, 0, 0, 0], [0, 0, 0, 0, 5., 0]]),
+                  'energy_valid': torch.tensor([True, True]),
+                  'force_valid': torch.ones(5, dtype=torch.bool),
+                  'stress_original_valid': torch.tensor([True, True]),
+                  'stress_valid': torch.tensor([True, True])}
+        preds = {'energy': torch.zeros(2), 'forces': torch.zeros(5, 3),
+                 'stress': torch.zeros(2, 6), 'energy_var': torch.tensor([1., 3.]),
+                 'forces_var': torch.eye(3).expand(5, -1, -1).clone(),
+                 'stress_var': torch.eye(6).expand(2, -1, -1).clone()}
+        valid = trainer.compute_loss(preds, target, training=False)
+        whitened = (((torch.tensor([8., 30.]) / torch.tensor([2., 3.]) / 2.) ** 2).mean(),
+                    ((target['forces'] / 4.) ** 2).mean(),
+                    ((target['stress'] @ q.T / 5.) ** 2).mean())
+        physical = ((torch.tensor([8., 30.])) ** 2).mean(), (target['forces'] ** 2).mean(), \
+            ((target['stress'] @ q.T) ** 2).mean()
+        torch.testing.assert_close(valid['residual_selection'],
+                                   2 * whitened[0] + 3 * whitened[1] + 5 * whitened[2])
+        for key, expected in zip(MVE_FLOORS, physical):
+            torch.testing.assert_close(valid['physical_mse'][key], expected)
+        self.assertGreater(abs(float(valid['residual_selection']) -
+                               float(2 * physical[0] + 3 * physical[1] + 5 * physical[2])), 1.0)
+
     def test_tracking_uses_data_scales_and_validation_physical_nll(self):
         trainer = object.__new__(MVETrainer)
         trainer.floors = dict(MVE_FLOORS)

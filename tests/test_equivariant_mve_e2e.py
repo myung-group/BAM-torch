@@ -254,8 +254,20 @@ class SerialE2ETests(unittest.TestCase):
             self.assertTrue(np.isfinite(training['loss']) and np.isfinite(validation['loss']))
             trainer.save_checkpoint(checkpoint, 1, training, validation)
             self.assertTrue(checkpoint.is_file())
+            self.assertAlmostEqual(float(validation['residual_selection']),
+                                   float(sum(v for v in validation['whitened_mse'].values() if v is not None)),
+                                   places=6)
             stored = load_mve_checkpoint(checkpoint)
             self.assertEqual(stored['manifest']['parameter_policy'], 'raw-best')
+            self.assertEqual(stored['manifest']['residual_selection'],
+                             'lambda-weighted-data-scale-whitened-mse')
+            self.assertIn('logvar_n_alpha', stored['params'])
+            legacy = directory/'legacy-selection.pt'
+            older = torch.load(checkpoint, weights_only=True)
+            older['manifest'].pop('residual_selection')
+            torch.save(older, legacy)
+            with self.assertRaisesRegex(ValueError, 'manifest'):
+                load_mve_checkpoint(legacy)
             self.assertTrue(all(type(k) is int and type(v) is float
                                 for k, v in stored['enr_avg_per_element'].items()))
             with self.assertRaisesRegex(FileExistsError, 'overwrite'):

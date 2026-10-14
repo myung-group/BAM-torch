@@ -8,13 +8,13 @@ from bam_torch.model.models import RACE
 from bam_torch.training.loss import MVE_FLOORS, assemble_effective_covariances, gaussian_observation_nll, stress_voigt_to_irrep
 
 
-def tiny_model(mve=True):
+def tiny_model(mve=True, **kwargs):
     return RACE(cutoff=4., avg_num_neighbors=2, num_species=1, max_ell=1,
                 num_basis_func=4, hidden_irreps=o3.Irreps('4x0e+4x1o+4x2e'),
                 nlayers=1, features_dim=4,
                 output_irreps=o3.Irreps('2x0e+3x1o+6x2e' if mve else '1x0e'),
                 radial_MLP=[8], regress_forces='auto', interaction_block='slow',
-                mve=mve)
+                mve=mve, **kwargs)
 
 
 def tiny_graph():
@@ -30,6 +30,25 @@ def tiny_graph():
 
 
 class ModelTests(unittest.TestCase):
+    def test_energy_variance_size_exponent_and_max_logvar(self):
+        torch.manual_seed(7)
+        fixed = tiny_model(energy_size_exponent_init=0.0, energy_size_exponent_learn=False)
+        sized = tiny_model()
+        self.assertEqual(float(sized.logvar_n_alpha.detach()), 1.0)  # default alpha=1, learned
+        sized.load_state_dict({**fixed.state_dict(), 'logvar_n_alpha': torch.tensor(1.0)})
+        base = fixed(tiny_graph(), backprop=False)['energy_var']
+        scaled = sized(tiny_graph(), backprop=False)['energy_var']
+        torch.testing.assert_close(scaled, 3.0 * base)  # n=3 atoms, alpha=1
+        self.assertFalse(fixed.logvar_n_alpha.requires_grad)
+        self.assertTrue(sized.logvar_n_alpha.requires_grad)
+        sized(tiny_graph(), backprop=True)['energy_var'].sum().backward()
+        self.assertIsNotNone(sized.logvar_n_alpha.grad)
+        self.assertNotEqual(float(sized.logvar_n_alpha.grad), 0.0)
+        clamped = tiny_model(max_logvar=1e-3, energy_size_exponent_init=50.0)
+        self.assertLessEqual(float(clamped(tiny_graph(), backprop=False)["energy_var"].detach().max()),
+                             math.exp(1e-3) + 1e-6)
+        self.assertNotIn('logvar_n_alpha', tiny_model(mve=False).state_dict())
+
     def test_raw_covariance_and_autograd_means_and_decoder_gradients(self):
         torch.manual_seed(2026)
         model = tiny_model()
