@@ -24,7 +24,7 @@ import os
 from e3nn import o3
 from bam_torch.predicting.evaluator import Evaluator
 from bam_torch.utils.utils import find_input_json, date
-from bam_torch.model.models import RACEUnified
+from bam_torch.model.models import RACE, RACEUnified
 
 
 class MultiheadEvaluator(Evaluator):
@@ -142,27 +142,64 @@ class MultiheadEvaluator(Evaluator):
                     oeq_config.conv_fusion = "atomic"
                 print("  - Equivariant backend: OpenEquivariance")
 
-        # Create RACEUnified model
-        model = RACEUnified(
-            interaction_block=interaction_block,
-            cutoff=cutoff,
-            avg_num_neighbors=avg_num_neighbors,
-            num_species=num_species,
-            max_ell=max_ell,
-            num_basis_func=num_basis_func,
-            hidden_irreps=hidden_irreps,
-            nlayers=nlayers,
-            features_dim=features_dim,
-            output_irreps=output_irreps,
-            active_fn=active_fn,
-            radial_MLP=[64, 64],
-            MLP_irreps=mlp_irreps,
-            regress_forces=regress_forces,
-            compute_stress=True,
-            heads=heads,
-            cueq_config=cueq_config,
-            oeq_config=oeq_config,
-        )
+        # Architecture options BaseTrainer.set_model forwards; keep each
+        # model's own default when the checkpoint config omits the key.
+        arch_kwargs = {k: model_config[k] for k in
+                       ('radial_polynomial_p', 'l_separated_layer_norm')
+                       if k in model_config}
+        dens_arch_keys = ('species_embedding_dim', 'x_features_dim',
+                          'skip_species_dim', 'x_feats_per_layer',
+                          'x_feats_rms_norm')
+        if heads is None and any(k in model_config for k in dens_arch_keys):
+            # DeNS-era single-head "race" checkpoint: RACEUnified does not
+            # accept these options, so rebuild it like BaseTrainer.set_model.
+            arch_kwargs.update({k: model_config[k] for k in dens_arch_keys
+                                if k in model_config})
+            dens_config = model_config.get('dens', {})
+            arch_kwargs['dens'] = bool(
+                dens_config.get('enabled', False)
+                if isinstance(dens_config, dict) else dens_config
+            )
+            model = RACE(
+                interaction_block=interaction_block,
+                cutoff=cutoff,
+                avg_num_neighbors=avg_num_neighbors,
+                num_species=num_species,
+                max_ell=max_ell,
+                num_basis_func=num_basis_func,
+                hidden_irreps=hidden_irreps,
+                nlayers=nlayers,
+                features_dim=features_dim,
+                output_irreps=output_irreps,
+                active_fn=active_fn,
+                regress_forces=regress_forces,
+                cueq_config=cueq_config,
+                oeq_config=oeq_config,
+                **arch_kwargs,
+            )
+        else:
+            # Create RACEUnified model
+            model = RACEUnified(
+                interaction_block=interaction_block,
+                cutoff=cutoff,
+                avg_num_neighbors=avg_num_neighbors,
+                num_species=num_species,
+                max_ell=max_ell,
+                num_basis_func=num_basis_func,
+                hidden_irreps=hidden_irreps,
+                nlayers=nlayers,
+                features_dim=features_dim,
+                output_irreps=output_irreps,
+                active_fn=active_fn,
+                radial_MLP=[64, 64],
+                MLP_irreps=mlp_irreps,
+                regress_forces=regress_forces,
+                compute_stress=True,
+                heads=heads,
+                cueq_config=cueq_config,
+                oeq_config=oeq_config,
+                **arch_kwargs,
+            )
         
         # Load weights: raw `params` provide buffers + structure; the EMA weights
         # (deployment weights) are applied on top when present. EMA may be stored
