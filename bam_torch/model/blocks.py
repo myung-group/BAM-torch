@@ -23,7 +23,10 @@ from bam_torch.model.wrapper_ops import (
     Linear,
     SymmetricContractionWrapper,
     TensorProduct,
-    FullTensorProduct
+    FullTensorProduct,
+    TransposeIrrepsLayoutWrapper,
+    cueq_layout,
+    ir_mul_merge_index,
 )
 from bam_torch.utils.irreps_tools import (
     linear_out_irreps,
@@ -190,6 +193,16 @@ class InteractionBlock(torch.nn.Module):
 
         self._setup()
 
+    def _register_mid_merge(self, irreps_mid: o3.Irreps) -> None:
+        """Prepare the regather from the conv_tp output (`irreps_mid`) to the
+        simplified irreps the following linear expects. Only cueq's ir_mul
+        layout needs it; the index is not saved in checkpoints."""
+        index = ir_mul_merge_index(irreps_mid, self.cueq_config)
+        self.merge_mid = index is not None
+        if index is None:
+            index = torch.zeros(0, dtype=torch.long)
+        self.register_buffer("mid_merge_index", index, persistent=False)
+
     @abstractmethod
     def _setup(self) -> None:
         raise NotImplementedError
@@ -290,6 +303,7 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
             torch.nn.functional.silu,
         )
         # Linear
+        self._register_mid_merge(irreps_mid)
         irreps_mid = irreps_mid.simplify()
         self.irreps_out = linear_out_irreps(irreps_mid, self.target_irreps)
         self.irreps_out = self.irreps_out.simplify()
@@ -329,6 +343,8 @@ class AgnosticResidualNonlinearInteractionBlock(InteractionBlock):
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, irreps]
+        if self.merge_mid:
+            message = message.index_select(1, self.mid_merge_index)
         message = self.linear(message) / self.avg_num_neighbors
         message = message + sc
 
@@ -398,6 +414,15 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         )
         concatenated_irreps = self.concatenate_irreps_tensor.get_concatenated_irreps()
         self.tensor_regroup_by_irreps = TensorRegroupByIrreps(concatenated_irreps)
+        # The message ops between linear_up and linear_down are plain e3nn
+        # (mul_ir); under cueq transpose into and out of them.
+        layout = cueq_layout(self.cueq_config)
+        self.transpose_up = TransposeIrrepsLayoutWrapper(
+            self.target_irreps, layout, "mul_ir", self.cueq_config
+        )
+        self.transpose_down = TransposeIrrepsLayoutWrapper(
+            self.irreps_out, "mul_ir", layout, self.cueq_config
+        )
 
     def forward(
         self,
@@ -424,6 +449,8 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         if not torch.jit.is_scripting() and self.l_separated_layer_norm:
             node_feats = self.separated_layer_norm(node_feats)
         node_feats = self.linear_up(node_feats)
+        if self.transpose_up is not None:
+            node_feats = self.transpose_up(node_feats)
         mix = self.conv_tp_weights(edge_feats)  # tp_weights
         if edge_cutoff is not None:
             mix = mix * edge_cutoff
@@ -439,6 +466,8 @@ class ConcatenateRaceInteractionBlock(InteractionBlock):
         message = scatter_sum(
             src=mji, index=receiver, dim=0, dim_size=num_nodes
         )  # [n_nodes, irreps]
+        if self.transpose_down is not None:
+            message = self.transpose_down(message)
         message = message * self.inv_sqrt_avg_num_neighbors
         message = self.linear_down(message) * self.inv_sqrt_avg_num_neighbors
 
@@ -497,6 +526,7 @@ class RaceInteractionBlock(InteractionBlock):
             torch.nn.functional.silu,
         )
         # Last linear
+        self._register_mid_merge(irreps_mid)
         self.irreps_out = irreps_mid.simplify()
         self.linear_down = Linear(
             self.irreps_out,
@@ -555,6 +585,8 @@ class RaceInteractionBlock(InteractionBlock):
             message = scatter_sum(
                 src=mji, index=receiver, dim=0, dim_size=num_nodes
             )  # [n_nodes, irreps]
+        if self.merge_mid:
+            message = message.index_select(1, self.mid_merge_index)
         message = message * self.inv_sqrt_avg_num_neighbors
         message = self.linear_down(message) * self.inv_sqrt_avg_num_neighbors
 
@@ -628,6 +660,15 @@ class RaceEquivariantBlock(torch.nn.Module):
             node_feats_irreps_1,
             node_feats_irreps_2
         )
+        # conv_tp is plain e3nn (mul_ir); under cueq the features arrive in
+        # cueq's layout, so transpose around it (None when layouts agree).
+        layout = cueq_layout(cueq_config)
+        self.transpose_in = TransposeIrrepsLayoutWrapper(
+            node_feats_irreps_2, layout, "mul_ir", cueq_config
+        )
+        self.transpose_out = TransposeIrrepsLayoutWrapper(
+            self.conv_tp.irreps_out, "mul_ir", layout, cueq_config
+        )
         self.use_sc = use_sc
         # Update linear
         self.linear = Linear(
@@ -645,7 +686,11 @@ class RaceEquivariantBlock(torch.nn.Module):
         sc: Optional[torch.Tensor],
     ) -> torch.Tensor:
 
+        if self.transpose_in is not None:
+            node_feats = self.transpose_in(node_feats)
         node_feats = self.conv_tp(x_node_feats, node_feats, None)
+        if self.transpose_out is not None:
+            node_feats = self.transpose_out(node_feats)
         if self.use_sc and sc is not None:
             node_feats = self.linear(node_feats) + sc
             return node_feats

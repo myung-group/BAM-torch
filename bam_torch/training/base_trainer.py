@@ -21,6 +21,11 @@ from time import time
 from bam_torch.utils.logger import Logger
 from bam_torch.utils.scheduler import LRScheduler
 from bam_torch.utils.utils import get_dataloader, date, on_exit
+from bam_torch.utils.checkpoint import (
+    match_ema_state,
+    match_optimizer_state,
+    match_state_dict,
+)
 from bam_torch.model.wrapper_ops import (
     CuEquivarianceConfig,
     OEQConfig,
@@ -562,7 +567,7 @@ class BaseTrainer:
             )
             start_epoch = model_ckpt['loss']['epoch']
             try:
-                model.load_state_dict(model_ckpt['params'])
+                model.load_state_dict(match_state_dict(model_ckpt['params'], model))
                 if self.ddp:
                     # Use local rank for device_ids in multi-node setup
                     local_rank = self.rank % torch.cuda.device_count()
@@ -586,7 +591,7 @@ class BaseTrainer:
                 map_location=self.device,
                 weights_only=False
             )
-            model.load_state_dict(model_ckpt['params'])
+            model.load_state_dict(match_state_dict(model_ckpt['params'], model))
             model.eval()
             self.msg += f'\n\033[32musing the {evaluate_config["model"]}\033[0m\n'
 
@@ -724,7 +729,9 @@ class BaseTrainer:
         model_config = self.json_data['NN']
         restart = model_config.get('restart')
         if restart and self.model_ckpt is not None:
-            optimizer.load_state_dict(self.model_ckpt['opt_state'])
+            optimizer.load_state_dict(
+                match_optimizer_state(self.model_ckpt['opt_state'], self.model)
+            )
         return optimizer
 
     def set_optimizer(self):
@@ -817,7 +824,9 @@ class BaseTrainer:
                 and ema is not None \
                 and self.model_ckpt is not None \
                 and self.model_ckpt.get('ema_state') is not None:
-            ema.load_state_dict(self.model_ckpt['ema_state'])
+            ema.load_state_dict(
+                match_ema_state(self.model_ckpt['ema_state'], self.model)
+            )
             if evaluate:
                 ema.copy_to(self.model.parameters())
         return ema

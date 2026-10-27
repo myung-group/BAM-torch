@@ -20,6 +20,7 @@ from bam_torch.utils.sampler import (
     DistributedBalancedAtomCountBatchSampler,
 )
 from bam_torch.utils.utils import data_to_dict, date
+from bam_torch.utils.checkpoint import match_state_dict
 
 import atexit
 from torch.utils.data import Dataset, DataLoader as TorchLoader
@@ -420,7 +421,7 @@ class MPTrainer_V2(BaseTrainer):
             model_ckpt = torch.load(model_config["fname_pkl"])
             start_epoch = model_ckpt['loss']['epoch']
             try:
-                model.load_state_dict(model_ckpt['params'])
+                model.load_state_dict(match_state_dict(model_ckpt['params'], model))
                 if self.ddp:
                     # Use local rank for device_ids in multi-node setup
                     local_rank = int(os.environ.get('SLURM_LOCALID', self.rank % torch.cuda.device_count()))
@@ -440,7 +441,7 @@ class MPTrainer_V2(BaseTrainer):
             rank = 0
             start_epoch = 0
             model_ckpt = torch.load(evaluate_config["model"], map_location=self.device)
-            model.load_state_dict(model_ckpt['params'])
+            model.load_state_dict(match_state_dict(model_ckpt['params'], model))
             model.eval()
             self.msg = f'\n\033[32mevaluating the {evaluate_config["model"]}\033[0m\n'
 

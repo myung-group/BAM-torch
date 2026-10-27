@@ -439,3 +439,39 @@ class TransposeIrrepsLayoutWrapper:
                 use_fallback=True,
             )
         return None
+
+
+def cueq_layout(cueq_config: Optional[CuEquivarianceConfig] = None) -> str:
+    """Layout of the features between modules: cueq's when it is active,
+    otherwise e3nn's mul_ir."""
+    if CUET_AVAILABLE and cueq_config is not None and cueq_config.enabled:
+        return cueq_config.layout_str
+    return "mul_ir"
+
+
+def ir_mul_merge_index(
+    irreps: o3.Irreps,
+    cueq_config: Optional[CuEquivarianceConfig] = None,
+) -> Optional[torch.Tensor]:
+    """Gather index taking features laid out as `irreps` to `irreps.simplify()`.
+
+    Merging repeated irreps (e.g. 128x1o+128x1o -> 256x1o) leaves mul_ir data
+    unchanged, but ir_mul stores each block as [ir.dim, mul], so the merged
+    block has to be regathered. Returns None when nothing needs to move.
+    """
+    irreps = o3.Irreps(irreps)
+    if cueq_layout(cueq_config) != "ir_mul" or irreps == irreps.simplify():
+        return None
+    offsets = np.cumsum([0] + [mul * ir.dim for mul, ir in irreps]).tolist()
+    index = []
+    start = 0
+    while start < len(irreps):
+        end = start
+        while end < len(irreps) and irreps[end].ir == irreps[start].ir:
+            end += 1
+        for m in range(irreps[start].ir.dim):
+            for i in range(start, end):
+                mul = irreps[i].mul
+                index.extend(range(offsets[i] + m * mul, offsets[i] + (m + 1) * mul))
+        start = end
+    return torch.tensor(index, dtype=torch.long)

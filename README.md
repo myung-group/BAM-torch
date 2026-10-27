@@ -441,6 +441,22 @@ and which equivariant library was selected (`equiv. lib.: -- OpenEquivariance`)
 at startup. Note that backend selection follows `cueq → oeq → e3nn`, so set
 `cueq_config: false` to fall through to OEQ.
 
+RACE checkpoints are interchangeable between e3nn, OpenEquivariance and
+cuEquivariance: a model trained with one backend can be resumed, evaluated,
+run in MD or exported for LAMMPS with another. The weights are reshaped on
+load; outputs agree to float32 precision. MACE checkpoints are not converted
+(its symmetric contraction stores weights differently per backend).
+
+Models trained with cuEquivariance before this was fixed were not
+rotation-equivariant: the cuEquivariance layout (`ir_mul`) was fed to e3nn
+operations expecting `mul_ir`. Retrain such checkpoints.
+
+With OpenEquivariance 0.7.0 and `oeq_conv_fusion: false`, we saw wrong forces:
+the gradient with respect to the edge spherical harmonics was off by ~10% in a
+layer where some spherical-harmonic order feeds no tensor-product path (the
+first layer with `max_ell: 3` and `hidden_channels` up to `2e`). The fused path
+(`oeq_conv_fusion: true`), e3nn and cuEquivariance were correct.
+
 ## Datasets
 
 - **QM9**: Small organic molecules and their quantum properties

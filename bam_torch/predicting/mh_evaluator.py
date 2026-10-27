@@ -24,6 +24,7 @@ import os
 from e3nn import o3
 from bam_torch.predicting.evaluator import Evaluator
 from bam_torch.utils.utils import find_input_json, date
+from bam_torch.utils.checkpoint import match_ema_state, match_state_dict
 from bam_torch.model.models import RACE, RACEUnified
 
 
@@ -75,14 +76,19 @@ class MultiheadEvaluator(Evaluator):
         # Get model config from checkpoint or current json_data
         model_config = ckpt_input_json if ckpt_input_json else self.json_data
         
-        hidden_irreps = o3.Irreps(model_config.get('hidden_channels', self.json_data['hidden_channels']))
-        features_dim = model_config.get('features_dim', self.json_data['features_dim'])
-        nlayers = model_config.get('nlayers', self.json_data['nlayers'])
-        cutoff = model_config.get('cutoff', self.json_data['cutoff'])
-        num_basis_func = model_config.get('num_radial_basis', self.json_data['num_radial_basis'])
-        max_ell = model_config.get('max_ell', self.json_data['max_ell'])
-        avg_num_neighbors = model_config.get('avg_num_neighbors', self.json_data['avg_num_neighbors'])
-        num_species = model_config.get('num_species', self.json_data['num_species'])
+        # Fallbacks match BaseTrainer.set_model, so a checkpoint whose config
+        # omits a key is rebuilt with the value it was trained with.
+        def arch(key, default):
+            return model_config.get(key, self.json_data.get(key, default))
+
+        hidden_irreps = o3.Irreps(arch('hidden_channels', "64x0e+64x1o+64x2e"))
+        features_dim = arch('features_dim', 64)
+        nlayers = arch('nlayers', 3)
+        cutoff = arch('cutoff', 6.0)
+        num_basis_func = arch('num_radial_basis', 8)
+        max_ell = arch('max_ell', 3)
+        avg_num_neighbors = arch('avg_num_neighbors', 30)
+        num_species = arch('num_species', 4)
         
         output_irreps = model_config.get('output_channels', "1x0e")
         active_fn = model_config.get('active_fn', "identity")
@@ -150,16 +156,19 @@ class MultiheadEvaluator(Evaluator):
         dens_arch_keys = ('species_embedding_dim', 'x_features_dim',
                           'skip_species_dim', 'x_feats_per_layer',
                           'x_feats_rms_norm')
-        if heads is None and any(k in model_config for k in dens_arch_keys):
-            # DeNS-era single-head "race" checkpoint: RACEUnified does not
-            # accept these options, so rebuild it like BaseTrainer.set_model.
+        dens_config = model_config.get('dens', {})
+        dens_enabled = bool(
+            dens_config.get('enabled', False)
+            if isinstance(dens_config, dict) else dens_config
+        )
+        if heads is None and (dens_enabled
+                              or any(k in model_config for k in dens_arch_keys)):
+            # DeNS-era single-head "race" checkpoint: RACEUnified has neither
+            # these options nor the DeNS heads, so rebuild it like
+            # BaseTrainer.set_model.
             arch_kwargs.update({k: model_config[k] for k in dens_arch_keys
                                 if k in model_config})
-            dens_config = model_config.get('dens', {})
-            arch_kwargs['dens'] = bool(
-                dens_config.get('enabled', False)
-                if isinstance(dens_config, dict) else dens_config
-            )
+            arch_kwargs['dens'] = dens_enabled
             model = RACE(
                 interaction_block=interaction_block,
                 cutoff=cutoff,
@@ -204,17 +213,17 @@ class MultiheadEvaluator(Evaluator):
         # Load weights: raw `params` provide buffers + structure; the EMA weights
         # (deployment weights) are applied on top when present. EMA may be stored
         # either as a ready `ema_params` state_dict or as torch_ema `ema_state`.
-        model.load_state_dict(ckpt['params'], strict=False)
+        model.load_state_dict(match_state_dict(ckpt['params'], model), strict=False)
         ema_state = ckpt.get('ema_state')
         if 'ema_params' in ckpt:
-            model.load_state_dict(ckpt['ema_params'], strict=False)
+            model.load_state_dict(match_state_dict(ckpt['ema_params'], model), strict=False)
             print("  - Using EMA parameters for evaluation (recommended for inference)")
         elif ema_state is not None and ema_state.get('shadow_params'):
             from torch_ema import ExponentialMovingAverage
             ema = ExponentialMovingAverage(
                 model.parameters(), decay=ema_state.get('decay', 0.999)
             )
-            ema.load_state_dict(ema_state)
+            ema.load_state_dict(match_ema_state(ema_state, model))
             ema.copy_to(model.parameters())
             print("  - Using EMA parameters (from ema_state) for evaluation")
         else:

@@ -35,6 +35,7 @@ from e3nn import o3
 from copy import deepcopy
 
 from bam_torch.model.models import RACE
+from bam_torch.utils.checkpoint import match_state_dict
 from bam_torch.model.wrapper_ops import (
     CuEquivarianceConfig,
     OEQConfig,
@@ -181,7 +182,11 @@ def recreate_model_pt_from_pkl(
     # aren't in an OEQ checkpoint can be auto-initialized at build time.
     # All trained weights (the layer*.weight family) ARE shared between
     # backends and must match — guard against silently dropping any.
-    result = model.load_state_dict(state_dict, strict=False)
+    # match_state_dict reshapes cueq-stored weights ([1, N]) for e3nn/OEQ
+    # and back.
+    result = model.load_state_dict(
+        match_state_dict(state_dict, model), strict=False
+    )
     if result.unexpected_keys:
         raise RuntimeError(
             "Unexpected keys in checkpoint that the rebuilt model cannot "
